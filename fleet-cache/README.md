@@ -1,6 +1,6 @@
 # fleet-cache
 
-Part of the `fleet` suite (see `../docs/CONTRACT.md` and `../GOAL.md`). A
+Part of the `fleet` suite (see `../docs/CONTRACT.md`). A
 `node_modules` hardlink cache keyed by the sha256 hash of a repo's
 `package-lock.json`, so repeated `npm ci` across many git worktrees of the
 same repo (same lockfile) don't redundantly reinstall — instead a cached

@@ -3,9 +3,8 @@ package main
 import "fmt"
 
 // runSwitch implements `fleet-run switch --to <ticket>`: stop every window
-// currently running in the fixed session (since only one ticket's app set
-// is meant to be live at a time, per GOAL.md's "switch which set of
-// applications is running"), then run the same selection+start flow as
+// currently running in the fixed session (only one ticket's app set is
+// meant to be live at a time), then run the same selection+start flow as
 // `start --ticket <to>`.
 //
 // This calls killAllWindowsInSession and startFlow directly rather than

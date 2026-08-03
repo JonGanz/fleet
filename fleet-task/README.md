@@ -6,7 +6,7 @@ pipelines) can be worked in parallel without their working trees
 conflicting. It's one of three independent CLIs (`fleet-task`, `fleet-run`,
 `fleet-cache`) in the fleet suite; see `../docs/CONTRACT.md` for the full
 shared contract (paths, `repos.yaml` schema, state file format, hook
-conventions) and `../GOAL.md` for background.
+conventions).
 
 ## Commands
 

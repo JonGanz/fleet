@@ -84,8 +84,8 @@ instead and never needs full decomposition.
 ### `fleet-run switch --to <ticket>`
 
 Equivalent to stopping *every* window currently running in the session
-(only one ticket's app set is meant to be live at a time — see GOAL.md),
-then running the same selection+start flow as `start --ticket <to>`. This is
+(only one ticket's app set is meant to be live at a time), then running
+the same selection+start flow as `start --ticket <to>`. This is
 implemented as a direct in-process call to the internal
 `killAllWindowsInSession` + `startFlow` functions, not by shelling out to its
 own binary.

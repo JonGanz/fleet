@@ -125,5 +125,5 @@ currently exist" by globbing `tasks/*.json` — never by reading a single aggreg
   fj() { local d; d=$(fleet-task jump) && cd "$d"; }
   ```
 - All three CLIs support `--json` on read commands (`list`, `jump` uses plain stdout since it's a
-  single path meant for `cd`) so they can be piped into `jq`/`fzf` by users directly, per the
-  "support piping one thing to another" goal in GOAL.md.
+  single path meant for `cd`) so they can be piped into `jq`/`fzf` by users directly, in keeping
+  with composing these tools as plain Unix pieces rather than a monolith.
