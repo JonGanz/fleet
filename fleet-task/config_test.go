@@ -103,3 +103,56 @@ func TestLoadReposConfig(t *testing.T) {
 		t.Errorf("repoNames() = %v", names)
 	}
 }
+
+const defaultsFixtureYAML = `
+defaults:
+  default_branch: main
+  base_root: ~/dev/.fleet-base
+
+repos:
+  - name: backend
+    origin: git@github.com:org/backend.git
+    run:
+      - name: api
+        cmd: "npm run start:dev"
+
+  - name: admin-ui
+    origin: git@github.com:org/admin-ui.git
+    base: ~/dev/.fleet-base/admin-ui-custom
+    default_branch: develop
+    run:
+      - name: dev
+        cmd: "npm run dev"
+`
+
+func TestLoadReposConfigAppliesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFixture(t, dir, "repos.yaml", defaultsFixtureYAML)
+
+	cfg, err := loadReposConfig(p)
+	if err != nil {
+		t.Fatalf("loadReposConfig: %v", err)
+	}
+
+	backend := cfg.findRepo("backend")
+	if backend == nil {
+		t.Fatal("findRepo(backend) = nil")
+	}
+	if backend.Base != "~/dev/.fleet-base/backend" {
+		t.Errorf("backend.Base = %q, want default-derived path", backend.Base)
+	}
+	if backend.DefaultBranch != "main" {
+		t.Errorf("backend.DefaultBranch = %q, want %q", backend.DefaultBranch, "main")
+	}
+
+	adminUI := cfg.findRepo("admin-ui")
+	if adminUI == nil {
+		t.Fatal("findRepo(admin-ui) = nil")
+	}
+	if adminUI.Base != "~/dev/.fleet-base/admin-ui-custom" {
+		t.Errorf("adminUI.Base = %q, want explicit value preserved", adminUI.Base)
+	}
+	if adminUI.DefaultBranch != "develop" {
+		t.Errorf("adminUI.DefaultBranch = %q, want explicit value preserved", adminUI.DefaultBranch)
+	}
+}

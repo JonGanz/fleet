@@ -27,11 +27,13 @@ tmux:
 
 worktree_root: ~/.local/state/fleet/worktrees   # optional override of the default state-dir location
 
+defaults:                                       # optional; fills in blank per-repo fields below
+  default_branch: main                          # used when a repo omits `default_branch`
+  base_root: ~/dev/.fleet-base                  # used when a repo omits `base`: base = <base_root>/<repo-name>
+
 repos:
   - name: backend
     origin: git@github.com:org/backend.git      # git remote URL fleet-task clones from on first use
-    base: ~/dev/.fleet-base/backend              # shared bare clone; every worktree branches off this
-    default_branch: main
     runtime: linux                                # linux | windows
     run:
       - name: api
@@ -41,8 +43,8 @@ repos:
 
   - name: admin-ui
     origin: git@github.com:org/admin-ui.git
-    base: ~/dev/.fleet-base/admin-ui
-    default_branch: main
+    base: ~/dev/.fleet-base/admin-ui-custom       # explicit `base` overrides defaults.base_root
+    default_branch: develop                       # explicit `default_branch` overrides defaults.default_branch
     runtime: windows
     run:
       - name: dev
@@ -50,6 +52,13 @@ repos:
 ```
 
 Field notes:
+- `defaults.default_branch` / `defaults.base_root`: applied to every repo that omits the
+  corresponding field, via `applyDefaults()` in both `fleet-task/config.go` and
+  `fleet-run/config.go` (called right after YAML unmarshal, before the config is used for
+  anything). A repo's own `base`/`default_branch`, when set, always wins over the default. Because
+  `applyDefaults()` runs at parse time, everything downstream (`cmd_new.go`, `cmd_rm.go`, etc.)
+  keeps reading `repo.Base`/`repo.DefaultBranch` as plain, already-resolved fields — no caller
+  needs to know defaults exist.
 - `origin` + `base`: on first use `fleet-task` runs `git clone --bare <origin> <base>`. On every
   subsequent `fleet-task new` it runs `git -C <base> fetch origin`, then
   `git -C <base> worktree add <worktree_path> -b <ticket> origin/<default_branch>`.

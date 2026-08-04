@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path"
 
 	"gopkg.in/yaml.v3"
 )
@@ -39,22 +40,45 @@ type TmuxConfig struct {
 	ConfigFile  string `yaml:"config_file"`
 }
 
+// DefaultsConfig holds fleet-wide fallback values for per-repo fields, so
+// repos.yaml doesn't need to repeat default_branch/base on every entry.
+type DefaultsConfig struct {
+	DefaultBranch string `yaml:"default_branch"`
+	BaseRoot      string `yaml:"base_root"`
+}
+
 // ReposConfig is the top-level shape of repos.yaml.
 type ReposConfig struct {
-	Tmux         TmuxConfig   `yaml:"tmux"`
-	WorktreeRoot string       `yaml:"worktree_root"`
-	Repos        []RepoConfig `yaml:"repos"`
+	Tmux         TmuxConfig     `yaml:"tmux"`
+	WorktreeRoot string         `yaml:"worktree_root"`
+	Defaults     DefaultsConfig `yaml:"defaults"`
+	Repos        []RepoConfig   `yaml:"repos"`
+}
+
+// applyDefaults fills any repo field left blank in repos.yaml with the
+// top-level `defaults` values: default_branch falls back directly, and base
+// falls back to <base_root>/<repo-name> when the repo omits `base`.
+func (c *ReposConfig) applyDefaults() {
+	for i := range c.Repos {
+		r := &c.Repos[i]
+		if r.DefaultBranch == "" {
+			r.DefaultBranch = c.Defaults.DefaultBranch
+		}
+		if r.Base == "" && c.Defaults.BaseRoot != "" {
+			r.Base = path.Join(c.Defaults.BaseRoot, r.Name)
+		}
+	}
 }
 
 // loadReposConfig reads and parses repos.yaml from the given path.
-func loadReposConfig(path string) (*ReposConfig, error) {
-	data, err := os.ReadFile(path)
+func loadReposConfig(configPath string) (*ReposConfig, error) {
+	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("read repos config %s: %w", path, err)
+		return nil, fmt.Errorf("read repos config %s: %w", configPath, err)
 	}
 	cfg, err := parseReposConfig(data)
 	if err != nil {
-		return nil, fmt.Errorf("parse repos config %s: %w", path, err)
+		return nil, fmt.Errorf("parse repos config %s: %w", configPath, err)
 	}
 	return cfg, nil
 }
@@ -67,6 +91,7 @@ func parseReposConfig(data []byte) (*ReposConfig, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+	cfg.applyDefaults()
 	return &cfg, nil
 }
 
