@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -80,6 +81,30 @@ func splitNonEmptyLines(s string) []string {
 	return out
 }
 
+// nextFreeWindowIndex returns the lowest window index in session that isn't
+// already in use, so new-window can be given an explicit "=<session>:<index>"
+// target rather than relying on tmux's own (client-attachment-relative)
+// placement rules.
+func nextFreeWindowIndex(session string) (int, error) {
+	out, err := tmuxOutput(listWindowIndicesArgs(session)...)
+	if err != nil {
+		return 0, fmt.Errorf("list window indices in session %q: %w", session, err)
+	}
+	used := make(map[int]bool)
+	for _, l := range splitNonEmptyLines(out) {
+		i, err := strconv.Atoi(l)
+		if err != nil {
+			return 0, fmt.Errorf("parse window index %q in session %q: %w", l, session, err)
+		}
+		used[i] = true
+	}
+	for i := 0; ; i++ {
+		if !used[i] {
+			return i, nil
+		}
+	}
+}
+
 // wslToWindowsPath translates a WSL-side path to its win32 form via
 // `wslpath -w`, for handing to powershell.exe (which can't resolve
 // \\wsl.localhost paths as a working directory the same way, and tmux's -c
@@ -113,14 +138,18 @@ func windowsWorktreeWinPath(dir string) (string, error) {
 // worktree dir to a win32 path and wraps the command in a powershell.exe
 // invocation.
 func newWindow(session, name string, p RunPair) error {
+	index, err := nextFreeWindowIndex(session)
+	if err != nil {
+		return err
+	}
 	if p.Runtime == "windows" {
 		winDir, err := windowsWorktreeWinPath(p.WorktreeDir)
 		if err != nil {
 			return err
 		}
-		return runTmux(newWindowArgsWindows(session, name, winDir, p.Cmd)...)
+		return runTmux(newWindowArgsWindows(session, name, winDir, p.Cmd, index)...)
 	}
-	return runTmux(newWindowArgsLinux(session, name, p.WorktreeDir, p.Cmd)...)
+	return runTmux(newWindowArgsLinux(session, name, p.WorktreeDir, p.Cmd, index)...)
 }
 
 // killWindow kills a single named window in the session.

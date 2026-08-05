@@ -6,9 +6,19 @@ import "fmt"
 // tmux_exec.go's subprocess execution so the command shapes can be unit
 // tested without a real tmux binary.
 
+// exactTarget prefixes a tmux target with "=" to force exact-name matching.
+// Without it, tmux falls back to prefix matching against every session on
+// the server, so a configured session name that happens to prefix-match the
+// name of whatever session the caller is currently attached to (or any
+// other session) silently targets that session instead — a real bug caught
+// against a live tmux server, not a hypothetical.
+func exactTarget(session string) string {
+	return "=" + session
+}
+
 // hasSessionArgs builds argv for `tmux has-session -t <session>`.
 func hasSessionArgs(session string) []string {
-	return []string{"has-session", "-t", session}
+	return []string{"has-session", "-t", exactTarget(session)}
 }
 
 // newSessionArgv builds the full argv (including the leading "-f <file>"
@@ -28,17 +38,34 @@ func newSessionArgv(session, configFile string) []string {
 
 // listWindowsArgs builds argv for listing window names in a session.
 func listWindowsArgs(session string) []string {
-	return []string{"list-windows", "-t", session, "-F", "#{window_name}"}
+	return []string{"list-windows", "-t", exactTarget(session), "-F", "#{window_name}"}
+}
+
+// listWindowIndicesArgs builds argv for listing window indices in a session,
+// used to compute a free index for new-window to target explicitly.
+func listWindowIndicesArgs(session string) []string {
+	return []string{"list-windows", "-t", exactTarget(session), "-F", "#{window_index}"}
+}
+
+// indexedTarget builds an exact "=<session>:<index>" target for creating a
+// window at a specific, caller-computed index.
+//
+// We compute the index ourselves (see nextFreeWindowIndex) and target it
+// explicitly rather than relying on tmux's own placement rules: a bare
+// session target (no index) bases placement on the *attached client's*
+// current window rather than the target session's, and the "-a" flag
+// ("insert after target-window") does the same when the target session
+// isn't the one the client is attached to — both were caught, against a
+// live tmux server, silently creating windows in the operator's current
+// session instead of the configured fleet session.
+func indexedTarget(session string, index int) string {
+	return fmt.Sprintf("%s:%d", exactTarget(session), index)
 }
 
 // newWindowArgsLinux builds argv for creating a window that runs cmd
-// directly in cwd (the linux-runtime case).
-//
-// -a inserts the window after the current one, shifting other windows up
-// if necessary, instead of tmux's default of erroring with "index N in
-// use" when that slot is already occupied by another ticket's window.
-func newWindowArgsLinux(session, name, cwd, cmd string) []string {
-	return []string{"new-window", "-a", "-t", session, "-n", name, "-c", cwd, cmd}
+// directly in cwd (the linux-runtime case), at the given explicit index.
+func newWindowArgsLinux(session, name, cwd, cmd string, index int) []string {
+	return []string{"new-window", "-t", indexedTarget(session, index), "-n", name, "-c", cwd, cmd}
 }
 
 // windowsPowershellCommand builds the -Command string used to run cmd inside
@@ -51,12 +78,12 @@ func windowsPowershellCommand(winDir, cmd string) string {
 // powershell.exe. winDir must already be the win32-form path (e.g. from
 // `wslpath -w`), since tmux's own -c expects a WSL-side path and can't be
 // used to seed the Windows process's working directory.
-func newWindowArgsWindows(session, name, winDir, cmd string) []string {
+func newWindowArgsWindows(session, name, winDir, cmd string, index int) []string {
 	psCmd := windowsPowershellCommand(winDir, cmd)
-	return []string{"new-window", "-a", "-t", session, "-n", name, "powershell.exe", "-NoExit", "-Command", psCmd}
+	return []string{"new-window", "-t", indexedTarget(session, index), "-n", name, "powershell.exe", "-NoExit", "-Command", psCmd}
 }
 
 // killWindowArgs builds argv for killing a specific window by name.
 func killWindowArgs(session, name string) []string {
-	return []string{"kill-window", "-t", session + ":" + name}
+	return []string{"kill-window", "-t", exactTarget(session) + ":" + name}
 }
