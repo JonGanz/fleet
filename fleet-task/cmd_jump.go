@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"strings"
+	"text/tabwriter"
 )
 
 // jumpEntry is one selectable row for `fleet-task jump`.
@@ -11,12 +14,30 @@ type jumpEntry struct {
 	WorktreePath string
 }
 
-func (e jumpEntry) line() string {
-	return fmt.Sprintf("%s\t%s\t%s", e.Ticket, e.Repo, e.WorktreePath)
+// jumpEntryLines renders entries as column-aligned rows using tabwriter,
+// which pads with real spaces rather than leaving literal tab characters
+// in the string. Raw tabs expand to the terminal's tab stops, which
+// depend on the cursor column reached by whatever text preceded them —
+// different per row since ticket/repo names vary in length — so the
+// picker's columns visibly drifted row to row and its line-diffing
+// repaint left stale characters behind (rendering as duplicated text).
+// Fixed-width rows sidestep both.
+func jumpEntryLines(entries []jumpEntry) []string {
+	var buf bytes.Buffer
+	tw := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
+	for _, e := range entries {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", e.Ticket, e.Repo, e.WorktreePath)
+	}
+	tw.Flush()
+	out := strings.TrimSuffix(buf.String(), "\n")
+	if out == "" {
+		return nil
+	}
+	return strings.Split(out, "\n")
 }
 
 // buildJumpEntries flattens all tasks' repos into a flat list of jump
-// entries, for piping into fzf.
+// entries, for feeding into selectOne.
 func buildJumpEntries(tasks []*TaskState) []jumpEntry {
 	var entries []jumpEntry
 	for _, t := range tasks {
@@ -46,17 +67,15 @@ func cmdJump() error {
 		return fmt.Errorf("no tasks found")
 	}
 
-	lines := make([]string, 0, len(entries))
+	lines := jumpEntryLines(entries)
 	byLine := make(map[string]jumpEntry, len(entries))
-	for _, e := range entries {
-		l := e.line()
-		lines = append(lines, l)
-		byLine[l] = e
+	for i, e := range entries {
+		byLine[lines[i]] = e
 	}
 
-	chosen, err := fzfSelectOne(lines)
+	chosen, err := selectOne(lines)
 	if err != nil {
-		// Cancelled (e.g. Esc) or fzf missing: exit non-zero, no stdout.
+		// Cancelled (e.g. Esc/q): exit non-zero, no stdout.
 		return err
 	}
 

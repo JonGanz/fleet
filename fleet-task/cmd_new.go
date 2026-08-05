@@ -41,7 +41,7 @@ func cmdNew() error {
 		return fmt.Errorf("no repos defined in %s", rf)
 	}
 
-	selectedRepos, err := fzfSelectMulti(cfg.repoNames())
+	selectedRepos, err := selectMulti(cfg.repoNames())
 	if err != nil {
 		return fmt.Errorf("repo selection: %w", err)
 	}
@@ -125,9 +125,9 @@ func cmdNew() error {
 }
 
 // selectPatches globs <config dir>/patches/<repo>/*.patch and, if any
-// exist, lets the user multiselect which to apply via fzf. If there are
-// zero patches for the repo, the fzf call is skipped entirely and an empty
-// slice is returned.
+// exist, lets the user multiselect which to apply. If there are zero
+// patches for the repo, selection is skipped entirely and an empty slice
+// is returned.
 func selectPatches(repo string) ([]string, error) {
 	dir, err := patchesDir(repo)
 	if err != nil {
@@ -140,7 +140,7 @@ func selectPatches(repo string) ([]string, error) {
 	if len(matches) == 0 {
 		return nil, nil
 	}
-	return fzfSelectMulti(matches)
+	return selectMulti(matches)
 }
 
 // applyPatch applies patchFile to worktreePath. For runtime: windows repos,

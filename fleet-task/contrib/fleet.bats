@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 #
 # Tests for fleet.sh's `fj` shell function. Uses a fake `fleet-task` stub on
-# PATH so these run without a real config/state setup or a real fzf session.
+# PATH so these run without a real config/state setup or an interactive
+# terminal session.
 
 setup() {
   export FAKE_BIN="$BATS_TEST_TMPDIR/bin"

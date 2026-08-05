@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestBuildJumpEntries(t *testing.T) {
 	tasks := []*TaskState{
@@ -29,8 +32,16 @@ func TestBuildJumpEntries(t *testing.T) {
 		t.Errorf("entries[0] = %+v, want %+v", entries[0], want)
 	}
 
-	line := entries[0].line()
-	if line != "PROJ-1\tbackend\t/wt/PROJ-1/backend" {
-		t.Errorf("line() = %q", line)
+	lines := jumpEntryLines(entries)
+	if len(lines) != len(entries) {
+		t.Fatalf("len(jumpEntryLines(entries)) = %d, want %d", len(lines), len(entries))
+	}
+	for _, l := range lines {
+		if strings.Contains(l, "\t") {
+			t.Errorf("line %q contains a raw tab; columns should be space-padded", l)
+		}
+	}
+	if !strings.Contains(lines[0], "PROJ-1") || !strings.Contains(lines[0], "backend") || !strings.Contains(lines[0], "/wt/PROJ-1/backend") {
+		t.Errorf("lines[0] = %q, missing expected fields", lines[0])
 	}
 }

@@ -15,7 +15,7 @@ func usage() {
 commands:
   new              interactively create a new task's worktrees
   list [--json]    list existing tasks
-  jump             fzf-select a worktree and print its path (for `+"`cd $(fleet-task jump)`"+`)
+  jump             select a worktree and print its path (for `+"`cd $(fleet-task jump)`"+`)
   rm <ticket>      remove a task's worktrees and state file`)
 }
 
