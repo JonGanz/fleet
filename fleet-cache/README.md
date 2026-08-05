@@ -6,9 +6,11 @@ Part of the `fleet` suite (see `../docs/CONTRACT.md`). A
 same repo (same lockfile) don't redundantly reinstall — instead a cached
 `node_modules` tree is hardlinked into place.
 
-Linux/WSL2 only for now. Windows-runtime repos (per `repos.yaml`'s
-`runtime: windows`) need a separate cache mechanism since hardlinks can't
-cross the WSL9P boundary — out of scope for this version.
+`ensure`/`gc` above are Linux/WSL2 only. Windows-runtime repos (per
+`repos.yaml`'s `runtime: windows`) use the separate `ensure-windows`/
+`gc-windows` commands below instead, since hardlinks can't cross the WSL9P
+boundary — those populate a separate, Windows-native cache via native
+PowerShell/npm processes rather than WSL reaching into `/mnt/...`.
 
 ## Cache layout
 
@@ -63,6 +65,41 @@ Garbage-collects cache entries that are no longer referenced by any known
 ```
 fleet-cache gc --roots ~/.local/state/fleet/worktrees --force
 ```
+
+### `fleet-cache ensure-windows <wsl-dir> [--cache-root <wsl-path>]`
+
+Windows-native counterpart of `ensure`, for `runtime: windows` repos.
+`<wsl-dir>` is the worktree's WSL-visible path (e.g. under `/mnt/c/...`,
+since fleet-task keeps the real git worktree on an NTFS volume for these
+repos and only symlinks it into the normal WSL worktree location).
+
+Cache root resolution: `--cache-root` if given (repos.yaml's
+`windows_cache_root`, already expanded to a WSL-visible path), else
+`%LOCALAPPDATA%\fleet` auto-detected via `cmd.exe`, mirroring the Linux
+default of `~/.cache/fleet`. Entries live at
+`<cache root>\node-cache\<sha256>\`.
+
+Only genuinely bulk filesystem work — `npm ci`, removing an old
+`node_modules` tree, and hardlink-populating the target `node_modules` —
+runs as native Windows processes (PowerShell/npm). Single-file operations
+(hashing the lockfile, copying `package.json`/`package-lock.json` into the
+cache entry) stay as ordinary Go file I/O against the `/mnt/...` path, since
+those are negligible one-off costs, not the many-small-file operations that
+are slow across the WSL9P boundary.
+
+The hardlink population itself runs via an embedded PowerShell script
+(`hardlink_windows.ps1`, loaded with `go:embed`) that mirrors `hardlink.go`'s
+directory/hardlink/symlink handling as native `New-Item` calls. Both the
+cache entry and the target worktree must be on the same NTFS drive —
+`ensure-windows` checks this up front and errors clearly if not, since
+`New-Item -ItemType HardLink` fails across volumes.
+
+### `fleet-cache gc-windows [--roots <dir>[,<dir>...]] [--force] [--cache-root <wsl-path>]`
+
+Windows-native counterpart of `gc` — same `--roots`/`--force` safety rule
+(no `--roots` ⇒ always report-only), scanning/deleting against the
+Windows-native cache root's `node-cache` dir via `Remove-Item -Recurse -Force`
+instead of `os.RemoveAll`.
 
 ## Development
 

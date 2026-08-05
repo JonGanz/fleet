@@ -22,6 +22,7 @@ type RepoConfig struct {
 	Base          string      `yaml:"base"`
 	DefaultBranch string      `yaml:"default_branch"`
 	Runtime       string      `yaml:"runtime"`
+	WindowsBase   string      `yaml:"windows_base"`
 	Run           []RunConfig `yaml:"run"`
 }
 
@@ -35,29 +36,37 @@ type TmuxConfig struct {
 // DefaultsConfig holds fleet-wide fallback values for per-repo fields, so
 // repos.yaml doesn't need to repeat default_branch/base on every entry.
 type DefaultsConfig struct {
-	DefaultBranch string `yaml:"default_branch"`
-	BaseRoot      string `yaml:"base_root"`
+	DefaultBranch   string `yaml:"default_branch"`
+	BaseRoot        string `yaml:"base_root"`
+	WindowsBaseRoot string `yaml:"windows_base_root"`
 }
 
 // ReposConfig is the top-level shape of repos.yaml.
 type ReposConfig struct {
-	Tmux         TmuxConfig     `yaml:"tmux"`
-	WorktreeRoot string         `yaml:"worktree_root"`
-	Defaults     DefaultsConfig `yaml:"defaults"`
-	Repos        []RepoConfig   `yaml:"repos"`
+	Tmux                TmuxConfig     `yaml:"tmux"`
+	WorktreeRoot        string         `yaml:"worktree_root"`
+	WindowsWorktreeRoot string         `yaml:"windows_worktree_root"`
+	WindowsCacheRoot    string         `yaml:"windows_cache_root"`
+	Defaults            DefaultsConfig `yaml:"defaults"`
+	Repos               []RepoConfig   `yaml:"repos"`
 }
 
 // applyDefaults fills any repo field left blank in repos.yaml with the
-// top-level `defaults` values: default_branch falls back directly, and base
-// falls back to <base_root>/<repo-name> when the repo omits `base`.
+// top-level `defaults` values: default_branch falls back directly, base
+// falls back to <base_root>/<repo-name> when the repo omits `base`, and for
+// runtime: windows repos, windows_base falls back to
+// <windows_base_root>/<repo-name> the same way.
 func (c *ReposConfig) applyDefaults() {
 	for i := range c.Repos {
 		r := &c.Repos[i]
 		if r.DefaultBranch == "" {
 			r.DefaultBranch = c.Defaults.DefaultBranch
 		}
-		if r.Base == "" && c.Defaults.BaseRoot != "" {
+		if r.Runtime != "windows" && r.Base == "" && c.Defaults.BaseRoot != "" {
 			r.Base = path.Join(c.Defaults.BaseRoot, r.Name)
+		}
+		if r.Runtime == "windows" && r.WindowsBase == "" && c.Defaults.WindowsBaseRoot != "" {
+			r.WindowsBase = path.Join(c.Defaults.WindowsBaseRoot, r.Name)
 		}
 	}
 }

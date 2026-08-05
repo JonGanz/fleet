@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -91,6 +92,21 @@ func wslToWindowsPath(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// windowsWorktreeWinPath resolves a runtime: windows repo's worktree dir to
+// its win32 form. dir may be a symlink into /mnt/c/... (fleet-task creates
+// one at the normal WSL worktree location for runtime: windows repos, whose
+// real git worktree lives on an NTFS volume). wslpath does pure syntactic
+// path translation and does NOT resolve symlinks, so translating the
+// symlink's own (WSL ext4-side) path would map to a \\wsl.localhost\... UNC
+// path instead of the correct C:\... location. Resolving it first is a
+// no-op for any windows-runtime worktree that isn't a symlink.
+func windowsWorktreeWinPath(dir string) (string, error) {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	return wslToWindowsPath(dir)
+}
+
 // newWindow creates a tmux window for the given pair under the given
 // ticket's window name. For linux-runtime repos it runs the command
 // directly in the worktree dir; for windows-runtime repos it translates the
@@ -98,7 +114,7 @@ func wslToWindowsPath(dir string) (string, error) {
 // invocation.
 func newWindow(session, name string, p RunPair) error {
 	if p.Runtime == "windows" {
-		winDir, err := wslToWindowsPath(p.WorktreeDir)
+		winDir, err := windowsWorktreeWinPath(p.WorktreeDir)
 		if err != nil {
 			return err
 		}

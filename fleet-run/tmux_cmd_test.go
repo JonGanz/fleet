@@ -28,7 +28,7 @@ func TestListWindowsArgs(t *testing.T) {
 
 func TestNewWindowArgsLinux(t *testing.T) {
 	got := newWindowArgsLinux("fleet", "PROJ-1234-backend-api", "/state/worktrees/PROJ-1234/backend", "npm run start:dev")
-	want := []string{"new-window", "-t", "fleet", "-n", "PROJ-1234-backend-api", "-c", "/state/worktrees/PROJ-1234/backend", "npm run start:dev"}
+	want := []string{"new-window", "-a", "-t", "fleet", "-n", "PROJ-1234-backend-api", "-c", "/state/worktrees/PROJ-1234/backend", "npm run start:dev"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("newWindowArgsLinux = %v, want %v", got, want)
 	}
@@ -37,7 +37,7 @@ func TestNewWindowArgsLinux(t *testing.T) {
 func TestNewWindowArgsWindows(t *testing.T) {
 	got := newWindowArgsWindows("fleet", "PROJ-1234-admin-ui-dev", `C:\worktrees\PROJ-1234\admin-ui`, "npm run dev")
 	want := []string{
-		"new-window", "-t", "fleet", "-n", "PROJ-1234-admin-ui-dev",
+		"new-window", "-a", "-t", "fleet", "-n", "PROJ-1234-admin-ui-dev",
 		"powershell.exe", "-NoExit", "-Command",
 		`cd 'C:\worktrees\PROJ-1234\admin-ui'; npm run dev`,
 	}

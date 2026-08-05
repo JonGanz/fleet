@@ -10,10 +10,10 @@ import (
 
 // runEnsure implements `fleet-cache ensure <dir>`.
 //
-// NOTE: this is Linux/WSL2-only. Windows-runtime repos (per repos.yaml's
-// `runtime: windows` field, see docs/CONTRACT.md) need a separate cache path
-// and mechanism since hardlinks can't cross the WSL9P boundary; that's out
-// of scope for this first version.
+// This is Linux/WSL2-only. Windows-runtime repos (per repos.yaml's
+// `runtime: windows` field, see docs/CONTRACT.md) use the separate
+// `ensure-windows` command (ensure_win.go) instead, since hardlinks
+// can't cross the WSL9P boundary.
 func runEnsure(dir string) error {
 	lockPath := filepath.Join(dir, "package-lock.json")
 	if _, err := os.Stat(lockPath); err != nil {

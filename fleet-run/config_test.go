@@ -91,6 +91,10 @@ const defaultsFixtureYAML = `
 defaults:
   default_branch: main
   base_root: ~/dev/.fleet-base
+  windows_base_root: ~/dev/.fleet-base-windows
+
+windows_worktree_root: ~/dev/.fleet-worktrees-windows
+windows_cache_root: ~/dev/.fleet-cache-windows
 
 repos:
   - name: backend
@@ -103,6 +107,13 @@ repos:
     origin: git@github.com:org/admin-ui.git
     base: ~/dev/.fleet-base/admin-ui-custom
     default_branch: develop
+    run:
+      - name: dev
+        cmd: "npm run dev"
+
+  - name: room-launcher
+    origin: git@github.com:org/room-launcher.git
+    runtime: windows
     run:
       - name: dev
         cmd: "npm run dev"
@@ -134,5 +145,23 @@ func TestParseReposConfigAppliesDefaults(t *testing.T) {
 	}
 	if adminUI.DefaultBranch != "develop" {
 		t.Errorf("adminUI.DefaultBranch = %q, want explicit value preserved", adminUI.DefaultBranch)
+	}
+
+	if cfg.WindowsWorktreeRoot != "~/dev/.fleet-worktrees-windows" {
+		t.Errorf("WindowsWorktreeRoot = %q", cfg.WindowsWorktreeRoot)
+	}
+	if cfg.WindowsCacheRoot != "~/dev/.fleet-cache-windows" {
+		t.Errorf("WindowsCacheRoot = %q", cfg.WindowsCacheRoot)
+	}
+
+	roomLauncher := cfg.findRepo("room-launcher")
+	if roomLauncher == nil {
+		t.Fatal("findRepo(room-launcher) = nil")
+	}
+	if roomLauncher.WindowsBase != "~/dev/.fleet-base-windows/room-launcher" {
+		t.Errorf("roomLauncher.WindowsBase = %q, want default-derived path", roomLauncher.WindowsBase)
+	}
+	if roomLauncher.Base != "" {
+		t.Errorf("roomLauncher.Base = %q, want empty (windows-runtime repos don't use base_root)", roomLauncher.Base)
 	}
 }

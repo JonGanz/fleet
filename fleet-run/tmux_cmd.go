@@ -33,8 +33,12 @@ func listWindowsArgs(session string) []string {
 
 // newWindowArgsLinux builds argv for creating a window that runs cmd
 // directly in cwd (the linux-runtime case).
+//
+// -a inserts the window after the current one, shifting other windows up
+// if necessary, instead of tmux's default of erroring with "index N in
+// use" when that slot is already occupied by another ticket's window.
 func newWindowArgsLinux(session, name, cwd, cmd string) []string {
-	return []string{"new-window", "-t", session, "-n", name, "-c", cwd, cmd}
+	return []string{"new-window", "-a", "-t", session, "-n", name, "-c", cwd, cmd}
 }
 
 // windowsPowershellCommand builds the -Command string used to run cmd inside
@@ -49,7 +53,7 @@ func windowsPowershellCommand(winDir, cmd string) string {
 // used to seed the Windows process's working directory.
 func newWindowArgsWindows(session, name, winDir, cmd string) []string {
 	psCmd := windowsPowershellCommand(winDir, cmd)
-	return []string{"new-window", "-t", session, "-n", name, "powershell.exe", "-NoExit", "-Command", psCmd}
+	return []string{"new-window", "-a", "-t", session, "-n", name, "powershell.exe", "-NoExit", "-Command", psCmd}
 }
 
 // killWindowArgs builds argv for killing a specific window by name.

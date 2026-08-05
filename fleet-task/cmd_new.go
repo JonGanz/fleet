@@ -75,13 +75,13 @@ func cmdNew() error {
 			fmt.Fprintf(os.Stderr, "warning: pre-create hooks for %s: %v\n", repo.Name, err)
 		}
 
-		if err := setupWorktree(repo, ticket, worktreePath); err != nil {
+		if err := setupWorktree(cfg, repo, ticket, worktreePath); err != nil {
 			fmt.Fprintf(os.Stderr, "error: setting up worktree for %s: %v\n", repo.Name, err)
 			continue
 		}
 
 		for _, p := range patches {
-			if err := gitApplyPatch(worktreePath, p); err != nil {
+			if err := applyPatch(cfg, repo, ticket, worktreePath, p); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: applying patch %s to %s: %v\n", p, repo.Name, err)
 			}
 		}
@@ -91,7 +91,7 @@ func cmdNew() error {
 		}
 
 		if _, err := os.Stat(filepath.Join(worktreePath, "package-lock.json")); err == nil {
-			ensureNodeCache(worktreePath)
+			ensureNodeCache(repo, cfg, worktreePath)
 		}
 
 		taskRepos = append(taskRepos, TaskRepo{
@@ -143,9 +143,49 @@ func selectPatches(repo string) ([]string, error) {
 	return fzfSelectMulti(matches)
 }
 
+// applyPatch applies patchFile to worktreePath. For runtime: windows repos,
+// worktreePath is a WSL-side symlink into a worktree created by native
+// git.exe, whose .git file WSL-native git can't parse (see winGitApplyPatch),
+// so it resolves the Windows-native worktree/patch paths and applies there
+// instead of using worktreePath directly.
+func applyPatch(cfg *ReposConfig, repo *RepoConfig, ticket, worktreePath, patchFile string) error {
+	if repo.Runtime != "windows" {
+		return gitApplyPatch(worktreePath, patchFile)
+	}
+
+	_, winWorktreeWin, err := windowsWorktreePaths(cfg, repo, ticket)
+	if err != nil {
+		return err
+	}
+	winPatchFile, err := wslToWindowsPath(patchFile)
+	if err != nil {
+		return fmt.Errorf("resolving patch file %s: %w", patchFile, err)
+	}
+	return winGitApplyPatch(winWorktreeWin, winPatchFile)
+}
+
+// windowsWorktreePaths computes the WSL-visible and win32-form paths for a
+// runtime: windows repo's worktree, shared between setupWorktreeWindows and
+// applyPatch so the formula only exists once.
+func windowsWorktreePaths(cfg *ReposConfig, repo *RepoConfig, ticket string) (wslPath, winPath string, err error) {
+	wslPath = filepath.Join(expandHome(cfg.WindowsWorktreeRoot), ticket, repo.Name)
+	winPath, err = wslToWindowsPath(wslPath)
+	if err != nil {
+		return "", "", fmt.Errorf("resolving windows_worktree_root %s: %w", wslPath, err)
+	}
+	return wslPath, winPath, nil
+}
+
 // setupWorktree ensures the repo's base bare clone exists (cloning or
 // fetching as needed) and creates the worktree for ticket at worktreePath.
-func setupWorktree(repo *RepoConfig, ticket, worktreePath string) error {
+// For runtime: windows repos this delegates entirely to
+// setupWorktreeWindows, since the actual git checkout must live on an NTFS
+// volume, operated on by Windows-native git.exe.
+func setupWorktree(cfg *ReposConfig, repo *RepoConfig, ticket, worktreePath string) error {
+	if repo.Runtime == "windows" {
+		return setupWorktreeWindows(cfg, repo, ticket, worktreePath)
+	}
+
 	base := expandHome(repo.Base)
 
 	if _, err := os.Stat(base); os.IsNotExist(err) {
@@ -168,6 +208,10 @@ func setupWorktree(repo *RepoConfig, ticket, worktreePath string) error {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(worktreePath), err)
 	}
 
+	if err := gitWorktreePrune(base); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: worktree prune for %s: %v\n", base, err)
+	}
+
 	if err := gitWorktreeAddNewBranch(base, worktreePath, ticket, repo.DefaultBranch); err != nil {
 		// Branch may already exist from a prior `fleet-task new` run for
 		// this ticket; fall back to adding a worktree for the existing
@@ -176,6 +220,99 @@ func setupWorktree(repo *RepoConfig, ticket, worktreePath string) error {
 		if err2 := gitWorktreeAddExistingBranch(base, worktreePath, ticket); err2 != nil {
 			return fmt.Errorf("worktree add (existing branch): %w", err2)
 		}
+	}
+
+	return nil
+}
+
+// setupWorktreeWindows is the runtime: windows counterpart of setupWorktree:
+// the bare clone and git worktree are created via Windows-native git.exe
+// under repo.WindowsBase / cfg.WindowsWorktreeRoot (win32 paths, though
+// configured in WSL-visible /mnt/... form), and worktreePath -- the normal
+// WSL-side <worktree_root>/<ticket>/<repo> location every other consumer
+// (fleet-run, hooks, fleet-cache) expects -- is left as a symlink into that
+// location instead of a real directory.
+func setupWorktreeWindows(cfg *ReposConfig, repo *RepoConfig, ticket, worktreePath string) error {
+	if repo.WindowsBase == "" {
+		return fmt.Errorf("repo %s is runtime: windows but has no windows_base (set it directly or via defaults.windows_base_root)", repo.Name)
+	}
+	if cfg == nil || cfg.WindowsWorktreeRoot == "" {
+		return fmt.Errorf("repo %s is runtime: windows but repos.yaml has no top-level windows_worktree_root", repo.Name)
+	}
+
+	winBaseWSL := expandHome(repo.WindowsBase)
+	winBaseWin, err := wslToWindowsPath(winBaseWSL)
+	if err != nil {
+		return fmt.Errorf("resolving windows_base %s: %w", winBaseWSL, err)
+	}
+
+	winWorktreeWSL, winWorktreeWin, err := windowsWorktreePaths(cfg, repo, ticket)
+	if err != nil {
+		return err
+	}
+
+	if err := checkSameDrive(map[string]string{
+		"windows_base":          winBaseWin,
+		"windows_worktree_root": winWorktreeWin,
+	}); err != nil {
+		return err
+	}
+
+	exists, err := windowsPathExists(winBaseWin)
+	if err != nil {
+		return fmt.Errorf("checking windows base %s: %w", winBaseWin, err)
+	}
+	if !exists {
+		// Note: unlike the Linux path, we deliberately skip checkSSHAgent()
+		// here -- that checks WSL's own ssh-add, which has no bearing on
+		// Windows git.exe's own credential setup (Git for Windows / Windows
+		// OpenSSH manage that independently).
+		winParentDir, err := wslToWindowsPath(filepath.Dir(winBaseWSL))
+		if err != nil {
+			return fmt.Errorf("resolving parent of windows_base: %w", err)
+		}
+		if err := windowsMkdirAll(winParentDir); err != nil {
+			return fmt.Errorf("mkdir %s: %w", winParentDir, err)
+		}
+		if err := winGitCloneBare(repo.Origin, winParentDir, winBaseWin); err != nil {
+			return fmt.Errorf("clone %s: %w", repo.Origin, err)
+		}
+	} else {
+		if err := winGitFetch(winBaseWin); err != nil {
+			return fmt.Errorf("fetch %s: %w", winBaseWin, err)
+		}
+	}
+
+	winWorktreeParentWin, err := wslToWindowsPath(filepath.Dir(winWorktreeWSL))
+	if err != nil {
+		return fmt.Errorf("resolving worktree parent: %w", err)
+	}
+	if err := windowsMkdirAll(winWorktreeParentWin); err != nil {
+		return fmt.Errorf("mkdir %s: %w", winWorktreeParentWin, err)
+	}
+
+	if err := winGitWorktreePrune(winBaseWin); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: worktree prune for %s: %v\n", winBaseWin, err)
+	}
+
+	if err := winGitWorktreeAddNewBranch(winBaseWin, winWorktreeWin, ticket, repo.DefaultBranch); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: worktree add -b failed (%v), retrying without -b (branch may already exist)\n", err)
+		if err2 := winGitWorktreeAddExistingBranch(winBaseWin, winWorktreeWin, ticket); err2 != nil {
+			return fmt.Errorf("worktree add (existing branch): %w", err2)
+		}
+	}
+
+	// Only now that the real Windows-native worktree exists, create the
+	// WSL-side symlink every other consumer (fleet-run, hooks, fleet-cache)
+	// expects at the normal worktreePath location.
+	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(worktreePath), err)
+	}
+	if err := os.RemoveAll(worktreePath); err != nil {
+		return fmt.Errorf("removing stale %s: %w", worktreePath, err)
+	}
+	if err := os.Symlink(winWorktreeWSL, worktreePath); err != nil {
+		return fmt.Errorf("symlink %s -> %s: %w", worktreePath, winWorktreeWSL, err)
 	}
 
 	return nil

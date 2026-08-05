@@ -26,6 +26,21 @@ Usage:
 
       Cache root: $FLEET_CACHE_DIR, else $XDG_CACHE_HOME/fleet, else
       ~/.cache/fleet. Entries live at <cache root>/node-cache/<sha256>.
+
+  fleet-cache ensure-windows <wsl-dir> [--cache-root <wsl-path>]
+      Windows-native counterpart of ensure, for runtime: windows repos
+      (<wsl-dir> is the worktree's WSL-visible path, e.g. under /mnt/c/...).
+      npm ci and the node_modules hardlink population both run as native
+      Windows processes (PowerShell/npm), never WSL reaching across the
+      9P boundary for bulk work.
+
+      Cache root: --cache-root if given (repos.yaml's windows_cache_root),
+      else auto-detected as %LOCALAPPDATA%\fleet via cmd.exe. Entries live
+      at <cache root>\node-cache\<sha256>.
+
+  fleet-cache gc-windows [--roots <dir>[,<dir>...]] [--force] [--cache-root <wsl-path>]
+      Windows-native counterpart of gc; same --roots/--force safety rule,
+      scanning/deleting against the Windows-native cache root instead.
 `
 
 // stringSliceFlag accumulates repeated --roots flags in addition to
@@ -82,6 +97,38 @@ func main() {
 		}
 		if err := runGC(roots.values, *force); err != nil {
 			fmt.Fprintf(os.Stderr, "fleet-cache gc: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "ensure-windows":
+		fs := flag.NewFlagSet("ensure-windows", flag.ExitOnError)
+		fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+		cacheRoot := fs.String("cache-root", "", "WSL-visible path to the Windows-native cache root (repos.yaml's windows_cache_root); auto-detected via %LOCALAPPDATA% if omitted")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			os.Exit(2)
+		}
+		if fs.NArg() != 1 {
+			fmt.Fprintln(os.Stderr, "fleet-cache ensure-windows: expected exactly one <wsl-dir> argument")
+			fmt.Fprint(os.Stderr, usage)
+			os.Exit(2)
+		}
+		if err := runEnsureWindows(fs.Arg(0), *cacheRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "fleet-cache ensure-windows: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "gc-windows":
+		fs := flag.NewFlagSet("gc-windows", flag.ExitOnError)
+		fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+		var roots stringSliceFlag
+		fs.Var(&roots, "roots", "directory (repeatable or comma-separated) to scan recursively for package-lock.json files")
+		force := fs.Bool("force", false, "actually delete stale cache entries instead of just reporting them")
+		cacheRoot := fs.String("cache-root", "", "WSL-visible path to the Windows-native cache root; auto-detected via %LOCALAPPDATA% if omitted")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			os.Exit(2)
+		}
+		if err := runGCWindows(roots.values, *force, *cacheRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "fleet-cache gc-windows: %v\n", err)
 			os.Exit(1)
 		}
 

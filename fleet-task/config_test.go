@@ -108,6 +108,11 @@ const defaultsFixtureYAML = `
 defaults:
   default_branch: main
   base_root: ~/dev/.fleet-base
+  windows_base_root: ~/dev/.fleet-base-windows
+
+worktree_root: ~/.local/state/fleet/worktrees
+windows_worktree_root: ~/dev/.fleet-worktrees-windows
+windows_cache_root: ~/dev/.fleet-cache-windows
 
 repos:
   - name: backend
@@ -120,6 +125,21 @@ repos:
     origin: git@github.com:org/admin-ui.git
     base: ~/dev/.fleet-base/admin-ui-custom
     default_branch: develop
+    run:
+      - name: dev
+        cmd: "npm run dev"
+
+  - name: room-launcher
+    origin: git@github.com:org/room-launcher.git
+    runtime: windows
+    run:
+      - name: dev
+        cmd: "npm run dev"
+
+  - name: staff-quiosk
+    origin: git@github.com:org/staff-quiosk.git
+    runtime: windows
+    windows_base: ~/dev/.fleet-base-windows/staff-quiosk-custom
     run:
       - name: dev
         cmd: "npm run dev"
@@ -154,5 +174,59 @@ func TestLoadReposConfigAppliesDefaults(t *testing.T) {
 	}
 	if adminUI.DefaultBranch != "develop" {
 		t.Errorf("adminUI.DefaultBranch = %q, want explicit value preserved", adminUI.DefaultBranch)
+	}
+
+	if cfg.WindowsWorktreeRoot != "~/dev/.fleet-worktrees-windows" {
+		t.Errorf("WindowsWorktreeRoot = %q", cfg.WindowsWorktreeRoot)
+	}
+	if cfg.WindowsCacheRoot != "~/dev/.fleet-cache-windows" {
+		t.Errorf("WindowsCacheRoot = %q", cfg.WindowsCacheRoot)
+	}
+
+	roomLauncher := cfg.findRepo("room-launcher")
+	if roomLauncher == nil {
+		t.Fatal("findRepo(room-launcher) = nil")
+	}
+	if roomLauncher.WindowsBase != "~/dev/.fleet-base-windows/room-launcher" {
+		t.Errorf("roomLauncher.WindowsBase = %q, want default-derived path", roomLauncher.WindowsBase)
+	}
+	if roomLauncher.DefaultBranch != "main" {
+		t.Errorf("roomLauncher.DefaultBranch = %q, want %q", roomLauncher.DefaultBranch, "main")
+	}
+	// A runtime: windows repo should NOT get a plain (Linux) `base` derived
+	// from defaults.base_root -- only windows_base applies.
+	if roomLauncher.Base != "" {
+		t.Errorf("roomLauncher.Base = %q, want empty (windows-runtime repos don't use base_root)", roomLauncher.Base)
+	}
+
+	staffQuiosk := cfg.findRepo("staff-quiosk")
+	if staffQuiosk == nil {
+		t.Fatal("findRepo(staff-quiosk) = nil")
+	}
+	if staffQuiosk.WindowsBase != "~/dev/.fleet-base-windows/staff-quiosk-custom" {
+		t.Errorf("staffQuiosk.WindowsBase = %q, want explicit value preserved", staffQuiosk.WindowsBase)
+	}
+}
+
+func TestCheckSameDrive(t *testing.T) {
+	if err := checkSameDrive(map[string]string{
+		"a": `C:\fleet\base`,
+		"b": `C:\fleet\worktrees`,
+	}); err != nil {
+		t.Errorf("checkSameDrive same-drive: %v", err)
+	}
+
+	if err := checkSameDrive(map[string]string{
+		"a": `C:\fleet\base`,
+		"b": `D:\fleet\worktrees`,
+	}); err == nil {
+		t.Error("checkSameDrive cross-drive: want error, got nil")
+	}
+
+	if err := checkSameDrive(map[string]string{
+		"a": `C:\fleet\base`,
+		"b": "",
+	}); err != nil {
+		t.Errorf("checkSameDrive with blank entry: %v", err)
 	}
 }
