@@ -27,12 +27,15 @@ func cmdRm(ticket string) error {
 		}
 	}
 
+	var remaining []TaskRepo
+
 	for _, r := range st.Repos {
 		repo := cfg.findRepo(r.Repo)
 
 		if repo != nil && repo.Runtime == "windows" {
 			if rmErr := removeWorktreeWindows(repo, r.WorktreePath); rmErr != nil {
 				fmt.Fprintf(os.Stderr, "warning: removing windows worktree %s: %v\n", r.WorktreePath, rmErr)
+				remaining = append(remaining, r)
 				continue
 			}
 			fmt.Printf("removed worktree %s (%s)\n", r.WorktreePath, r.Repo)
@@ -54,9 +57,22 @@ func cmdRm(ticket string) error {
 
 		if rmErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: removing worktree %s: %v\n", r.WorktreePath, rmErr)
+			remaining = append(remaining, r)
 			continue
 		}
 		fmt.Printf("removed worktree %s (%s)\n", r.WorktreePath, r.Repo)
+	}
+
+	// If any worktree removal failed, keep the task state around (with only
+	// the still-failing repos listed) instead of deleting it, so a rerun of
+	// `rm` retries just those and the ticket doesn't silently vanish from
+	// `fleet-task list`/`fleet-run` while its worktrees still exist on disk.
+	if len(remaining) > 0 {
+		st.Repos = remaining
+		if err := writeTaskState(tf, st); err != nil {
+			return fmt.Errorf("update task state %s after partial removal: %w", tf, err)
+		}
+		return fmt.Errorf("%d repo(s) failed to remove for %s; task state kept at %s for retry", len(remaining), ticket, tf)
 	}
 
 	if err := os.Remove(tf); err != nil {
