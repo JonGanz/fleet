@@ -54,6 +54,22 @@ func cmdNew() error {
 		return err
 	}
 
+	// Ask about every repo's patches up front, before any directory/worktree
+	// work starts, so all user interaction for `new` front-loads instead of
+	// interleaving prompts with (potentially slow) git/hook/cache work.
+	patchesByRepo := make(map[string][]string, len(selectedRepos))
+	for _, repoName := range selectedRepos {
+		if cfg.findRepo(repoName) == nil {
+			continue
+		}
+		patches, err := selectPatches(repoName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: patch selection for %s: %v\n", repoName, err)
+			continue
+		}
+		patchesByRepo[repoName] = patches
+	}
+
 	var taskRepos []TaskRepo
 
 	for _, repoName := range selectedRepos {
@@ -63,10 +79,7 @@ func cmdNew() error {
 			continue
 		}
 
-		patches, err := selectPatches(repoName)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: patch selection for %s: %v\n", repoName, err)
-		}
+		patches := patchesByRepo[repoName]
 
 		worktreePath := filepath.Join(wtRoot, ticket, repo.Name)
 		branch := ticket

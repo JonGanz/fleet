@@ -23,7 +23,10 @@ Interactively:
    `<config dir>/patches/<repo>/*.patch`, lets you multiselect which to
    apply — every patch starts checked, so you uncheck the ones you don't
    want rather than checking the ones you do (skipped entirely if the
-   repo has no patches).
+   repo has no patches). All repos' patch prompts happen up front, before
+   any directory/worktree work starts for any of them, so the whole
+   interactive part of `new` front-loads instead of interleaving prompts
+   with git/hook/cache work.
 4. For each selected repo, in order:
    - Ensures the repo's shared bare clone (`base` in `repos.yaml`) exists,
      cloning it on first use or fetching `origin` otherwise. If `origin`
