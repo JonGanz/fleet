@@ -87,3 +87,23 @@ func newWindowArgsWindows(session, name, winDir, cmd string, index int) []string
 func killWindowArgs(session, name string) []string {
 	return []string{"kill-window", "-t", exactTarget(session) + ":" + name}
 }
+
+// setSessionOptionArgs builds argv for setting a session-scoped tmux option
+// (e.g. the @fleet_task_ticket/@fleet_task_description user options tracking
+// which ticket is currently active).
+func setSessionOptionArgs(session, name, value string) []string {
+	return []string{"set-option", "-t", exactTarget(session), name, value}
+}
+
+// unsetSessionOptionArgs builds argv for clearing a session-scoped tmux
+// option.
+func unsetSessionOptionArgs(session, name string) []string {
+	return []string{"set-option", "-u", "-t", exactTarget(session), name}
+}
+
+// showSessionOptionArgs builds argv for reading a session-scoped tmux
+// option's value only (-v), so callers get a bare value with no "name value"
+// prefix to strip.
+func showSessionOptionArgs(session, name string) []string {
+	return []string{"show-options", "-t", exactTarget(session), "-v", name}
+}

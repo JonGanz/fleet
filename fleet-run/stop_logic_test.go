@@ -5,15 +5,15 @@ import (
 	"testing"
 )
 
-func TestValidateAllFlags(t *testing.T) {
-	if err := validateAllFlags("", false); err == nil {
-		t.Error("expected error for --all with no ticket and no --everything")
+func TestCheckTicketMatchesActive(t *testing.T) {
+	if err := checkTicketMatchesActive("PROJ-1234", "", false); err == nil {
+		t.Error("expected error when no ticket is active")
 	}
-	if err := validateAllFlags("PROJ-1234", false); err != nil {
-		t.Errorf("unexpected error for --all --ticket: %v", err)
+	if err := checkTicketMatchesActive("PROJ-1234", "PROJ-9999", true); err == nil {
+		t.Error("expected error when a different ticket is active")
 	}
-	if err := validateAllFlags("", true); err != nil {
-		t.Errorf("unexpected error for --all --everything: %v", err)
+	if err := checkTicketMatchesActive("PROJ-1234", "PROJ-1234", true); err != nil {
+		t.Errorf("unexpected error when the given ticket matches the active one: %v", err)
 	}
 }
 
@@ -34,62 +34,16 @@ func TestParsePairLabel(t *testing.T) {
 }
 
 func TestNamesToWindowNames(t *testing.T) {
-	got, err := namesToWindowNames([]string{"backend:api", "admin-ui:dev"}, "PROJ-1234")
+	got, err := namesToWindowNames([]string{"backend:api", "admin-ui:dev"})
 	if err != nil {
 		t.Fatalf("namesToWindowNames: %v", err)
 	}
-	want := []string{"PROJ-1234-backend-api", "PROJ-1234-admin-ui-dev"}
+	want := []string{"backend-api", "admin-ui-dev"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("namesToWindowNames = %v, want %v", got, want)
 	}
 
-	if _, err := namesToWindowNames([]string{"bad"}, "PROJ-1234"); err == nil {
+	if _, err := namesToWindowNames([]string{"bad"}); err == nil {
 		t.Error("expected error for malformed name")
-	}
-}
-
-func TestFilterAllTarget(t *testing.T) {
-	windows := []string{
-		"PROJ-1234-backend-api",
-		"PROJ-1234-admin-ui-dev",
-		"PROJ-9999-backend-api",
-	}
-
-	got, err := filterAllTarget(windows, "PROJ-1234", false)
-	if err != nil {
-		t.Fatalf("filterAllTarget: %v", err)
-	}
-	want := []string{"PROJ-1234-backend-api", "PROJ-1234-admin-ui-dev"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("filterAllTarget = %v, want %v", got, want)
-	}
-
-	if _, err := filterAllTarget(windows, "", false); err == nil {
-		t.Error("expected error for --all with no ticket and no --everything")
-	}
-
-	all, err := filterAllTarget(windows, "", true)
-	if err != nil {
-		t.Fatalf("filterAllTarget with --everything: %v", err)
-	}
-	if !reflect.DeepEqual(all, windows) {
-		t.Errorf("filterAllTarget(--everything) = %v, want all windows %v", all, windows)
-	}
-}
-
-func TestCandidateWindowsForStop(t *testing.T) {
-	windows := []string{
-		"PROJ-1234-backend-api",
-		"PROJ-9999-backend-api",
-	}
-	got := candidateWindowsForStop(windows, "PROJ-1234")
-	want := []string{"PROJ-1234-backend-api"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("candidateWindowsForStop = %v, want %v", got, want)
-	}
-
-	all := candidateWindowsForStop(windows, "")
-	if !reflect.DeepEqual(all, windows) {
-		t.Errorf("candidateWindowsForStop(empty ticket) = %v, want %v", all, windows)
 	}
 }

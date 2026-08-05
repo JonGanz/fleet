@@ -25,7 +25,7 @@ func run(args []string) error {
 	switch cmd {
 	case "start":
 		fs := flag.NewFlagSet("start", flag.ContinueOnError)
-		ticket := fs.String("ticket", "", "ticket id to start windows for (required if more than one task exists)")
+		ticket := fs.String("ticket", "", "ticket id to start windows for (required if more than one task exists); switches to it, stopping whatever's currently running, if it's not already the active ticket")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
@@ -33,21 +33,12 @@ func run(args []string) error {
 
 	case "stop":
 		fs := flag.NewFlagSet("stop", flag.ContinueOnError)
-		ticket := fs.String("ticket", "", "ticket id to scope the stop to")
-		all := fs.Bool("all", false, "stop all matching windows instead of multiselecting")
-		everything := fs.Bool("everything", false, "confirm stopping all windows across all tickets when --all is used without --ticket")
+		ticket := fs.String("ticket", "", "assert this ticket is the currently active one; errors out (stopping nothing) if it isn't")
+		all := fs.Bool("all", false, "stop everything currently running instead of multiselecting")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		return runStop(*ticket, *all, *everything, fs.Args())
-
-	case "switch":
-		fs := flag.NewFlagSet("switch", flag.ContinueOnError)
-		to := fs.String("to", "", "ticket id to switch to (required)")
-		if err := fs.Parse(rest); err != nil {
-			return err
-		}
-		return runSwitch(*to)
+		return runStop(*ticket, *all, fs.Args())
 
 	case "-h", "--help", "help":
 		printUsage()
@@ -62,10 +53,13 @@ func run(args []string) error {
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `fleet-run - manage tmux windows for running fleet task apps
 
+Only one ticket's windows are ever live at once. "start" for a different
+ticket than whatever's currently active stops everything first; starting the
+same ticket that's already active just adds any missing windows.
+
 Usage:
   fleet-run start [--ticket <id>]
-  fleet-run stop [--ticket <id>] [--all [--everything]] [repo:run-name ...]
-  fleet-run switch --to <ticket>
+  fleet-run stop [--ticket <id>] [--all] [repo:run-name ...]
 
 See README.md for details.`)
 }

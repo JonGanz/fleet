@@ -156,3 +156,32 @@ func newWindow(session, name string, p RunPair) error {
 func killWindow(session, name string) error {
 	return runTmux(killWindowArgs(session, name)...)
 }
+
+// setSessionOption sets a session-scoped tmux option.
+func setSessionOption(session, name, value string) error {
+	return runTmux(setSessionOptionArgs(session, name, value)...)
+}
+
+// unsetSessionOption clears a session-scoped tmux option. Unsetting an
+// option that was never set is not an error.
+func unsetSessionOption(session, name string) error {
+	return runTmux(unsetSessionOptionArgs(session, name)...)
+}
+
+// getSessionOption reads a session-scoped tmux option's value. found is
+// false if the option isn't set (tmux prints nothing for an unset user
+// option) or the session doesn't exist.
+func getSessionOption(session, name string) (value string, found bool, err error) {
+	if !sessionExists(session) {
+		return "", false, nil
+	}
+	out, err := tmuxOutput(showSessionOptionArgs(session, name)...)
+	if err != nil {
+		return "", false, nil
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return "", false, nil
+	}
+	return out, true, nil
+}

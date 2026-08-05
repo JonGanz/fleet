@@ -19,10 +19,9 @@ func (p RunPair) Label() string {
 	return p.Repo + ":" + p.RunName
 }
 
-// WindowName returns the tmux window name this pair would run in for the
-// given ticket.
-func (p RunPair) WindowName(ticket string) string {
-	return windowName(ticket, p.Repo, p.RunName)
+// WindowName returns the tmux window name this pair would run in.
+func (p RunPair) WindowName() string {
+	return windowName(p.Repo, p.RunName)
 }
 
 // availablePairs derives the list of repo:run-name pairs available for a

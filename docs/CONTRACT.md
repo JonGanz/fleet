@@ -181,9 +181,23 @@ currently exist" by globbing `tasks/*.json` — never by reading a single aggreg
 - Session name is the single fixed value from `repos.yaml` `tmux.session_name` (e.g. `fleet`).
   `fleet-run` creates it once (`tmux new-session -d -s <name> -f <config_file>` if `config_file`
   is set) if it doesn't already exist, and reuses it for every ticket thereafter.
-- Each running app is its own window named `<ticket>-<repo>-<run-name>`, e.g.
-  `PROJ-1234-backend-api`. This is how `fleet-run stop`/`switch` find and kill the right windows —
+- **Only one ticket's windows are ever live in the session at a time** — the point of `fleet-run`
+  is switching the whole runtime environment to a different work context, not running several
+  tickets' app sets side by side. `fleet-run start --ticket X` for any ticket other than whatever's
+  currently active stops every window in the session first, then starts `X`'s selection; starting
+  the *same* ticket that's already active is additive (only missing windows get created), same as
+  reruns always worked. There is no separate `switch` command — this is `start`'s only behavior now.
+- Because only one ticket is ever running, each window is named just `<repo>-<run-name>`, e.g.
+  `backend-api` — no ticket prefix. This is how `fleet-run stop` finds and kills the right windows —
   never by session name, since the session itself never changes.
+- **Which ticket is active is tracked via two session-scoped tmux user options**, set by `start` and
+  cleared once `stop` leaves nothing running: `@fleet_task_ticket` (the ticket id) and
+  `@fleet_task_description` (its description). Nothing else derives "what's currently active" from
+  window names anymore — `fleet-run stop --ticket X` uses these options purely as a safety
+  assertion (errors out, stopping nothing, if `X` isn't the active ticket) rather than as a filter,
+  since there's nothing else running to filter out. These options are also there for your own tmux
+  config to read directly in a status-line format string, e.g.
+  `#{@fleet_task_ticket}: #{@fleet_task_description}`.
 
 ## CLI contracts between tools (subprocess boundary, not shared code)
 

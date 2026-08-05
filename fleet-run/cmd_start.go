@@ -5,7 +5,13 @@ import (
 	"os"
 )
 
-// runStart implements `fleet-run start [--ticket <id>]`.
+// runStart implements `fleet-run start [--ticket <id>]`. Only one ticket's
+// windows are ever meant to be live in the session at once, so starting a
+// different ticket than whatever's currently active tears down every
+// existing window first -- this is what used to be the separate `switch`
+// command; it's now just what `start` does when the ticket changes.
+// Starting the *same* ticket that's already active stays additive (only
+// missing windows get created), matching how reruns always worked.
 func runStart(ticket string) error {
 	cfg, ts, err := loadStartContext(ticket)
 	if err != nil {
@@ -15,7 +21,7 @@ func runStart(ticket string) error {
 }
 
 // loadStartContext loads repos.yaml and resolves the task state to operate
-// on, shared by `start` and `switch`.
+// on.
 func loadStartContext(ticket string) (*ReposConfig, *TaskState, error) {
 	rf, err := reposFile()
 	if err != nil {
@@ -38,9 +44,7 @@ func loadStartContext(ticket string) (*ReposConfig, *TaskState, error) {
 }
 
 // startFlow runs the interactive multiselect + tmux window creation flow
-// for the given already-resolved config/task. Exposed separately from
-// runStart so `switch` can call it directly rather than shelling out to its
-// own binary.
+// for the given already-resolved config/task.
 func startFlow(cfg *ReposConfig, ts *TaskState) error {
 	pairs := availablePairs(cfg, ts)
 	if len(pairs) == 0 {
@@ -57,6 +61,8 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 		return err
 	}
 	if len(selected) == 0 {
+		// Deliberately does nothing else -- no session/option changes -- so
+		// backing out of selection never tears down a working environment.
 		fmt.Fprintln(os.Stderr, "no targets selected, nothing to start")
 		return nil
 	}
@@ -67,6 +73,20 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 	}
 	if err := ensureSession(session, cfg.Tmux.ConfigFile); err != nil {
 		return err
+	}
+
+	active, hasActive, err := activeTicket(session)
+	if err != nil {
+		return err
+	}
+	if hasActive && active != ts.Ticket {
+		fmt.Fprintf(os.Stderr, "switching from %s to %s: stopping all currently running windows\n", active, ts.Ticket)
+		if err := killAllWindowsInSession(session); err != nil {
+			return err
+		}
+	}
+	if err := setActiveTicket(session, ts); err != nil {
+		return fmt.Errorf("recording active ticket: %w", err)
 	}
 
 	existing, err := listWindows(session)
@@ -84,7 +104,7 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 			fmt.Fprintf(os.Stderr, "warning: unrecognized selection %q, skipping\n", label)
 			continue
 		}
-		wname := pair.WindowName(ts.Ticket)
+		wname := pair.WindowName()
 		if existingSet[wname] {
 			fmt.Fprintf(os.Stderr, "warning: window %q already exists, skipping\n", wname)
 			continue

@@ -33,8 +33,8 @@ func TestAvailablePairs(t *testing.T) {
 	if got := got[2].Label(); got != "admin-ui:dev" {
 		t.Errorf("Label() = %q, want admin-ui:dev", got)
 	}
-	if got := want[0].WindowName("PROJ-1234"); got != "PROJ-1234-backend-api" {
-		t.Errorf("WindowName = %q, want PROJ-1234-backend-api", got)
+	if got := want[0].WindowName(); got != "backend-api" {
+		t.Errorf("WindowName = %q, want backend-api", got)
 	}
 }
 

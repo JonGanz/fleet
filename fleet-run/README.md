@@ -6,36 +6,49 @@ standalone Go module (module path `fleet-run`) with no dependency on
 `fleet-task` or `fleet-cache` Go code — it only reads the on-disk files those
 tools produce (`repos.yaml`, `tasks/<ticket>.json`).
 
-## The fixed-session / one-window-per-app model
+## The fixed-session / one-ticket-at-a-time model
 
 There is exactly **one** tmux session for the whole fleet, named by
 `repos.yaml`'s `tmux.session_name` (e.g. `fleet`). It is created once, on
-first use, and is **never** renamed or recreated per ticket — every ticket's
-windows live in that same session, side by side.
+first use, and is **never** renamed or recreated per ticket.
+
+**Only one ticket's app set is ever meant to be running in it at a time.**
+The point of `fleet-run` is switching your whole runtime environment to a
+different work context, not stacking several tickets' windows side by side.
+`start`-ing a ticket other than whatever's currently active stops everything
+first; starting the same ticket that's already active just fills in whatever
+windows are missing.
 
 Each running app gets its own tmux window, named:
 
 ```
-<ticket>-<repo>-<run-name>
+<repo>-<run-name>
 ```
 
-e.g. `PROJ-1234-backend-api`. All window lifecycle operations (`start`,
-`stop`, `switch`) key off this naming pattern — never off session identity,
-since there is only ever one session.
+e.g. `backend-api` — no ticket prefix, since only one ticket is ever live at
+once, so nothing needs disambiguating by ticket.
 
-### Window-name parsing ambiguity
+### Tracking which ticket is active
 
-Hyphens are both the field separator and a character commonly present
-*inside* ticket ids (`PROJ-1234`), repo names, and run names, so a bare
-window-name string does not uniquely decompose on its own. `parseWindowName`
-(in `window.go`) resolves this by taking the caller-supplied set of known
-ticket ids and repo names currently in play, and doing a longest-prefix match
-first for the ticket, then for the repo; whatever's left is the run name
-verbatim. This means a window belonging to a since-deleted ticket or a repo
-no longer in `repos.yaml` cannot be parsed back precisely. Filtering "does
-this window belong to ticket X", which is all `stop`/`switch` actually need,
-uses the unambiguous `hasWindowPrefix`/`filterWindowsByTicketPrefix` helpers
-instead and never needs full decomposition.
+Since window names don't carry the ticket, "which ticket is currently
+running" is tracked via two session-scoped tmux user options
+(`activeticket.go`):
+
+- `@fleet_task_ticket` — the active ticket's id
+- `@fleet_task_description` — its description
+
+`start` sets both on every successful run; `stop` clears both once it leaves
+the session with no windows running. `stop --ticket X` reads
+`@fleet_task_ticket` purely as a safety assertion (it errors out, stopping
+nothing, if `X` isn't the currently active ticket) rather than as a filter —
+there's nothing else running to filter by.
+
+These options are ordinary tmux user options, so your own tmux config can
+read them directly in a status-line format string, e.g.:
+
+```tmux
+set -g status-right '#{@fleet_task_ticket}: #{@fleet_task_description}'
+```
 
 ## Commands
 
@@ -54,41 +67,39 @@ instead and never needs full decomposition.
    stdin, `stderr` inherited for the interactive UI, `stdout` captured for
    the selection — fzf opens `/dev/tty` itself for keyboard/screen handling
    regardless of stdout redirection, so no `/dev/tty`-opening fallback was
-   needed).
+   needed). If nothing is selected, `start` stops here and touches nothing
+   else — no session/option changes — so backing out never tears down a
+   working environment.
 4. Ensures the tmux session exists (`tmux has-session`; if absent,
    `tmux [-f <config_file>] new-session -d -s <session>` — note `-f` is a
    *global* tmux flag and must precede the subcommand, not follow it).
-5. For each selection, computes the window name and creates it with
+5. Reads `@fleet_task_ticket`. If it's set to a *different* ticket than the
+   one just resolved, kills every window currently in the session first
+   (this is what used to be a separate `switch` command). If it matches, or
+   nothing's active yet, nothing gets killed.
+6. Sets `@fleet_task_ticket`/`@fleet_task_description` to the resolved
+   ticket.
+7. For each selection, computes the window name and creates it with
    `tmux new-window -t <session> -n <window> -c <worktree_dir> <cmd>` — or,
    for `runtime: windows` repos, translates the worktree dir with
    `wslpath -w` and instead runs
    `powershell.exe -NoExit -Command "cd '<win-dir>'; <cmd>"` (tmux's own
    `-c` only understands WSL-side paths, so it can't be used to seed a
    Windows process's working directory).
-6. Skips (with a warning) any selection whose window name already exists,
+8. Skips (with a warning) any selection whose window name already exists,
    rather than creating a duplicate.
 
-### `fleet-run stop [--ticket <id>] [--all [--everything]] [repo:run-name ...]`
+### `fleet-run stop [--ticket <id>] [--all] [repo:run-name ...]`
 
-- With `--all` and `--ticket`: kills every window with that ticket's prefix.
-- With `--all` and no `--ticket`: **errors**, asking you to either add
-  `--ticket` or confirm with `--everything` — a bare `stop --all` can't
-  accidentally nuke every ticket's windows.
-- With positional `repo:run-name` args: kills just those windows for the
-  resolved ticket (same `--ticket`-or-single-task-fallback resolution as
-  `start`).
-- With neither: multiselects (fzf) over the currently running windows,
-  filtered to `--ticket`'s prefix (or all windows, with a warning, if no
-  ticket given).
-
-### `fleet-run switch --to <ticket>`
-
-Equivalent to stopping *every* window currently running in the session
-(only one ticket's app set is meant to be live at a time), then running
-the same selection+start flow as `start --ticket <to>`. This is
-implemented as a direct in-process call to the internal
-`killAllWindowsInSession` + `startFlow` functions, not by shelling out to its
-own binary.
+- `--ticket <id>`, if given, is a **safety assertion**, not a filter: errors
+  out (stopping nothing) unless `<id>` is the currently active ticket
+  (`@fleet_task_ticket`). Since only one ticket's windows are ever running,
+  there's nothing else to filter by.
+- With `--all`: kills every window currently running.
+- With positional `repo:run-name` args: kills just those specific windows.
+- With neither: multiselects (fzf) over the currently running windows.
+- Whenever a `stop` leaves the session with zero windows running, it clears
+  `@fleet_task_ticket`/`@fleet_task_description`.
 
 ## Config/state loading
 
@@ -109,16 +120,16 @@ covered by unit tests (`go test ./...`):
   and per-repo `run`/`runtime`.
 - `task_test.go` — `tasks/<ticket>.json` parsing and the `--ticket`
   resolution rules (explicit / single-task-fallback / zero-or-many error).
-- `window_test.go` — window name construction, the reverse parse (including
-  the hyphen-ambiguity cases above), and ticket-prefix filtering.
+- `window_test.go` — window name construction (`<repo>-<run-name>`).
 - `pairs_test.go` — deriving available `repo:run-name` pairs from a fixture
   `repos.yaml` + task state, including skipping repos absent from
   `repos.yaml`.
-- `stop_logic_test.go` — the `--all`/`--everything` safety check, positional
-  `repo:run-name` parsing, and the windows-to-kill filtering.
+- `stop_logic_test.go` — the `--ticket`-matches-active safety assertion,
+  positional `repo:run-name` parsing.
 - `tmux_cmd_test.go` — the pure argv-building functions for every `tmux`
   invocation shape (`new-session` with/without `-f`, `new-window` for both
-  linux and windows runtimes, `kill-window`, `list-windows`).
+  linux and windows runtimes, `kill-window`, `list-windows`, and the
+  `set-option`/`show-options` calls used for the active-ticket record).
 
 Actual subprocess execution (`tmux_exec.go`, `fzf.go`) is a thin, deliberately
 untested wrapper around these pure functions — it has no branching logic of

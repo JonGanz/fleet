@@ -120,22 +120,25 @@ Per-ticket state writes go through an advisory lock (`lock.go`): a `<file>.lock`
 with `O_EXCL`, not a real `flock(2)` — deliberate, since per-ticket files already make cross-ticket
 contention impossible by construction; the lock only guards the rare same-ticket race.
 
-### `fleet-run`: one fixed tmux session, windows do the rest
+### `fleet-run`: one fixed tmux session, only one ticket live at a time
 
 There is exactly one tmux session for the whole fleet (`repos.yaml`'s `tmux.session_name`) —
-**never** renamed or recreated per ticket. Every ticket's running apps live as windows inside that
-same session, named `<ticket>-<repo>-<run-name>`. All lifecycle logic (`start`/`stop`/`switch`)
-keys off this window-naming pattern, never off session identity. Because ticket ids, repo names,
-and run names can all contain hyphens, exact reverse-parsing of a window name back into its three
-parts is ambiguous in general (`window.go`'s `parseWindowName` resolves it via longest-prefix
-matching against a caller-supplied set of known tickets/repos); the operations that actually matter
-(`stop`, `switch`) only need unambiguous ticket-*prefix* filtering, not full decomposition, and use
-`hasWindowPrefix`/`filterWindowsByTicketPrefix` instead.
+**never** renamed or recreated per ticket. Only one ticket's app set is ever meant to be running in
+it at once — the point of `fleet-run` is switching the whole runtime environment to a different
+work context, not stacking several tickets' windows side by side. Each running app is a window
+named `<repo>-<run-name>` (no ticket prefix — since only one ticket runs at a time, it doesn't need
+to be disambiguated in the name).
 
-`fleet-run start` requires either `--ticket <id>` or exactly one file under `tasks/*.json` (there's
-no "plain checkout, no ticket" mode). `switch --to <ticket>` is implemented as an in-process call to
-`killAllWindowsInSession` followed by the same `startFlow` used by `start` — not a re-exec of its
-own binary.
+`fleet-run start --ticket <id>` requires either `--ticket` or exactly one file under `tasks/*.json`
+(there's no "plain checkout, no ticket" mode). "Which ticket is active" is tracked via two
+session-scoped tmux user options (`activeticket.go`), `@fleet_task_ticket`/`@fleet_task_description`
+— set on every successful `start`, cleared once `stop` leaves nothing running. `start` reads this
+option: starting the same ticket that's already active is additive (only missing windows get
+created, matching how reruns always worked); starting a *different* ticket kills every window in
+the session first (`killAllWindowsInSession`), then runs the normal selection+create flow — this
+used to be a separate `switch` command but is now just what `start` does. `stop --ticket X` uses the
+same option purely as a safety assertion (errors out, stopping nothing, if `X` isn't the active
+ticket) rather than as a filter, since there's nothing else running to filter by.
 
 Command-building for every `tmux` invocation shape lives in pure, separately tested functions in
 `tmux_cmd.go` (argv construction only); the actual subprocess execution is a thin, deliberately

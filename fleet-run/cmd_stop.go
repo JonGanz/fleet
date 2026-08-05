@@ -5,8 +5,8 @@ import (
 	"os"
 )
 
-// runStop implements `fleet-run stop [--ticket <id>] [--all] [--everything] [names...]`.
-func runStop(ticket string, all, everything bool, names []string) error {
+// runStop implements `fleet-run stop [--ticket <id>] [--all] [names...]`.
+func runStop(ticket string, all bool, names []string) error {
 	rf, err := reposFile()
 	if err != nil {
 		return err
@@ -18,6 +18,16 @@ func runStop(ticket string, all, everything bool, names []string) error {
 	session := cfg.Tmux.SessionName
 	if session == "" {
 		return fmt.Errorf("repos.yaml tmux.session_name is required")
+	}
+
+	if ticket != "" {
+		active, hasActive, err := activeTicket(session)
+		if err != nil {
+			return err
+		}
+		if err := checkTicketMatchesActive(ticket, active, hasActive); err != nil {
+			return err
+		}
 	}
 
 	windows, err := listWindows(session)
@@ -33,39 +43,16 @@ func runStop(ticket string, all, everything bool, names []string) error {
 
 	switch {
 	case all:
-		toKill, err = filterAllTarget(windows, ticket, everything)
-		if err != nil {
-			return err
-		}
+		toKill = windows
 
 	case len(names) > 0:
-		resolveTicket := ticket
-		if resolveTicket == "" {
-			td, err := tasksDir()
-			if err != nil {
-				return err
-			}
-			ts, err := resolveTicketState(td, "")
-			if err != nil {
-				return fmt.Errorf("resolving ticket for positional names: %w", err)
-			}
-			resolveTicket = ts.Ticket
-		}
-		toKill, err = namesToWindowNames(names, resolveTicket)
+		toKill, err = namesToWindowNames(names)
 		if err != nil {
 			return err
 		}
 
 	default:
-		if ticket == "" {
-			fmt.Fprintln(os.Stderr, "warning: no --ticket given, selecting from windows across all tickets")
-		}
-		candidates := candidateWindowsForStop(windows, ticket)
-		if len(candidates) == 0 {
-			fmt.Fprintln(os.Stderr, "no matching windows to stop")
-			return nil
-		}
-		selected, err := multiSelect(candidates)
+		selected, err := multiSelect(windows)
 		if err != nil {
 			return err
 		}
@@ -93,22 +80,23 @@ func runStop(ticket string, all, everything bool, names []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "stopped %s\n", wname)
 	}
+
+	remaining, err := listWindows(session)
+	if err != nil {
+		return err
+	}
+	if len(remaining) == 0 {
+		if err := clearActiveTicket(session); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: clearing active ticket record: %v\n", err)
+		}
+	}
 	return nil
 }
 
-// filterAllTarget wraps validateAllFlags + filterWindowsByTicketPrefix for
-// the --all case.
-func filterAllTarget(windows []string, ticket string, everything bool) ([]string, error) {
-	if err := validateAllFlags(ticket, everything); err != nil {
-		return nil, err
-	}
-	return filterWindowsByTicketPrefix(windows, ticket), nil
-}
-
 // killAllWindowsInSession kills every window currently in the session,
-// unconditionally. Used internally by `switch`, which is defined as
-// stopping *everything* currently running (only one ticket's app set is
-// meant to be live at a time) before starting the new ticket's selection.
+// unconditionally. Used internally by `start` when switching to a
+// different ticket than whatever's currently active (only one ticket's app
+// set is meant to be live at a time).
 func killAllWindowsInSession(session string) error {
 	windows, err := listWindows(session)
 	if err != nil {
