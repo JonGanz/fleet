@@ -22,6 +22,23 @@ func selectMulti(items []string) ([]string, error) {
 	return runSelect(items, true, nil)
 }
 
+// selectMultiPreselected is selectMulti but with every item checked by
+// default, so the user can uncheck the ones they don't want instead of
+// having to check everything they do. Unlike selectMulti, confirming
+// with nothing checked returns an empty (not cursor-fallback) selection:
+// once a picker starts preselected, an empty result is a deliberate
+// "none of these" rather than "I forgot to check anything."
+func selectMultiPreselected(items []string) ([]string, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	checked := make(map[string]bool, len(items))
+	for _, it := range items {
+		checked[it] = true
+	}
+	return runSelect(items, true, checked)
+}
+
 // selectOne replaces the old fzf single-select picker with the same
 // vim-navigable, filterable list, but without checkboxes: enter
 // immediately confirms the highlighted item.
@@ -82,6 +99,8 @@ type selectModel struct {
 
 	pendingG bool // "g" pressed once, waiting for a second "g" (gg = go to top)
 
+	hasPreselection bool // true if the picker started with any item checked
+
 	confirmed []string
 	cancelled bool
 	done      bool
@@ -89,13 +108,18 @@ type selectModel struct {
 
 func newSelectModel(items []string, multi bool, preselected map[string]bool) selectModel {
 	checked := make(map[string]bool, len(preselected))
+	hasPreselection := false
 	for k, v := range preselected {
 		checked[k] = v
+		if v {
+			hasPreselection = true
+		}
 	}
 	m := selectModel{
-		items:   items,
-		checked: checked,
-		multi:   multi,
+		items:           items,
+		checked:         checked,
+		multi:           multi,
+		hasPreselection: hasPreselection,
 	}
 	m.applyFilter()
 	return m
@@ -238,7 +262,12 @@ func (m selectModel) selection() []string {
 				out = append(out, item)
 			}
 		}
-		if len(out) > 0 {
+		// A bare enter with nothing checked falls back to the item under
+		// the cursor (mirrors fzf's behavior) — but only for pickers that
+		// started with nothing preselected. If the picker started
+		// preselected and the user unchecked everything, that's a
+		// deliberate "select none," not "I forgot to check anything."
+		if len(out) > 0 || m.hasPreselection {
 			return out
 		}
 	}

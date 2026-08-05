@@ -123,6 +123,29 @@ func TestSelectModelPreselected(t *testing.T) {
 	}
 }
 
+func TestSelectModelPreselectedUncheckAllConfirmsEmpty(t *testing.T) {
+	// Regression: a picker that starts fully preselected (patches: "select
+	// all by default, uncheck the ones you don't want") must let the user
+	// uncheck everything and get an empty result — it must NOT fall back
+	// to selecting whatever's under the cursor, since that fallback exists
+	// only for pickers that started with nothing checked.
+	m := newSelectModel([]string{"a", "b"}, true, map[string]bool{"a": true, "b": true})
+
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace}) // uncheck "a" (cursor starts at 0)
+	m = m2.(selectModel)
+	m2, _ = m.Update(key('j'))
+	m = m2.(selectModel)
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace}) // uncheck "b"
+	m = m2.(selectModel)
+
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = m2.(selectModel)
+
+	if len(m.confirmed) != 0 {
+		t.Fatalf("confirmed = %v, want empty (deliberate none-selected)", m.confirmed)
+	}
+}
+
 func TestSelectModelFilter(t *testing.T) {
 	m := newSelectModel([]string{"apple", "banana", "cherry"}, false, nil)
 

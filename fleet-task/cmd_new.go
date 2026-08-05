@@ -125,9 +125,11 @@ func cmdNew() error {
 }
 
 // selectPatches globs <config dir>/patches/<repo>/*.patch and, if any
-// exist, lets the user multiselect which to apply. If there are zero
-// patches for the repo, selection is skipped entirely and an empty slice
-// is returned.
+// exist, lets the user multiselect which to apply, starting with every
+// patch checked so the common case ("apply them all") needs no input —
+// the user unchecks the ones they don't want. If there are zero patches
+// for the repo, selection is skipped entirely and an empty slice is
+// returned.
 func selectPatches(repo string) ([]string, error) {
 	dir, err := patchesDir(repo)
 	if err != nil {
@@ -140,7 +142,7 @@ func selectPatches(repo string) ([]string, error) {
 	if len(matches) == 0 {
 		return nil, nil
 	}
-	return selectMulti(matches)
+	return selectMultiPreselected(matches)
 }
 
 // applyPatch applies patchFile to worktreePath. For runtime: windows repos,
