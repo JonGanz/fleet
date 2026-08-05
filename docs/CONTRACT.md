@@ -42,6 +42,7 @@ windows_cache_root: ~/dev/.fleet-cache-windows          # optional; else auto-de
 
 defaults:                                       # optional; fills in blank per-repo fields below
   default_branch: main                          # used when a repo omits `default_branch`
+  branch_template: "eng/{ticket}"               # used when a repo omits `branch_template`; default "{ticket}"
   base_root: ~/dev/.fleet-base                  # used when a repo omits `base`: base = <base_root>/<repo-name>
   windows_base_root: ~/dev/.fleet-base-windows  # used when a runtime: windows repo omits `windows_base`
 
@@ -59,6 +60,7 @@ repos:
     origin: git@github.com:org/admin-ui.git
     base: ~/dev/.fleet-base/admin-ui-custom       # explicit `base` overrides defaults.base_root
     default_branch: develop                       # explicit `default_branch` overrides defaults.default_branch
+    branch_template: "{ticket}-{description}"     # explicit `branch_template` overrides defaults.branch_template
     runtime: windows
     windows_base: ~/dev/.fleet-base-windows/admin-ui-custom   # explicit windows_base overrides defaults.windows_base_root
     run:
@@ -67,19 +69,30 @@ repos:
 ```
 
 Field notes:
-- `defaults.default_branch` / `defaults.base_root` / `defaults.windows_base_root`: applied to
-  every repo that omits the corresponding field, via `applyDefaults()` in both
-  `fleet-task/config.go` and `fleet-run/config.go` (called right after YAML unmarshal, before the
-  config is used for anything). A repo's own `base`/`default_branch`/`windows_base`, when set,
-  always wins over the default. `windows_base_root` only ever fills in `windows_base` for
-  `runtime: windows` repos — a windows-runtime repo never gets a `base` derived from
-  `defaults.base_root`, since it doesn't use one. Because `applyDefaults()` runs at parse time,
-  everything downstream (`cmd_new.go`, `cmd_rm.go`, etc.) keeps reading
-  `repo.Base`/`repo.DefaultBranch`/`repo.WindowsBase` as plain, already-resolved fields — no caller
-  needs to know defaults exist.
+- `defaults.default_branch` / `defaults.branch_template` / `defaults.base_root` /
+  `defaults.windows_base_root`: applied to every repo that omits the corresponding field, via
+  `applyDefaults()` in both `fleet-task/config.go` and `fleet-run/config.go` (called right after
+  YAML unmarshal, before the config is used for anything). A repo's own
+  `base`/`default_branch`/`branch_template`/`windows_base`, when set, always wins over the default.
+  `windows_base_root` only ever fills in `windows_base` for `runtime: windows` repos — a
+  windows-runtime repo never gets a `base` derived from `defaults.base_root`, since it doesn't use
+  one. Because `applyDefaults()` runs at parse time, everything downstream (`cmd_new.go`,
+  `cmd_rm.go`, etc.) keeps reading `repo.Base`/`repo.DefaultBranch`/`repo.BranchTemplate`/
+  `repo.WindowsBase` as plain, already-resolved fields — no caller needs to know defaults exist.
+  (`fleet-run` parses and preserves `branch_template` structurally but never reads it — branch
+  naming is entirely a `fleet-task new`-time concern.)
+- `branch_template`: the git branch name `fleet-task new` creates is computed by `branchName()`
+  (`fleet-task/branch.go`) from this template, substituting `{ticket}` (verbatim) and
+  `{description}` (lowercased, non-alphanumeric runs collapsed to `-`, capped at 40 chars). An
+  empty/unset template (the default) is equivalent to `"{ticket}"` — today's plain-ticket branch
+  name. Note: if `{description}` is used and a later `fleet-task new` run for the *same* ticket is
+  given a different description, the computed branch name changes too, so the "reattach to the
+  existing branch on rerun" fallback (below) won't find a match and a new branch gets created
+  instead — a known, accepted tradeoff of allowing description-based names.
 - `origin` + `base`: on first use `fleet-task` runs `git clone --bare <origin> <base>`. On every
   subsequent `fleet-task new` it runs `git -C <base> fetch origin`, then
-  `git -C <base> worktree add <worktree_path> -b <ticket> origin/<default_branch>`.
+  `git -C <base> worktree add <worktree_path> -b <branch> origin/<default_branch>`, where `<branch>`
+  is the `branch_template`-derived name above (not necessarily the raw ticket id).
 - `runtime: windows` means: run commands for this repo are executed via
   `powershell.exe -NoExit -Command "..."` from WSL2, and its node_modules cache lives under a
   separate Windows-side cache path (hardlinks can't cross the WSL9P boundary). `fleet-cache` and
@@ -150,11 +163,15 @@ still take a `flock` on that file as a safety belt.
   "description": "Add retry logic to payment webhook",
   "created_at": "2026-08-02T22:58:00Z",
   "repos": [
-    { "repo": "backend", "branch": "PROJ-1234", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/backend" },
-    { "repo": "admin-ui", "branch": "PROJ-1234", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/admin-ui" }
+    { "repo": "backend", "branch": "eng/PROJ-1234", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/backend" },
+    { "repo": "admin-ui", "branch": "PROJ-1234-add-retry-logic-to-payment-webhook", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/admin-ui" }
   ]
 }
 ```
+
+`branch` reflects each repo's resolved `branch_template` (see `repos.yaml` field notes above) — it's
+not necessarily identical to `ticket`, and can differ per repo. `worktree_path` is always
+`<worktree_root>/<ticket>/<repo>` regardless of the branch name.
 
 `fleet-task list`/`fleet-task jump` and `fleet-run` all build their view of "what tickets/worktrees
 currently exist" by globbing `tasks/*.json` — never by reading a single aggregate file.

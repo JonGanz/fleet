@@ -33,10 +33,13 @@ Interactively:
      looks like an SSH URL, runs `ssh-add -l` first and warns (but doesn't
      block) if no identity looks loaded.
    - Runs `pre-create` hooks.
-   - Creates a worktree at
-     `<worktree_root>/<ticket>/<repo>` on a branch named after the ticket,
-     branching off `origin/<default_branch>`. Reruns for the same ticket
-     fall back to attaching the existing branch instead of failing.
+   - Creates a worktree at `<worktree_root>/<ticket>/<repo>` on a branch
+     computed from `branch_template` (repos.yaml, per-repo or fleet-wide
+     default — see "Design notes" below; defaults to the plain ticket id if
+     unset), branching off `origin/<default_branch>`. Reruns for the same
+     ticket fall back to attaching the existing branch instead of failing
+     (unless the template includes `{description}` and the description
+     changed since the last run — see "Design notes").
    - Applies the selected patches with `git apply` (see "Design notes"
      below for why `apply` rather than `am`).
    - Runs `post-create` hooks.
@@ -115,6 +118,15 @@ All paths are XDG-compliant and overridable via `FLEET_*` env vars — see
   keys, no external binary dependency. `esc`/`q`/`ctrl-c` cancel (returns
   a non-nil error); a bare `enter` with nothing checked confirms whatever
   row the cursor is on, matching fzf's old behavior.
+- **Configurable branch names** (`branch_template`, `branch.go`): `repos.yaml`'s top-level
+  `defaults.branch_template` and/or a per-repo `branch_template` override compute the git branch
+  name for a new ticket, substituting `{ticket}` and `{description}` (the latter slugified:
+  lowercased, non-alphanumeric runs collapsed to `-`, capped at 40 chars). Unset/empty is
+  equivalent to `"{ticket}"` — today's plain-ticket-id behavior. Caveat: a template using
+  `{description}` computes a different branch name if you rerun `fleet-task new` for the same
+  ticket with a different description, so the "reattach to the existing branch" fallback in
+  `setupWorktree` won't find a match in that case and a new branch gets created instead — accepted
+  as a tradeoff of allowing description-based names.
 - **`fleet-task rm` without `repos.yaml` entry**: per the spec this is a
   "just try / skip with a warning" case; the fallback tries
   `git -C <worktree_path> worktree remove <worktree_path> --force`, which
@@ -136,6 +148,8 @@ needed):
 - `select_test.go` — the picker's state machine (`selectModel.Update`):
   vim navigation, toggling, filtering, preselection, cancel — driven
   directly with synthetic `tea.KeyMsg`s, no real terminal needed.
+- `branch_test.go` — `branch_template` substitution and description
+  slugification.
 
 Subprocess-driving code (git commands, ssh-add, fleet-cache) is factored
 into small, separately-named functions (`git.go`, `cache.go`) that aren't

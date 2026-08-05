@@ -82,13 +82,13 @@ func cmdNew() error {
 		patches := patchesByRepo[repoName]
 
 		worktreePath := filepath.Join(wtRoot, ticket, repo.Name)
-		branch := ticket
+		branch := branchName(repo.BranchTemplate, ticket, description)
 
 		if err := runHooks("pre-create", ticket, repo.Name, worktreePath); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: pre-create hooks for %s: %v\n", repo.Name, err)
 		}
 
-		if err := setupWorktree(cfg, repo, ticket, worktreePath); err != nil {
+		if err := setupWorktree(cfg, repo, ticket, branch, worktreePath); err != nil {
 			fmt.Fprintf(os.Stderr, "error: setting up worktree for %s: %v\n", repo.Name, err)
 			continue
 		}
@@ -192,13 +192,13 @@ func windowsWorktreePaths(cfg *ReposConfig, repo *RepoConfig, ticket string) (ws
 }
 
 // setupWorktree ensures the repo's base bare clone exists (cloning or
-// fetching as needed) and creates the worktree for ticket at worktreePath.
-// For runtime: windows repos this delegates entirely to
+// fetching as needed) and creates the worktree for ticket at worktreePath on
+// branch. For runtime: windows repos this delegates entirely to
 // setupWorktreeWindows, since the actual git checkout must live on an NTFS
 // volume, operated on by Windows-native git.exe.
-func setupWorktree(cfg *ReposConfig, repo *RepoConfig, ticket, worktreePath string) error {
+func setupWorktree(cfg *ReposConfig, repo *RepoConfig, ticket, branch, worktreePath string) error {
 	if repo.Runtime == "windows" {
-		return setupWorktreeWindows(cfg, repo, ticket, worktreePath)
+		return setupWorktreeWindows(cfg, repo, ticket, branch, worktreePath)
 	}
 
 	base := expandHome(repo.Base)
@@ -227,12 +227,12 @@ func setupWorktree(cfg *ReposConfig, repo *RepoConfig, ticket, worktreePath stri
 		fmt.Fprintf(os.Stderr, "warning: worktree prune for %s: %v\n", base, err)
 	}
 
-	if err := gitWorktreeAddNewBranch(base, worktreePath, ticket, repo.DefaultBranch); err != nil {
+	if err := gitWorktreeAddNewBranch(base, worktreePath, branch, repo.DefaultBranch); err != nil {
 		// Branch may already exist from a prior `fleet-task new` run for
 		// this ticket; fall back to adding a worktree for the existing
 		// branch instead of treating this as fatal.
 		fmt.Fprintf(os.Stderr, "warning: worktree add -b failed (%v), retrying without -b (branch may already exist)\n", err)
-		if err2 := gitWorktreeAddExistingBranch(base, worktreePath, ticket); err2 != nil {
+		if err2 := gitWorktreeAddExistingBranch(base, worktreePath, branch); err2 != nil {
 			return fmt.Errorf("worktree add (existing branch): %w", err2)
 		}
 	}
@@ -247,7 +247,7 @@ func setupWorktree(cfg *ReposConfig, repo *RepoConfig, ticket, worktreePath stri
 // WSL-side <worktree_root>/<ticket>/<repo> location every other consumer
 // (fleet-run, hooks, fleet-cache) expects -- is left as a symlink into that
 // location instead of a real directory.
-func setupWorktreeWindows(cfg *ReposConfig, repo *RepoConfig, ticket, worktreePath string) error {
+func setupWorktreeWindows(cfg *ReposConfig, repo *RepoConfig, ticket, branch, worktreePath string) error {
 	if repo.WindowsBase == "" {
 		return fmt.Errorf("repo %s is runtime: windows but has no windows_base (set it directly or via defaults.windows_base_root)", repo.Name)
 	}
@@ -310,9 +310,9 @@ func setupWorktreeWindows(cfg *ReposConfig, repo *RepoConfig, ticket, worktreePa
 		fmt.Fprintf(os.Stderr, "warning: worktree prune for %s: %v\n", winBaseWin, err)
 	}
 
-	if err := winGitWorktreeAddNewBranch(winBaseWin, winWorktreeWin, ticket, repo.DefaultBranch); err != nil {
+	if err := winGitWorktreeAddNewBranch(winBaseWin, winWorktreeWin, branch, repo.DefaultBranch); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: worktree add -b failed (%v), retrying without -b (branch may already exist)\n", err)
-		if err2 := winGitWorktreeAddExistingBranch(winBaseWin, winWorktreeWin, ticket); err2 != nil {
+		if err2 := winGitWorktreeAddExistingBranch(winBaseWin, winWorktreeWin, branch); err2 != nil {
 			return fmt.Errorf("worktree add (existing branch): %w", err2)
 		}
 	}

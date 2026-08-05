@@ -17,13 +17,14 @@ type RunConfig struct {
 
 // RepoConfig describes one repo entry in repos.yaml.
 type RepoConfig struct {
-	Name          string      `yaml:"name"`
-	Origin        string      `yaml:"origin"`
-	Base          string      `yaml:"base"`
-	DefaultBranch string      `yaml:"default_branch"`
-	Runtime       string      `yaml:"runtime"`
-	WindowsBase   string      `yaml:"windows_base"`
-	Run           []RunConfig `yaml:"run"`
+	Name           string      `yaml:"name"`
+	Origin         string      `yaml:"origin"`
+	Base           string      `yaml:"base"`
+	DefaultBranch  string      `yaml:"default_branch"`
+	BranchTemplate string      `yaml:"branch_template"`
+	Runtime        string      `yaml:"runtime"`
+	WindowsBase    string      `yaml:"windows_base"`
+	Run            []RunConfig `yaml:"run"`
 }
 
 // TmuxConfig is the tmux section of repos.yaml (used by fleet-run; carried
@@ -37,6 +38,7 @@ type TmuxConfig struct {
 // repos.yaml doesn't need to repeat default_branch/base on every entry.
 type DefaultsConfig struct {
 	DefaultBranch   string `yaml:"default_branch"`
+	BranchTemplate  string `yaml:"branch_template"`
 	BaseRoot        string `yaml:"base_root"`
 	WindowsBaseRoot string `yaml:"windows_base_root"`
 }
@@ -53,14 +55,19 @@ type ReposConfig struct {
 
 // applyDefaults fills any repo field left blank in repos.yaml with the
 // top-level `defaults` values: default_branch falls back directly, base
-// falls back to <base_root>/<repo-name> when the repo omits `base`, and for
+// falls back to <base_root>/<repo-name> when the repo omits `base`, for
 // runtime: windows repos, windows_base falls back to
-// <windows_base_root>/<repo-name> the same way.
+// <windows_base_root>/<repo-name> the same way, and branch_template falls
+// back directly (further defaulting to "{ticket}" in branchName if still
+// unset after this, i.e. today's plain-ticket behavior).
 func (c *ReposConfig) applyDefaults() {
 	for i := range c.Repos {
 		r := &c.Repos[i]
 		if r.DefaultBranch == "" {
 			r.DefaultBranch = c.Defaults.DefaultBranch
+		}
+		if r.BranchTemplate == "" {
+			r.BranchTemplate = c.Defaults.BranchTemplate
 		}
 		if r.Runtime != "windows" && r.Base == "" && c.Defaults.BaseRoot != "" {
 			r.Base = path.Join(c.Defaults.BaseRoot, r.Name)

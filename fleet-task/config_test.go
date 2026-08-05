@@ -79,6 +79,9 @@ func TestLoadReposConfig(t *testing.T) {
 	if backend.DefaultBranch != "main" {
 		t.Errorf("Repos[0].DefaultBranch = %q", backend.DefaultBranch)
 	}
+	if backend.BranchTemplate != "" {
+		t.Errorf("Repos[0].BranchTemplate = %q, want empty (no defaults.branch_template set)", backend.BranchTemplate)
+	}
 	if backend.Runtime != "linux" {
 		t.Errorf("Repos[0].Runtime = %q", backend.Runtime)
 	}
@@ -107,6 +110,7 @@ func TestLoadReposConfig(t *testing.T) {
 const defaultsFixtureYAML = `
 defaults:
   default_branch: main
+  branch_template: "eng/{ticket}"
   base_root: ~/dev/.fleet-base
   windows_base_root: ~/dev/.fleet-base-windows
 
@@ -125,6 +129,7 @@ repos:
     origin: git@github.com:org/admin-ui.git
     base: ~/dev/.fleet-base/admin-ui-custom
     default_branch: develop
+    branch_template: "ui/{ticket}"
     run:
       - name: dev
         cmd: "npm run dev"
@@ -164,6 +169,9 @@ func TestLoadReposConfigAppliesDefaults(t *testing.T) {
 	if backend.DefaultBranch != "main" {
 		t.Errorf("backend.DefaultBranch = %q, want %q", backend.DefaultBranch, "main")
 	}
+	if backend.BranchTemplate != "eng/{ticket}" {
+		t.Errorf("backend.BranchTemplate = %q, want default-derived %q", backend.BranchTemplate, "eng/{ticket}")
+	}
 
 	adminUI := cfg.findRepo("admin-ui")
 	if adminUI == nil {
@@ -174,6 +182,9 @@ func TestLoadReposConfigAppliesDefaults(t *testing.T) {
 	}
 	if adminUI.DefaultBranch != "develop" {
 		t.Errorf("adminUI.DefaultBranch = %q, want explicit value preserved", adminUI.DefaultBranch)
+	}
+	if adminUI.BranchTemplate != "ui/{ticket}" {
+		t.Errorf("adminUI.BranchTemplate = %q, want explicit value preserved", adminUI.BranchTemplate)
 	}
 
 	if cfg.WindowsWorktreeRoot != "~/dev/.fleet-worktrees-windows" {
@@ -192,6 +203,9 @@ func TestLoadReposConfigAppliesDefaults(t *testing.T) {
 	}
 	if roomLauncher.DefaultBranch != "main" {
 		t.Errorf("roomLauncher.DefaultBranch = %q, want %q", roomLauncher.DefaultBranch, "main")
+	}
+	if roomLauncher.BranchTemplate != "eng/{ticket}" {
+		t.Errorf("roomLauncher.BranchTemplate = %q, want default-derived %q", roomLauncher.BranchTemplate, "eng/{ticket}")
 	}
 	// A runtime: windows repo should NOT get a plain (Linux) `base` derived
 	// from defaults.base_root -- only windows_base applies.
