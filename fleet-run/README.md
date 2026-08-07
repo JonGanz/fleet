@@ -57,19 +57,19 @@ set -g status-right '#{@fleet_task_ticket}: #{@fleet_task_description}'
 1. Resolves which ticket to operate on:
    - `--ticket <id>` loads `tasks/<id>.json` directly.
    - With no `--ticket`, there's no "plain checkout" path outside of
-     worktrees per the contract, so `fleet-run` requires there to be
-     **exactly one** file under `tasks/*.json`; zero or more than one is an
-     error telling you to pass `--ticket` explicitly.
+     worktrees per the contract. Zero files under `tasks/*.json` is still an
+     error telling you to create one with `fleet-task new` first; exactly one
+     file is used automatically; two or more files bring up an in-process
+     bubbletea single-select picker (vim movement, `/` to filter) over the
+     ticket ids so you don't have to pass `--ticket` by hand.
 2. Builds the list of available `repo:run-name` pairs from `repos.yaml`'s
    `run` entries, restricted to repos that actually have a worktree in the
    resolved task.
-3. Multiselects from that list via `fzf --multi` (candidates piped in on
-   stdin, `stderr` inherited for the interactive UI, `stdout` captured for
-   the selection — fzf opens `/dev/tty` itself for keyboard/screen handling
-   regardless of stdout redirection, so no `/dev/tty`-opening fallback was
-   needed). If nothing is selected, `start` stops here and touches nothing
-   else — no session/option changes — so backing out never tears down a
-   working environment.
+3. Multiselects from that list via the same in-process bubbletea picker
+   (`select.go`, mirrored from `fleet-task`'s), opened directly against
+   `/dev/tty` so it works regardless of stdout redirection. If nothing is
+   selected, `start` stops here and touches nothing else — no session/option
+   changes — so backing out never tears down a working environment.
 4. Ensures the tmux session exists (`tmux has-session`; if absent,
    `tmux [-f <config_file>] new-session -d -s <session>` — note `-f` is a
    *global* tmux flag and must precede the subcommand, not follow it).
@@ -97,7 +97,7 @@ set -g status-right '#{@fleet_task_ticket}: #{@fleet_task_description}'
   there's nothing else to filter by.
 - With `--all`: kills every window currently running.
 - With positional `repo:run-name` args: kills just those specific windows.
-- With neither: multiselects (fzf) over the currently running windows.
+- With neither: multiselects (bubbletea) over the currently running windows.
 - Whenever a `stop` leaves the session with zero windows running, it clears
   `@fleet_task_ticket`/`@fleet_task_description`.
 
@@ -113,13 +113,16 @@ Same precedence as the rest of the fleet suite:
 
 ## Testing
 
-Everything that doesn't require a live `tmux`/`fzf`/`powershell.exe` is
-covered by unit tests (`go test ./...`):
+Everything that doesn't require a live `tmux`/`powershell.exe` or an
+interactive terminal is covered by unit tests (`go test ./...`):
 
 - `config_test.go` — `repos.yaml` parsing, including `tmux`, `worktree_root`,
   and per-repo `run`/`runtime`.
 - `task_test.go` — `tasks/<ticket>.json` parsing and the `--ticket`
   resolution rules (explicit / single-task-fallback / zero-or-many error).
+  The zero-or-many case still errors at this layer; the bubbletea picker for
+  the many-tasks case is wired in one level up, in `cmd_start.go`'s
+  `loadStartContext`, so it stays out of these pure-logic tests.
 - `window_test.go` — window name construction (`<repo>-<run-name>`).
 - `pairs_test.go` — deriving available `repo:run-name` pairs from a fixture
   `repos.yaml` + task state, including skipping repos absent from
@@ -131,6 +134,7 @@ covered by unit tests (`go test ./...`):
   linux and windows runtimes, `kill-window`, `list-windows`, and the
   `set-option`/`show-options` calls used for the active-ticket record).
 
-Actual subprocess execution (`tmux_exec.go`, `fzf.go`) is a thin, deliberately
-untested wrapper around these pure functions — it has no branching logic of
-its own left to test once the argv-building and selection logic is verified.
+Actual subprocess execution (`tmux_exec.go`) and the interactive bubbletea
+picker (`select.go`) are thin, deliberately untested wrappers — they have no
+branching logic of their own left to test once the argv-building and
+selection logic is verified.

@@ -52,7 +52,7 @@ func runStop(ticket string, all bool, names []string) error {
 		}
 
 	default:
-		selected, err := multiSelect(windows)
+		selected, err := selectMulti(windows)
 		if err != nil {
 			return err
 		}

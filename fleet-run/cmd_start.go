@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // runStart implements `fleet-run start [--ticket <id>]`. Only one ticket's
@@ -36,11 +38,43 @@ func loadStartContext(ticket string) (*ReposConfig, *TaskState, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	if ticket == "" {
+		ticket, err = pickTicketIfAmbiguous(td)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	ts, err := resolveTicketState(td, ticket)
 	if err != nil {
 		return nil, nil, err
 	}
 	return cfg, ts, nil
+}
+
+// pickTicketIfAmbiguous leaves ticket selection to resolveTicketState's own
+// zero/one-file handling when there's nothing to choose between, and only
+// steps in when there are multiple task files and no --ticket was given --
+// in that case it launches the bubbletea single-select picker over ticket
+// names so `start` with no arguments works interactively instead of
+// erroring and telling the user to pass --ticket.
+func pickTicketIfAmbiguous(tasksDirPath string) (string, error) {
+	files, err := listTaskFiles(tasksDirPath)
+	if err != nil {
+		return "", fmt.Errorf("list task files in %s: %w", tasksDirPath, err)
+	}
+	if len(files) <= 1 {
+		return "", nil
+	}
+
+	tickets := make([]string, 0, len(files))
+	for _, f := range files {
+		tickets = append(tickets, strings.TrimSuffix(filepath.Base(f), ".json"))
+	}
+	chosen, err := selectOne(tickets)
+	if err != nil {
+		return "", fmt.Errorf("select ticket: %w", err)
+	}
+	return chosen, nil
 }
 
 // startFlow runs the interactive multiselect + tmux window creation flow
@@ -56,7 +90,7 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 		labels[i] = p.Label()
 	}
 
-	selected, err := multiSelect(labels)
+	selected, err := selectMulti(labels)
 	if err != nil {
 		return err
 	}
