@@ -133,7 +133,7 @@ Field notes:
 
 Directory listing only, no index file:
 `<config dir>/patches/<repo>/*.patch` — plain files produced by `git diff` / `git format-patch`.
-`fleet-task new` lets the user multiselect (fzf) which ones to apply per repo, applying each with
+`fleet-task new` lets the user multiselect (bubbletea, by filename) which ones to apply per repo, applying each with
 `git apply` (or `git am` if the file has commit-message headers) in the new worktree.
 
 ## Hooks

@@ -19,7 +19,7 @@ func selectMulti(items []string) ([]string, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
-	return runSelect(items, true, nil)
+	return runSelect("", items, true, nil)
 }
 
 // selectMultiPreselected is selectMulti but with every item checked by
@@ -29,6 +29,13 @@ func selectMulti(items []string) ([]string, error) {
 // once a picker starts preselected, an empty result is a deliberate
 // "none of these" rather than "I forgot to check anything."
 func selectMultiPreselected(items []string) ([]string, error) {
+	return selectMultiPreselectedTitled("", items)
+}
+
+// selectMultiPreselectedTitled is selectMultiPreselected with a title line
+// rendered above the picker, for pickers (like patch selection) where the
+// item list alone doesn't say what's being chosen or why.
+func selectMultiPreselectedTitled(title string, items []string) ([]string, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -36,14 +43,14 @@ func selectMultiPreselected(items []string) ([]string, error) {
 	for _, it := range items {
 		checked[it] = true
 	}
-	return runSelect(items, true, checked)
+	return runSelect(title, items, true, checked)
 }
 
 // selectOne replaces the old fzf single-select picker with the same
 // vim-navigable, filterable list, but without checkboxes: enter
 // immediately confirms the highlighted item.
 func selectOne(items []string) (string, error) {
-	selected, err := runSelect(items, false, nil)
+	selected, err := runSelect("", items, false, nil)
 	if err != nil {
 		return "", err
 	}
@@ -53,8 +60,8 @@ func selectOne(items []string) (string, error) {
 	return selected[0], nil
 }
 
-func runSelect(items []string, multi bool, preselected map[string]bool) ([]string, error) {
-	m := newSelectModel(items, multi, preselected)
+func runSelect(title string, items []string, multi bool, preselected map[string]bool) ([]string, error) {
+	m := newSelectModel(title, items, multi, preselected)
 
 	// Render/read against the controlling terminal directly rather than
 	// os.Stdin/os.Stdout: callers like `jump` are meant to be run as
@@ -88,6 +95,7 @@ var (
 )
 
 type selectModel struct {
+	title    string
 	items    []string
 	filtered []int // indices into items matching the current filter
 	checked  map[string]bool
@@ -106,7 +114,7 @@ type selectModel struct {
 	done      bool
 }
 
-func newSelectModel(items []string, multi bool, preselected map[string]bool) selectModel {
+func newSelectModel(title string, items []string, multi bool, preselected map[string]bool) selectModel {
 	checked := make(map[string]bool, len(preselected))
 	hasPreselection := false
 	for k, v := range preselected {
@@ -116,6 +124,7 @@ func newSelectModel(items []string, multi bool, preselected map[string]bool) sel
 		}
 	}
 	m := selectModel{
+		title:           title,
 		items:           items,
 		checked:         checked,
 		multi:           multi,
@@ -282,6 +291,10 @@ func (m selectModel) View() string {
 		return ""
 	}
 	var b strings.Builder
+
+	if m.title != "" {
+		b.WriteString(selectDimStyle.Render(m.title) + "\n")
+	}
 
 	prompt := "> "
 	if m.filtering {

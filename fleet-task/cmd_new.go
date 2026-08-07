@@ -1,33 +1,25 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
 func cmdNew() error {
-	reader := bufio.NewReader(os.Stdin)
-
-	fmt.Print("Ticket: ")
-	ticket, err := reader.ReadString('\n')
+	ticket, err := promptText("Ticket")
 	if err != nil {
 		return fmt.Errorf("read ticket: %w", err)
 	}
-	ticket = strings.TrimSpace(ticket)
 	if ticket == "" {
 		return fmt.Errorf("ticket id is required")
 	}
 
-	fmt.Print("Description: ")
-	description, err := reader.ReadString('\n')
+	description, err := promptText("Description")
 	if err != nil {
 		return fmt.Errorf("read description: %w", err)
 	}
-	description = strings.TrimSpace(description)
 
 	rf, err := reposFile()
 	if err != nil {
@@ -143,6 +135,11 @@ func cmdNew() error {
 // the user unchecks the ones they don't want. If there are zero patches
 // for the repo, selection is skipped entirely and an empty slice is
 // returned.
+//
+// The picker displays just each patch's filename, not its full
+// <config dir>/patches/<repo>/... path, and is titled with the repo name so
+// it's clear which repo's patches are being chosen -- the full path is only
+// used internally to map the chosen filenames back to appliable paths.
 func selectPatches(repo string) ([]string, error) {
 	dir, err := patchesDir(repo)
 	if err != nil {
@@ -155,7 +152,26 @@ func selectPatches(repo string) ([]string, error) {
 	if len(matches) == 0 {
 		return nil, nil
 	}
-	return selectMultiPreselected(matches)
+
+	pathByName := make(map[string]string, len(matches))
+	names := make([]string, len(matches))
+	for i, m := range matches {
+		name := filepath.Base(m)
+		names[i] = name
+		pathByName[name] = m
+	}
+
+	title := fmt.Sprintf("%s: select patches to apply", repo)
+	selectedNames, err := selectMultiPreselectedTitled(title, names)
+	if err != nil {
+		return nil, err
+	}
+
+	selected := make([]string, len(selectedNames))
+	for i, name := range selectedNames {
+		selected[i] = pathByName[name]
+	}
+	return selected, nil
 }
 
 // applyPatch applies patchFile to worktreePath. For runtime: windows repos,
