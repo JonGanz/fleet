@@ -30,6 +30,19 @@ func tmuxOutput(args ...string) (string, error) {
 	return out.String(), err
 }
 
+// tmuxOutputQuiet is tmuxOutput with stderr discarded rather than inherited,
+// for calls whose failure is an expected, silently-handled outcome (e.g.
+// reading a session option that may simply not be set yet) -- callers that
+// swallow the error shouldn't still leak tmux's raw error text to the
+// terminal.
+func tmuxOutputQuiet(args ...string) (string, error) {
+	cmd := exec.Command("tmux", args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	return out.String(), err
+}
+
 // sessionExists reports whether the fleet tmux session already exists.
 func sessionExists(session string) bool {
 	cmd := exec.Command("tmux", hasSessionArgs(session)...)
@@ -157,25 +170,23 @@ func killWindow(session, name string) error {
 	return runTmux(killWindowArgs(session, name)...)
 }
 
-// setSessionOption sets a session-scoped tmux option.
-func setSessionOption(session, name, value string) error {
-	return runTmux(setSessionOptionArgs(session, name, value)...)
+// setSessionOption sets the given tmux user option (global scope -- see
+// setSessionOptionArgs for why).
+func setSessionOption(name, value string) error {
+	return runTmux(setSessionOptionArgs(name, value)...)
 }
 
-// unsetSessionOption clears a session-scoped tmux option. Unsetting an
-// option that was never set is not an error.
-func unsetSessionOption(session, name string) error {
-	return runTmux(unsetSessionOptionArgs(session, name)...)
+// unsetSessionOption clears a tmux user option. Unsetting an option that
+// was never set is not an error.
+func unsetSessionOption(name string) error {
+	return runTmux(unsetSessionOptionArgs(name)...)
 }
 
-// getSessionOption reads a session-scoped tmux option's value. found is
-// false if the option isn't set (tmux prints nothing for an unset user
-// option) or the session doesn't exist.
-func getSessionOption(session, name string) (value string, found bool, err error) {
-	if !sessionExists(session) {
-		return "", false, nil
-	}
-	out, err := tmuxOutput(showSessionOptionArgs(session, name)...)
+// getSessionOption reads a tmux user option's value. found is false if the
+// option isn't set (tmux prints nothing for an unset user option) or no
+// tmux server is currently running at all.
+func getSessionOption(name string) (value string, found bool, err error) {
+	out, err := tmuxOutputQuiet(showSessionOptionArgs(name)...)
 	if err != nil {
 		return "", false, nil
 	}

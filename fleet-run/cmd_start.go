@@ -75,7 +75,7 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 		return err
 	}
 
-	active, hasActive, err := activeTicket(session)
+	active, hasActive, err := activeTicket()
 	if err != nil {
 		return err
 	}
@@ -84,8 +84,15 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 		if err := killAllWindowsInSession(session); err != nil {
 			return err
 		}
+		// Killing every window -- including the last one -- makes tmux
+		// destroy the session itself as a side effect, so it must be
+		// recreated before anything below (setActiveTicket, listWindows,
+		// newWindow) can target it again.
+		if err := ensureSession(session, cfg.Tmux.ConfigFile); err != nil {
+			return err
+		}
 	}
-	if err := setActiveTicket(session, ts); err != nil {
+	if err := setActiveTicket(ts); err != nil {
 		return fmt.Errorf("recording active ticket: %w", err)
 	}
 

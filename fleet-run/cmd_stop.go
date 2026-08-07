@@ -21,7 +21,7 @@ func runStop(ticket string, all bool, names []string) error {
 	}
 
 	if ticket != "" {
-		active, hasActive, err := activeTicket(session)
+		active, hasActive, err := activeTicket()
 		if err != nil {
 			return err
 		}
@@ -86,7 +86,7 @@ func runStop(ticket string, all bool, names []string) error {
 		return err
 	}
 	if len(remaining) == 0 {
-		if err := clearActiveTicket(session); err != nil {
+		if err := clearActiveTicket(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: clearing active ticket record: %v\n", err)
 		}
 	}

@@ -71,24 +71,24 @@ func TestHasSessionArgs(t *testing.T) {
 }
 
 func TestSetSessionOptionArgs(t *testing.T) {
-	got := setSessionOptionArgs("fleet", "@fleet_task_ticket", "PROJ-1234")
-	want := []string{"set-option", "-t", "=fleet", "@fleet_task_ticket", "PROJ-1234"}
+	got := setSessionOptionArgs("@fleet_task_ticket", "PROJ-1234")
+	want := []string{"set-option", "-g", "@fleet_task_ticket", "PROJ-1234"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("setSessionOptionArgs = %v, want %v", got, want)
 	}
 }
 
 func TestUnsetSessionOptionArgs(t *testing.T) {
-	got := unsetSessionOptionArgs("fleet", "@fleet_task_ticket")
-	want := []string{"set-option", "-u", "-t", "=fleet", "@fleet_task_ticket"}
+	got := unsetSessionOptionArgs("@fleet_task_ticket")
+	want := []string{"set-option", "-gu", "@fleet_task_ticket"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("unsetSessionOptionArgs = %v, want %v", got, want)
 	}
 }
 
 func TestShowSessionOptionArgs(t *testing.T) {
-	got := showSessionOptionArgs("fleet", "@fleet_task_ticket")
-	want := []string{"show-options", "-t", "=fleet", "-v", "@fleet_task_ticket"}
+	got := showSessionOptionArgs("@fleet_task_ticket")
+	want := []string{"show-options", "-g", "-v", "@fleet_task_ticket"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("showSessionOptionArgs = %v, want %v", got, want)
 	}

@@ -88,22 +88,32 @@ func killWindowArgs(session, name string) []string {
 	return []string{"kill-window", "-t", exactTarget(session) + ":" + name}
 }
 
-// setSessionOptionArgs builds argv for setting a session-scoped tmux option
-// (e.g. the @fleet_task_ticket/@fleet_task_description user options tracking
-// which ticket is currently active).
-func setSessionOptionArgs(session, name, value string) []string {
-	return []string{"set-option", "-t", exactTarget(session), name, value}
+// setSessionOptionArgs builds argv for setting the @fleet_task_ticket/
+// @fleet_task_description user options tracking which ticket is currently
+// active.
+//
+// Uses -g (global session options) rather than -t <session>: set-option/
+// show-options resolve their -t as a target-*pane*, which for a bare
+// session target (no window/pane component, e.g. "=fleet") can only fall
+// back to the attached client's current window -- and right after
+// `fleet-run start` creates or targets the session, there is no attached
+// client yet, so that resolution fails with a confusing "no such session"
+// even though the session exists (caught against a live tmux server, not
+// hypothetical). -g sets a server-wide default with no pane/window
+// resolution involved at all, which is equivalent in practice since fleet
+// only ever has this one session.
+func setSessionOptionArgs(name, value string) []string {
+	return []string{"set-option", "-g", name, value}
 }
 
-// unsetSessionOptionArgs builds argv for clearing a session-scoped tmux
-// option.
-func unsetSessionOptionArgs(session, name string) []string {
-	return []string{"set-option", "-u", "-t", exactTarget(session), name}
+// unsetSessionOptionArgs builds argv for clearing a global session option.
+func unsetSessionOptionArgs(name string) []string {
+	return []string{"set-option", "-gu", name}
 }
 
-// showSessionOptionArgs builds argv for reading a session-scoped tmux
-// option's value only (-v), so callers get a bare value with no "name value"
-// prefix to strip.
-func showSessionOptionArgs(session, name string) []string {
-	return []string{"show-options", "-t", exactTarget(session), "-v", name}
+// showSessionOptionArgs builds argv for reading a global session option's
+// value only (-v), so callers get a bare value with no "name value" prefix
+// to strip.
+func showSessionOptionArgs(name string) []string {
+	return []string{"show-options", "-g", "-v", name}
 }
