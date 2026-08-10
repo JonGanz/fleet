@@ -118,6 +118,13 @@ All paths are XDG-compliant and overridable via `FLEET_*` env vars — see
   keys, no external binary dependency. `esc`/`q`/`ctrl-c` cancel (returns
   a non-nil error); a bare `enter` with nothing checked confirms whatever
   row the cursor is on, matching fzf's old behavior.
+- **Text input UI**: `new`'s Ticket/Description prompts are a single
+  bubbletea form (`textinput.go`, `promptForm`) showing every field at once
+  in its own bordered box rather than asking one `bufio.Reader` question at
+  a time. `tab`/`shift+tab` or `up`/`down` move between fields in any order;
+  within a field, `left`/`right`/`home`/`end` move the cursor and
+  `backspace`/`delete` edit it. `enter` advances to the next field, or
+  submits the form on the last one; `esc`/`ctrl-c` cancel.
 - **Configurable branch names** (`branch_template`, `branch.go`): `repos.yaml`'s top-level
   `defaults.branch_template` and/or a per-repo `branch_template` override compute the git branch
   name for a new ticket, substituting `{ticket}` and `{description}` (the latter slugified:

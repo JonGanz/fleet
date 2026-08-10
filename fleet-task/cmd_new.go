@@ -8,17 +8,13 @@ import (
 )
 
 func cmdNew() error {
-	ticket, err := promptText("Ticket")
+	values, err := promptForm([]string{"Ticket", "Description"})
 	if err != nil {
-		return fmt.Errorf("read ticket: %w", err)
+		return fmt.Errorf("read ticket/description: %w", err)
 	}
+	ticket, description := values[0], values[1]
 	if ticket == "" {
 		return fmt.Errorf("ticket id is required")
-	}
-
-	description, err := promptText("Description")
-	if err != nil {
-		return fmt.Errorf("read description: %w", err)
 	}
 
 	rf, err := reposFile()
