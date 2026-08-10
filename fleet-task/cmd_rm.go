@@ -30,32 +30,7 @@ func cmdRm(ticket string) error {
 	var remaining []TaskRepo
 
 	for _, r := range st.Repos {
-		repo := cfg.findRepo(r.Repo)
-
-		if repo != nil && repo.Runtime == "windows" {
-			if rmErr := removeWorktreeWindows(repo, r.WorktreePath); rmErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: removing windows worktree %s: %v\n", r.WorktreePath, rmErr)
-				remaining = append(remaining, r)
-				continue
-			}
-			fmt.Printf("removed worktree %s (%s)\n", r.WorktreePath, r.Repo)
-			continue
-		}
-
-		var base string
-		if repo != nil {
-			base = expandHome(repo.Base)
-		}
-
-		var rmErr error
-		if base != "" {
-			rmErr = gitWorktreeRemove(base, r.WorktreePath)
-		} else {
-			fmt.Fprintf(os.Stderr, "warning: repo %q not found in repos.yaml, trying worktree remove without a base\n", r.Repo)
-			rmErr = runGit("-C", r.WorktreePath, "worktree", "remove", r.WorktreePath, "--force")
-		}
-
-		if rmErr != nil {
+		if rmErr := removeRepoWorktree(cfg, r); rmErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: removing worktree %s: %v\n", r.WorktreePath, rmErr)
 			remaining = append(remaining, r)
 			continue
@@ -80,6 +55,31 @@ func cmdRm(ticket string) error {
 	}
 	fmt.Printf("removed task state %s\n", tf)
 	return nil
+}
+
+// removeRepoWorktree tears down a single repo's worktree, shared between
+// `rm` (removing every repo in a task) and `edit`'s remove-repo path
+// (removing a selected subset). cfg may be nil, or missing this repo's
+// entry entirely (repos.yaml changed, or the repo was dropped from it,
+// since the task was created) -- best-effort falls back to a bare
+// `git worktree remove` run against the worktree itself rather than
+// aborting.
+func removeRepoWorktree(cfg *ReposConfig, r TaskRepo) error {
+	repo := cfg.findRepo(r.Repo)
+
+	if repo != nil && repo.Runtime == "windows" {
+		return removeWorktreeWindows(repo, r.WorktreePath)
+	}
+
+	var base string
+	if repo != nil {
+		base = expandHome(repo.Base)
+	}
+	if base != "" {
+		return gitWorktreeRemove(base, r.WorktreePath)
+	}
+	fmt.Fprintf(os.Stderr, "warning: repo %q not found in repos.yaml, trying worktree remove without a base\n", r.Repo)
+	return runGit("-C", r.WorktreePath, "worktree", "remove", r.WorktreePath, "--force")
 }
 
 // removeWorktreeWindows tears down a runtime: windows repo's worktree: the

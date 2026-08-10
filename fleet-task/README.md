@@ -73,6 +73,35 @@ source /path/to/fleet-task/contrib/fleet.sh
 fj   # select a worktree, cd into it
 ```
 
+### `fleet-task edit <ticket>`
+
+Lets an already-created task's repo list grow or shrink, without tearing
+down and recreating the whole task:
+
+1. Loads the task's state file and `repos.yaml`, then shows two separate
+   multiselect pickers (same in-process UI as `new`): one over repos in
+   `repos.yaml` not yet part of the task ("select repos to add"), one over
+   the task's currently-attached repos ("select repos to remove"). Either
+   can be left empty.
+2. For repos being added, prompts for patch selection up front (same as
+   `new`, and for the same reason — front-load every prompt before any
+   git/hook work starts).
+3. Removes the selected repos first, using the same per-repo teardown as
+   `rm` (and the same partial-failure handling: a repo that fails to remove
+   stays in the task's state for the next `edit`/`rm` to retry, rather than
+   silently vanishing from `fleet-task list`).
+4. Adds the selected repos, using the same per-repo setup as `new` — the
+   branch name is computed from the task's existing `description`, not
+   re-prompted, so repos added later get names consistent with the ones
+   added at `new` time.
+5. Writes the updated state file. If every repo ends up removed and none
+   were added, deletes the task's state file entirely instead of leaving an
+   empty-repos file behind — matching `rm`'s end state.
+
+Note: `fleet-task` has no visibility into `fleet-run`'s live tmux windows,
+so removing a repo that currently has a running window won't stop it —
+run `fleet-run stop` for that ticket first if you want a clean switch.
+
 ### `fleet-task rm <ticket>`
 
 Loads that ticket's state file, runs `git worktree remove --force` for

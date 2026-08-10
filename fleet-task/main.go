@@ -16,6 +16,7 @@ commands:
   new              interactively create a new task's worktrees
   list [--json]    list existing tasks
   jump             select a worktree and print its path (for `+"`cd $(fleet-task jump)`"+`)
+  edit <ticket>    add and/or remove repos from an existing task
   rm <ticket>      remove a task's worktrees and state file`)
 }
 
@@ -39,6 +40,12 @@ func main() {
 		err = cmdList(jsonOut)
 	case "jump":
 		err = cmdJump()
+	case "edit":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: fleet-task edit <ticket>")
+			os.Exit(1)
+		}
+		err = cmdEdit(os.Args[2])
 	case "rm":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "usage: fleet-task rm <ticket>")

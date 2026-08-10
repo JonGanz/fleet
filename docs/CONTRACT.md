@@ -147,7 +147,10 @@ FLEET_REPO=<repo name>
 FLEET_WORKTREE_DIR=<absolute path>
 ```
 
-`pre-create`/`post-create` run around `fleet-task new`'s per-repo worktree setup.
+`pre-create`/`post-create` run around `fleet-task new`'s per-repo worktree setup, and around
+`fleet-task edit <ticket>`'s per-repo setup for any repos it adds (same underlying per-repo
+function, `createRepoWorktree`). There is no `pre-remove`/`post-remove` equivalent — `fleet-task
+rm` and `edit`'s repo-removal path run no hooks around teardown.
 `pre-run`/`post-run` run around `fleet-run start`'s per-window launch (reserved for fleet-run;
 not required for v1 but the directories/contract should exist).
 
@@ -172,6 +175,13 @@ still take a `flock` on that file as a safety belt.
 `branch` reflects each repo's resolved `branch_template` (see `repos.yaml` field notes above) — it's
 not necessarily identical to `ticket`, and can differ per repo. `worktree_path` is always
 `<worktree_root>/<ticket>/<repo>` regardless of the branch name.
+
+`repos` isn't fixed at `fleet-task new` time — `fleet-task edit <ticket>` can add or remove entries
+from it later, reusing `new`'s per-repo setup and `rm`'s per-repo teardown respectively. Repos added
+via `edit` reuse the task's existing top-level `description` for `branch_template` resolution rather
+than re-prompting, so branch names stay consistent with repos added at `new` time. If `edit` removes
+every repo and adds none, the state file is deleted entirely rather than left with an empty `repos`
+array.
 
 `fleet-task list`/`fleet-task jump` and `fleet-run` all build their view of "what tickets/worktrees
 currently exist" by globbing `tasks/*.json` — never by reading a single aggregate file.

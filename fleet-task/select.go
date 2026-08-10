@@ -16,10 +16,17 @@ import (
 // bare enter selecting the highlighted line). Returns (nil, error) if the
 // user cancels (esc/ctrl-c), matching the old fzfSelectMulti contract.
 func selectMulti(items []string) ([]string, error) {
+	return selectMultiTitled("", items)
+}
+
+// selectMultiTitled is selectMulti with a title line rendered above the
+// picker, for pickers where the item list alone doesn't say what's being
+// chosen or why (e.g. `edit`'s separate add/remove repo pickers).
+func selectMultiTitled(title string, items []string) ([]string, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
-	return runSelect("", items, true, nil)
+	return runSelect(title, items, true, nil)
 }
 
 // selectMultiPreselected is selectMulti but with every item checked by

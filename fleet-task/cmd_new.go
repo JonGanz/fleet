@@ -67,39 +67,12 @@ func cmdNew() error {
 			continue
 		}
 
-		patches := patchesByRepo[repoName]
-
-		worktreePath := filepath.Join(wtRoot, ticket, repo.Name)
-		branch := branchName(repo.BranchTemplate, ticket, description)
-
-		if err := runHooks("pre-create", ticket, repo.Name, worktreePath); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: pre-create hooks for %s: %v\n", repo.Name, err)
-		}
-
-		if err := setupWorktree(cfg, repo, ticket, branch, worktreePath); err != nil {
-			fmt.Fprintf(os.Stderr, "error: setting up worktree for %s: %v\n", repo.Name, err)
+		tr, err := createRepoWorktree(cfg, repo, ticket, description, wtRoot, patchesByRepo[repoName])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			continue
 		}
-
-		for _, p := range patches {
-			if err := applyPatch(cfg, repo, ticket, worktreePath, p); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: applying patch %s to %s: %v\n", p, repo.Name, err)
-			}
-		}
-
-		if err := runHooks("post-create", ticket, repo.Name, worktreePath); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: post-create hooks for %s: %v\n", repo.Name, err)
-		}
-
-		if _, err := os.Stat(filepath.Join(worktreePath, "package-lock.json")); err == nil {
-			ensureNodeCache(repo, cfg, worktreePath)
-		}
-
-		taskRepos = append(taskRepos, TaskRepo{
-			Repo:         repo.Name,
-			Branch:       branch,
-			WorktreePath: worktreePath,
-		})
+		taskRepos = append(taskRepos, tr)
 	}
 
 	if len(taskRepos) == 0 {
@@ -123,6 +96,47 @@ func cmdNew() error {
 
 	fmt.Printf("Task %s created with %d repo(s); state written to %s\n", ticket, len(taskRepos), tf)
 	return nil
+}
+
+// createRepoWorktree performs the full per-repo worktree setup, shared
+// between `new` (every repo for a brand new task) and `edit`'s add-repo
+// path (a subset of repos added to an already-existing task): pre-create
+// hook, worktree creation/branch checkout, patch application, post-create
+// hook, and node_modules cache priming. Hook and patch failures are
+// non-fatal (warned to stderr, same as before this was extracted); a
+// failure setting up the worktree itself is returned as an error so the
+// caller can skip this repo and keep going with the rest.
+func createRepoWorktree(cfg *ReposConfig, repo *RepoConfig, ticket, description, wtRoot string, patches []string) (TaskRepo, error) {
+	worktreePath := filepath.Join(wtRoot, ticket, repo.Name)
+	branch := branchName(repo.BranchTemplate, ticket, description)
+
+	if err := runHooks("pre-create", ticket, repo.Name, worktreePath); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: pre-create hooks for %s: %v\n", repo.Name, err)
+	}
+
+	if err := setupWorktree(cfg, repo, ticket, branch, worktreePath); err != nil {
+		return TaskRepo{}, fmt.Errorf("setting up worktree for %s: %w", repo.Name, err)
+	}
+
+	for _, p := range patches {
+		if err := applyPatch(cfg, repo, ticket, worktreePath, p); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: applying patch %s to %s: %v\n", p, repo.Name, err)
+		}
+	}
+
+	if err := runHooks("post-create", ticket, repo.Name, worktreePath); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: post-create hooks for %s: %v\n", repo.Name, err)
+	}
+
+	if _, err := os.Stat(filepath.Join(worktreePath, "package-lock.json")); err == nil {
+		ensureNodeCache(repo, cfg, worktreePath)
+	}
+
+	return TaskRepo{
+		Repo:         repo.Name,
+		Branch:       branch,
+		WorktreePath: worktreePath,
+	}, nil
 }
 
 // selectPatches globs <config dir>/patches/<repo>/*.patch and, if any
