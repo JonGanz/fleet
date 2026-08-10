@@ -25,21 +25,43 @@ PowerShell/npm processes rather than WSL reaching into `/mnt/...`.
 
 ## Commands
 
-### `fleet-cache ensure <dir>`
+### `fleet-cache ensure <dir> [--force]`
 
 `<dir>` is a worktree/repo directory containing a `package-lock.json`.
 
 1. Hashes `<dir>/package-lock.json` (sha256). Errors out (non-zero exit,
    message on stderr) if the file is missing.
-2. If no cache entry exists for that hash yet: creates
+2. **Skip-if-unchanged**: if `<dir>/node_modules/.fleet-cache-hash` already
+   records this exact hash (written by a prior successful `ensure`), prints
+   `node_modules already linked to cache <hash8chars>, nothing to do` and
+   stops here, touching nothing else. This is what makes it safe to `npm
+   link` a package inside a worktree's `node_modules` and rerun `ensure`
+   later (e.g. from another `fleet-task` command) without losing the link —
+   without this check, `node_modules` is otherwise treated as a disposable
+   derived artifact and unconditionally rebuilt from the cache on every
+   call, silently discarding anything added by hand. Pass `--force` to
+   rebuild anyway. If the lockfile hash *has* changed, `ensure` always
+   rebuilds regardless of `--force` — a real dependency change is expected
+   to replace whatever was there, `npm link`ed packages included.
+3. If no cache entry exists for that hash yet: creates
    `<cache root>/node-cache/<hash>/`, copies the lockfile in, and runs
    `npm ci` there (with stdout/stderr inherited so you see npm's progress).
-3. If `<dir>/node_modules` already exists, removes it (it's a disposable
-   derived artifact).
-4. Hardlinks the cache entry's `node_modules` tree into `<dir>/node_modules`:
+   Every regular file in the resulting `node_modules` is then chmod'd
+   read-only (`0444`) — since permission bits belong to the shared inode,
+   not the directory entry, this takes effect for every worktree the file
+   is later hardlinked into, not just this cache copy. Directories stay
+   writable, so entries can still be added/removed/replaced (this is how
+   `ensure`'s own rebuild and `npm link`'s symlink-swap both keep working);
+   only in-place edits to existing file *content* are blocked, turning what
+   would otherwise be silent corruption shared across every worktree using
+   that lockfile hash into a loud permission error instead.
+4. If `<dir>/node_modules` already exists (and step 2 didn't already skip),
+   removes it (it's a disposable derived artifact).
+5. Hardlinks the cache entry's `node_modules` tree into `<dir>/node_modules`:
    regular files become hardlinks (`os.Link`); symlinks (e.g. npm bin shims)
-   are recreated as symlinks rather than hardlinked.
-5. Prints `linked node_modules from cache <hash8chars>` on success.
+   are recreated as symlinks rather than hardlinked. Writes the
+   `.fleet-cache-hash` marker used by step 2's skip check.
+6. Prints `linked node_modules from cache <hash8chars>` on success.
 
 Intended to be called by `fleet-task new` after creating each repo's
 worktree, per the CLI contract — a cache failure for one repo should not

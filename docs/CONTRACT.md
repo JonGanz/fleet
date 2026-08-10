@@ -223,6 +223,18 @@ currently exist" by globbing `tasks/*.json` — never by reading a single aggreg
   costs rather than the many-small-file operations that are slow across the WSL9P boundary.
   `gc-windows` mirrors `gc`'s `--roots`/`--force` safety semantics against the Windows-native cache
   root instead.
+- `fleet-cache ensure` (Linux/WSL2 path only) is safe to call repeatedly against the same
+  `<worktree_dir>`: it's a no-op if `<worktree_dir>/node_modules` is already linked from the current
+  `package-lock.json` hash (tracked via a `.fleet-cache-hash` marker inside `node_modules`), so
+  anything added to `node_modules` by hand since the last `ensure` — most notably an `npm link`
+  package symlink — survives untouched. It only rebuilds `node_modules` (destroying manual changes,
+  same as before) when the lockfile hash actually changes, or when called with `--force`. Regular
+  files in a cache entry are also chmod'd read-only (`0444`) once, at `npm ci` time — since
+  permission bits live on the inode shared by every worktree's hardlink, this doesn't block
+  `ensure`'s own rebuild or `npm link`'s symlink-swap (both only need write access to the containing
+  directory), but does turn any future in-place edit to a hardlinked file into a loud permission
+  error instead of silently corrupting every other worktree sharing that lockfile hash. This does
+  not apply to `ensure-windows`, which uses a separate, non-hardlink-based mechanism.
 - `fleet-task jump` prints the chosen worktree path (and only that, no other output) on stdout so
   it composes with a shell function:
   ```bash

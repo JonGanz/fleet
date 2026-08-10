@@ -92,3 +92,53 @@ func TestHardlinkTreeRequiresDirSource(t *testing.T) {
 		t.Fatal("expected error when source is not a directory")
 	}
 }
+
+func TestLockDownPermissions(t *testing.T) {
+	root := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatalf("mkdir pkg: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pkg", "index.js"), []byte("console.log(1)"), 0o644); err != nil {
+		t.Fatalf("write index.js: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("pkg", "index.js"), filepath.Join(root, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if err := lockDownPermissions(root); err != nil {
+		t.Fatalf("lockDownPermissions: %v", err)
+	}
+
+	fileInfo, err := os.Stat(filepath.Join(root, "pkg", "index.js"))
+	if err != nil {
+		t.Fatalf("stat index.js: %v", err)
+	}
+	if perm := fileInfo.Mode().Perm(); perm != 0o444 {
+		t.Errorf("index.js perm = %o, want 0444", perm)
+	}
+
+	dirInfo, err := os.Stat(filepath.Join(root, "pkg"))
+	if err != nil {
+		t.Fatalf("stat pkg dir: %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0o755 {
+		t.Errorf("pkg dir perm = %o, want unchanged 0755 (directories must stay writable)", perm)
+	}
+
+	linkInfo, err := os.Lstat(filepath.Join(root, "link"))
+	if err != nil {
+		t.Fatalf("lstat link: %v", err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected link to remain a symlink, got mode %v", linkInfo.Mode())
+	}
+
+	// Removing the now-read-only file must still succeed: unlink only needs
+	// write permission on the containing directory, not the file itself --
+	// this is what keeps ensure's RemoveAll+rebuild and npm link's
+	// directory-entry replacement working despite the lockdown.
+	if err := os.Remove(filepath.Join(root, "pkg", "index.js")); err != nil {
+		t.Errorf("removing read-only file should succeed (dir stays writable): %v", err)
+	}
+}

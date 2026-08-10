@@ -6,15 +6,38 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
-// runEnsure implements `fleet-cache ensure <dir>`.
+// markerPath returns the path of the marker file `ensure` writes into a
+// target node_modules recording which cache hash last populated it.
+func markerPath(targetNodeModules string) string {
+	return filepath.Join(targetNodeModules, ".fleet-cache-hash")
+}
+
+// alreadyLinked reports whether targetNodeModules's marker matches hash --
+// i.e. a previous `ensure` call already populated it from this exact cache
+// entry, so it's safe to skip re-linking and leave whatever the user has
+// since added (e.g. an `npm link` symlink) untouched.
+func alreadyLinked(targetNodeModules, hash string) bool {
+	data, err := os.ReadFile(markerPath(targetNodeModules))
+	return err == nil && strings.TrimSpace(string(data)) == hash
+}
+
+// writeMarker records hash as the cache entry that populated
+// targetNodeModules, so a future `ensure` call can detect nothing's changed
+// and skip the destructive rebuild.
+func writeMarker(targetNodeModules, hash string) error {
+	return os.WriteFile(markerPath(targetNodeModules), []byte(hash), 0o644)
+}
+
+// runEnsure implements `fleet-cache ensure <dir> [--force]`.
 //
 // This is Linux/WSL2-only. Windows-runtime repos (per repos.yaml's
 // `runtime: windows` field, see docs/CONTRACT.md) use the separate
 // `ensure-windows` command (ensure_win.go) instead, since hardlinks
 // can't cross the WSL9P boundary.
-func runEnsure(dir string) error {
+func runEnsure(dir string, force bool) error {
 	lockPath := filepath.Join(dir, "package-lock.json")
 	if _, err := os.Stat(lockPath); err != nil {
 		return fmt.Errorf("no package-lock.json in %s: %w", dir, err)
@@ -23,6 +46,23 @@ func runEnsure(dir string) error {
 	hash, err := hashFile(lockPath)
 	if err != nil {
 		return fmt.Errorf("hashing %s: %w", lockPath, err)
+	}
+
+	shortHash := hash
+	if len(shortHash) > 8 {
+		shortHash = shortHash[:8]
+	}
+
+	targetNodeModules := filepath.Join(dir, "node_modules")
+
+	// If this exact cache hash already populated the target, skip the
+	// destructive rebuild entirely -- node_modules is otherwise treated as a
+	// disposable derived artifact and blown away/relinked on every call,
+	// which silently destroys anything the user has since added by hand
+	// (most notably `npm link`'s package symlinks).
+	if !force && alreadyLinked(targetNodeModules, hash) {
+		fmt.Printf("node_modules already linked to cache %s, nothing to do\n", shortHash)
+		return nil
 	}
 
 	entry, err := entryDir(hash)
@@ -39,7 +79,6 @@ func runEnsure(dir string) error {
 		return fmt.Errorf("checking cache entry %s: %w", entry, err)
 	}
 
-	targetNodeModules := filepath.Join(dir, "node_modules")
 	if _, err := os.Stat(targetNodeModules); err == nil {
 		if err := os.RemoveAll(targetNodeModules); err != nil {
 			return fmt.Errorf("removing existing %s: %w", targetNodeModules, err)
@@ -50,10 +89,10 @@ func runEnsure(dir string) error {
 		return fmt.Errorf("hardlinking node_modules into %s: %w", dir, err)
 	}
 
-	shortHash := hash
-	if len(shortHash) > 8 {
-		shortHash = shortHash[:8]
+	if err := writeMarker(targetNodeModules, hash); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: writing cache marker: %v\n", err)
 	}
+
 	fmt.Printf("linked node_modules from cache %s\n", shortHash)
 	return nil
 }
@@ -91,9 +130,14 @@ func populateCacheEntry(entry, lockPath string) error {
 		return fmt.Errorf("npm ci failed in %s: %w", entry, err)
 	}
 
-	if _, err := os.Stat(filepath.Join(entry, "node_modules")); err != nil {
+	nodeModules := filepath.Join(entry, "node_modules")
+	if _, err := os.Stat(nodeModules); err != nil {
 		_ = os.RemoveAll(entry)
 		return fmt.Errorf("npm ci completed but node_modules missing in %s: %w", entry, err)
+	}
+
+	if err := lockDownPermissions(nodeModules); err != nil {
+		return fmt.Errorf("locking down cache entry permissions: %w", err)
 	}
 
 	return nil
