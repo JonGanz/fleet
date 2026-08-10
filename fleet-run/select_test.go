@@ -72,15 +72,17 @@ func TestSelectModelSingleEnterConfirmsCursor(t *testing.T) {
 func TestSelectModelMultiToggleAndEnter(t *testing.T) {
 	m := newSelectModel([]string{"a", "b", "c"}, true, nil)
 
-	// Enter with nothing checked falls back to the item under the cursor.
+	// Space toggles the item under the cursor and advances to the next row,
+	// so checking off consecutive items is just repeated space presses.
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
 	m = m2.(selectModel)
 	if !m.checked["a"] {
 		t.Fatalf("expected 'a' checked after space")
 	}
+	if m.cursor != 1 {
+		t.Fatalf("expected cursor to advance to 1 after space, got %d", m.cursor)
+	}
 
-	m2, _ = m.Update(key('j'))
-	m = m2.(selectModel)
 	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
 	m = m2.(selectModel)
 	if !m.checked["b"] {
@@ -96,6 +98,26 @@ func TestSelectModelMultiToggleAndEnter(t *testing.T) {
 	got := map[string]bool{m.confirmed[0]: true, m.confirmed[1]: true}
 	if !got["a"] || !got["b"] {
 		t.Fatalf("confirmed = %v, want [a b]", m.confirmed)
+	}
+}
+
+func TestSelectModelSpaceAdvancesButDoesNotOvershoot(t *testing.T) {
+	m := newSelectModel([]string{"a", "b"}, true, nil)
+
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = m2.(selectModel)
+	if m.cursor != 1 {
+		t.Fatalf("after first space: cursor = %d, want 1", m.cursor)
+	}
+
+	// Toggling the last row must not move the cursor past it.
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = m2.(selectModel)
+	if m.cursor != 1 {
+		t.Fatalf("after space on last row: cursor = %d, want 1 (no overshoot)", m.cursor)
+	}
+	if !m.checked["a"] || !m.checked["b"] {
+		t.Fatalf("expected both items checked, got %v", m.checked)
 	}
 }
 

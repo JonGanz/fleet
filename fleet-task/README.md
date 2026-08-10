@@ -17,8 +17,8 @@ Interactively:
 1. Prompts for a ticket id and description.
 2. Loads `repos.yaml` and lets you multiselect which repos this task
    touches, via an in-process picker (vim keys: `j`/`k` move, `gg`/`G` top/
-   bottom, `space` toggle, `a` select all, `A` clear, `/` filter, `enter`
-   confirm, `esc`/`q` cancel).
+   bottom, `space` toggle and advance to the next row, `a` select all, `A`
+   clear, `/` filter, `enter` confirm, `esc`/`q` cancel).
 3. For each selected repo with patch files under
    `<config dir>/patches/<repo>/*.patch`, lets you multiselect which to
    apply — every patch starts checked, so you uncheck the ones you don't
@@ -82,7 +82,9 @@ down and recreating the whole task:
    multiselect pickers (same in-process UI as `new`): one over repos in
    `repos.yaml` not yet part of the task ("select repos to add"), one over
    the task's currently-attached repos ("select repos to remove"). Either
-   can be left empty.
+   can be left empty — unlike `new`'s repo picker, confirming with nothing
+   checked here means exactly that (no add/no remove), not "whatever repo
+   the cursor happens to be on."
 2. For repos being added, prompts for patch selection up front (same as
    `new`, and for the same reason — front-load every prompt before any
    git/hook work starts).

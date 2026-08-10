@@ -21,12 +21,30 @@ func selectMulti(items []string) ([]string, error) {
 
 // selectMultiTitled is selectMulti with a title line rendered above the
 // picker, for pickers where the item list alone doesn't say what's being
-// chosen or why (e.g. `edit`'s separate add/remove repo pickers).
+// chosen or why.
 func selectMultiTitled(title string, items []string) ([]string, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
-	return runSelect(title, items, true, nil)
+	return runSelect(title, items, true, nil, true)
+}
+
+// selectMultiOptional is selectMulti but a bare enter with nothing checked
+// confirms an empty selection instead of falling back to whatever row the
+// cursor is on -- for pickers where "select nothing" is a common, valid
+// answer (e.g. `edit`'s separate add/remove repo pickers, where you might
+// only be here to remove one repo and add none).
+func selectMultiOptional(items []string) ([]string, error) {
+	return selectMultiOptionalTitled("", items)
+}
+
+// selectMultiOptionalTitled is selectMultiOptional with a title line
+// rendered above the picker.
+func selectMultiOptionalTitled(title string, items []string) ([]string, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	return runSelect(title, items, true, nil, false)
 }
 
 // selectMultiPreselected is selectMulti but with every item checked by
@@ -50,14 +68,14 @@ func selectMultiPreselectedTitled(title string, items []string) ([]string, error
 	for _, it := range items {
 		checked[it] = true
 	}
-	return runSelect(title, items, true, checked)
+	return runSelect(title, items, true, checked, false)
 }
 
 // selectOne replaces the old fzf single-select picker with the same
 // vim-navigable, filterable list, but without checkboxes: enter
 // immediately confirms the highlighted item.
 func selectOne(items []string) (string, error) {
-	selected, err := runSelect("", items, false, nil)
+	selected, err := runSelect("", items, false, nil, true)
 	if err != nil {
 		return "", err
 	}
@@ -67,8 +85,8 @@ func selectOne(items []string) (string, error) {
 	return selected[0], nil
 }
 
-func runSelect(title string, items []string, multi bool, preselected map[string]bool) ([]string, error) {
-	m := newSelectModel(title, items, multi, preselected)
+func runSelect(title string, items []string, multi bool, preselected map[string]bool, cursorFallback bool) ([]string, error) {
+	m := newSelectModel(title, items, multi, preselected, cursorFallback)
 
 	// Render/read against the controlling terminal directly rather than
 	// os.Stdin/os.Stdout: callers like `jump` are meant to be run as
@@ -114,28 +132,28 @@ type selectModel struct {
 
 	pendingG bool // "g" pressed once, waiting for a second "g" (gg = go to top)
 
-	hasPreselection bool // true if the picker started with any item checked
+	// cursorFallback controls what a bare enter with nothing checked does:
+	// true mirrors fzf's behavior of confirming whatever row the cursor is
+	// on; false confirms an empty selection instead, for pickers where
+	// "select nothing" is itself a valid, deliberate answer.
+	cursorFallback bool
 
 	confirmed []string
 	cancelled bool
 	done      bool
 }
 
-func newSelectModel(title string, items []string, multi bool, preselected map[string]bool) selectModel {
+func newSelectModel(title string, items []string, multi bool, preselected map[string]bool, cursorFallback bool) selectModel {
 	checked := make(map[string]bool, len(preselected))
-	hasPreselection := false
 	for k, v := range preselected {
 		checked[k] = v
-		if v {
-			hasPreselection = true
-		}
 	}
 	m := selectModel{
-		title:           title,
-		items:           items,
-		checked:         checked,
-		multi:           multi,
-		hasPreselection: hasPreselection,
+		title:          title,
+		items:          items,
+		checked:        checked,
+		multi:          multi,
+		cursorFallback: cursorFallback,
 	}
 	m.applyFilter()
 	return m
@@ -250,6 +268,12 @@ func (m selectModel) updateNormal(msg tea.KeyMsg) selectModel {
 		if m.multi && len(m.filtered) > 0 {
 			item := m.items[m.filtered[m.cursor]]
 			m.checked[item] = !m.checked[item]
+			// Advance to the next row, same as j/down, so checking off a
+			// run of items doesn't require a separate keypress between each
+			// toggle. Doesn't wrap past the last row.
+			if m.cursor < len(m.filtered)-1 {
+				m.cursor++
+			}
 		}
 	case "a":
 		if m.multi {
@@ -268,8 +292,9 @@ func (m selectModel) updateNormal(msg tea.KeyMsg) selectModel {
 }
 
 // selection returns the checked items (multi mode) or, if nothing is
-// checked yet, the item currently under the cursor — mirroring fzf's
-// behavior where a bare enter picks the highlighted line.
+// checked yet and cursorFallback is enabled, the item currently under the
+// cursor — mirroring fzf's behavior where a bare enter picks the
+// highlighted line.
 func (m selectModel) selection() []string {
 	if m.multi {
 		var out []string
@@ -278,12 +303,7 @@ func (m selectModel) selection() []string {
 				out = append(out, item)
 			}
 		}
-		// A bare enter with nothing checked falls back to the item under
-		// the cursor (mirrors fzf's behavior) — but only for pickers that
-		// started with nothing preselected. If the picker started
-		// preselected and the user unchecked everything, that's a
-		// deliberate "select none," not "I forgot to check anything."
-		if len(out) > 0 || m.hasPreselection {
+		if len(out) > 0 || !m.cursorFallback {
 			return out
 		}
 	}

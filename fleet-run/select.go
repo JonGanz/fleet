@@ -231,6 +231,12 @@ func (m selectModel) updateNormal(msg tea.KeyMsg) selectModel {
 		if m.multi && len(m.filtered) > 0 {
 			item := m.items[m.filtered[m.cursor]]
 			m.checked[item] = !m.checked[item]
+			// Advance to the next row, same as j/down, so checking off a
+			// run of items doesn't require a separate keypress between each
+			// toggle. Doesn't wrap past the last row.
+			if m.cursor < len(m.filtered)-1 {
+				m.cursor++
+			}
 		}
 	case "a":
 		if m.multi {

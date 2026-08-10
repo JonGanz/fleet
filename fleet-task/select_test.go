@@ -11,7 +11,7 @@ func key(r rune) tea.KeyMsg {
 }
 
 func TestSelectModelVimNavigation(t *testing.T) {
-	m := newSelectModel("", []string{"a", "b", "c"}, false, nil)
+	m := newSelectModel("", []string{"a", "b", "c"}, false, nil, true)
 
 	m2, _ := m.Update(key('j'))
 	m = m2.(selectModel)
@@ -54,7 +54,7 @@ func TestSelectModelVimNavigation(t *testing.T) {
 }
 
 func TestSelectModelSingleEnterConfirmsCursor(t *testing.T) {
-	m := newSelectModel("", []string{"a", "b", "c"}, false, nil)
+	m := newSelectModel("", []string{"a", "b", "c"}, false, nil, true)
 	m2, _ := m.Update(key('j'))
 	m = m2.(selectModel)
 
@@ -70,17 +70,19 @@ func TestSelectModelSingleEnterConfirmsCursor(t *testing.T) {
 }
 
 func TestSelectModelMultiToggleAndEnter(t *testing.T) {
-	m := newSelectModel("", []string{"a", "b", "c"}, true, nil)
+	m := newSelectModel("", []string{"a", "b", "c"}, true, nil, true)
 
-	// Enter with nothing checked falls back to the item under the cursor.
+	// Space toggles the item under the cursor and advances to the next row,
+	// so checking off consecutive items is just repeated space presses.
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
 	m = m2.(selectModel)
 	if !m.checked["a"] {
 		t.Fatalf("expected 'a' checked after space")
 	}
+	if m.cursor != 1 {
+		t.Fatalf("expected cursor to advance to 1 after space, got %d", m.cursor)
+	}
 
-	m2, _ = m.Update(key('j'))
-	m = m2.(selectModel)
 	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
 	m = m2.(selectModel)
 	if !m.checked["b"] {
@@ -99,8 +101,46 @@ func TestSelectModelMultiToggleAndEnter(t *testing.T) {
 	}
 }
 
+func TestSelectModelSpaceAdvancesButDoesNotOvershoot(t *testing.T) {
+	m := newSelectModel("", []string{"a", "b"}, true, nil, true)
+
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = m2.(selectModel)
+	if m.cursor != 1 {
+		t.Fatalf("after first space: cursor = %d, want 1", m.cursor)
+	}
+
+	// Toggling the last row must not move the cursor past it.
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = m2.(selectModel)
+	if m.cursor != 1 {
+		t.Fatalf("after space on last row: cursor = %d, want 1 (no overshoot)", m.cursor)
+	}
+	if !m.checked["a"] || !m.checked["b"] {
+		t.Fatalf("expected both items checked, got %v", m.checked)
+	}
+}
+
+func TestSelectModelCursorFallbackDisabledConfirmsEmpty(t *testing.T) {
+	// Regression: a picker built with cursorFallback=false (selectMultiOptional)
+	// must let a bare enter with nothing checked confirm an empty selection
+	// instead of silently picking whatever row the cursor happens to be on --
+	// this is what makes "select nothing" possible on `edit`'s add/remove
+	// pickers.
+	m := newSelectModel("", []string{"a", "b", "c"}, true, nil, false)
+	m2, _ := m.Update(key('j'))
+	m = m2.(selectModel)
+
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = m2.(selectModel)
+
+	if len(m.confirmed) != 0 {
+		t.Fatalf("confirmed = %v, want empty (cursorFallback disabled)", m.confirmed)
+	}
+}
+
 func TestSelectModelMultiEnterWithNoneCheckedUsesCursor(t *testing.T) {
-	m := newSelectModel("", []string{"a", "b", "c"}, true, nil)
+	m := newSelectModel("", []string{"a", "b", "c"}, true, nil, true)
 	m2, _ := m.Update(key('j'))
 	m = m2.(selectModel)
 
@@ -113,7 +153,7 @@ func TestSelectModelMultiEnterWithNoneCheckedUsesCursor(t *testing.T) {
 }
 
 func TestSelectModelPreselected(t *testing.T) {
-	m := newSelectModel("", []string{"a", "b", "c"}, true, map[string]bool{"a": true, "c": true})
+	m := newSelectModel("", []string{"a", "b", "c"}, true, map[string]bool{"a": true, "c": true}, false)
 
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = m2.(selectModel)
@@ -129,7 +169,7 @@ func TestSelectModelPreselectedUncheckAllConfirmsEmpty(t *testing.T) {
 	// uncheck everything and get an empty result — it must NOT fall back
 	// to selecting whatever's under the cursor, since that fallback exists
 	// only for pickers that started with nothing checked.
-	m := newSelectModel("", []string{"a", "b"}, true, map[string]bool{"a": true, "b": true})
+	m := newSelectModel("", []string{"a", "b"}, true, map[string]bool{"a": true, "b": true}, false)
 
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace}) // uncheck "a" (cursor starts at 0)
 	m = m2.(selectModel)
@@ -147,7 +187,7 @@ func TestSelectModelPreselectedUncheckAllConfirmsEmpty(t *testing.T) {
 }
 
 func TestSelectModelFilter(t *testing.T) {
-	m := newSelectModel("", []string{"apple", "banana", "cherry"}, false, nil)
+	m := newSelectModel("", []string{"apple", "banana", "cherry"}, false, nil, true)
 
 	m2, _ := m.Update(key('/'))
 	m = m2.(selectModel)
@@ -178,7 +218,7 @@ func TestSelectModelFilter(t *testing.T) {
 }
 
 func TestSelectModelEscClearsFilterBeforeCancelling(t *testing.T) {
-	m := newSelectModel("", []string{"apple", "banana", "cherry"}, false, nil)
+	m := newSelectModel("", []string{"apple", "banana", "cherry"}, false, nil, true)
 
 	m2, _ := m.Update(key('/'))
 	m = m2.(selectModel)
@@ -211,7 +251,7 @@ func TestSelectModelEscClearsFilterBeforeCancelling(t *testing.T) {
 }
 
 func TestSelectModelEscInNormalModeClearsLingeringFilter(t *testing.T) {
-	m := newSelectModel("", []string{"apple", "banana", "cherry"}, false, nil)
+	m := newSelectModel("", []string{"apple", "banana", "cherry"}, false, nil, true)
 
 	m2, _ := m.Update(key('/'))
 	m = m2.(selectModel)
@@ -236,7 +276,7 @@ func TestSelectModelEscInNormalModeClearsLingeringFilter(t *testing.T) {
 }
 
 func TestSelectModelCancel(t *testing.T) {
-	m := newSelectModel("", []string{"a", "b"}, false, nil)
+	m := newSelectModel("", []string{"a", "b"}, false, nil, true)
 	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = m2.(selectModel)
 
@@ -259,7 +299,7 @@ func TestSelectModelUpdateQuitsOnceDone(t *testing.T) {
 		{Type: tea.KeyRunes, Runes: []rune{'q'}},
 	}
 	for _, key := range cases {
-		m := newSelectModel("", []string{"a", "b"}, false, nil)
+		m := newSelectModel("", []string{"a", "b"}, false, nil, true)
 		_, cmd := m.Update(key)
 		if cmd == nil {
 			t.Fatalf("key %v: expected a non-nil cmd (tea.Quit) once the model is done", key)
@@ -272,7 +312,7 @@ func TestSelectModelUpdateQuitsOnceDone(t *testing.T) {
 		{Type: tea.KeyRunes, Runes: []rune{'/'}},
 	}
 	for _, key := range live {
-		m := newSelectModel("", []string{"a", "b"}, false, nil)
+		m := newSelectModel("", []string{"a", "b"}, false, nil, true)
 		_, cmd := m.Update(key)
 		if cmd != nil {
 			t.Fatalf("key %v: expected nil cmd while picker is still active", key)

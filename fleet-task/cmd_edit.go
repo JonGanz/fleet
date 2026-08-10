@@ -52,11 +52,16 @@ func cmdEdit(ticket string) error {
 		attachedNames[i] = r.Repo
 	}
 
-	toAdd, err := selectMultiTitled(fmt.Sprintf("%s: select repos to add", ticket), availableRepoNames(cfg, st.Repos))
+	// selectMultiOptionalTitled, not selectMultiTitled: an empty selection is
+	// a common, valid answer on both of these pickers (e.g. you may only be
+	// here to remove a repo and add none, or vice versa), so a bare enter
+	// with nothing checked must confirm "nothing" rather than falling back
+	// to whatever repo the cursor happens to be on.
+	toAdd, err := selectMultiOptionalTitled(fmt.Sprintf("%s: select repos to add", ticket), availableRepoNames(cfg, st.Repos))
 	if err != nil {
 		return fmt.Errorf("add-repo selection: %w", err)
 	}
-	toRemove, err := selectMultiTitled(fmt.Sprintf("%s: select repos to remove", ticket), attachedNames)
+	toRemove, err := selectMultiOptionalTitled(fmt.Sprintf("%s: select repos to remove", ticket), attachedNames)
 	if err != nil {
 		return fmt.Errorf("remove-repo selection: %w", err)
 	}
