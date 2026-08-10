@@ -11,7 +11,7 @@ to each other as subprocesses. No shared Go code/module between them.
 | Config dir          | `$XDG_CONFIG_HOME/fleet` (default `~/.config/fleet`)     | `FLEET_CONFIG_DIR` |
 | Repos config file   | `<config dir>/repos.yaml`                                | `FLEET_REPOS_FILE` |
 | Patches dir         | `<config dir>/patches/<repo>/<patch-name>.patch`         | -                  |
-| Hooks dir           | `<config dir>/hooks/{pre-create,post-create,pre-run,post-run}/*` | -         |
+| Hooks dir           | `<config dir>/hooks/{pre-create,post-create,pre-remove,post-remove,pre-run,post-run}/*` | -         |
 | State dir           | `$XDG_STATE_HOME/fleet` (default `~/.local/state/fleet`) | `FLEET_STATE_DIR`  |
 | Per-task state file | `<state dir>/tasks/<ticket>.json`                        | -                  |
 | Worktree root       | `<state dir>/worktrees/<ticket>/<repo>` (or `repos.yaml` `worktree_root`) | -   |
@@ -138,8 +138,8 @@ Directory listing only, no index file:
 
 ## Hooks
 
-`<config dir>/hooks/{pre-create,post-create,pre-run,post-run}/*` — any executable file found is
-run in filename-sorted order. Environment passed to each hook:
+`<config dir>/hooks/{pre-create,post-create,pre-remove,post-remove,pre-run,post-run}/*` — any
+executable file found is run in filename-sorted order. Environment passed to each hook:
 
 ```
 FLEET_TICKET=<ticket id>
@@ -149,8 +149,14 @@ FLEET_WORKTREE_DIR=<absolute path>
 
 `pre-create`/`post-create` run around `fleet-task new`'s per-repo worktree setup, and around
 `fleet-task edit <ticket>`'s per-repo setup for any repos it adds (same underlying per-repo
-function, `createRepoWorktree`). There is no `pre-remove`/`post-remove` equivalent — `fleet-task
-rm` and `edit`'s repo-removal path run no hooks around teardown.
+function, `createRepoWorktree`).
+
+`pre-remove`/`post-remove` run around `fleet-task rm`'s per-repo teardown, and around `fleet-task
+edit <ticket>`'s per-repo teardown for any repos it removes (same underlying per-repo function,
+`removeRepoWorktree`). `FLEET_WORKTREE_DIR` for these is the worktree path that is about to be (or
+was) removed; by the time `post-remove` runs, that path is generally gone from disk. Like
+pre-create/post-create, a failing hook only warns to stderr and never blocks the removal.
+
 `pre-run`/`post-run` run around `fleet-run start`'s per-window launch (reserved for fleet-run;
 not required for v1 but the directories/contract should exist).
 

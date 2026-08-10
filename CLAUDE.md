@@ -171,4 +171,4 @@ Defined authoritatively in `docs/CONTRACT.md`; summarized here as a reminder of 
 - `tasks/<ticket>.json` shape — written by `fleet-task` (`state.go`), read by both `fleet-task`
   and `fleet-run` (`task.go`).
 - Hook env vars (`FLEET_TICKET`, `FLEET_REPO`, `FLEET_WORKTREE_DIR`) passed to executables under
-  `<config dir>/hooks/{pre-create,post-create,pre-run,post-run}/*`.
+  `<config dir>/hooks/{pre-create,post-create,pre-remove,post-remove,pre-run,post-run}/*`.

@@ -24,8 +24,9 @@ func availableRepoNames(cfg *ReposConfig, attached []TaskRepo) []string {
 
 // cmdEdit lets an already-created task's repo list grow or shrink: repos
 // not yet part of the task can be added (full worktree setup, same as
-// `new`), and repos already part of it can be removed (same teardown as
-// `rm`, minus deleting the task file itself unless every repo ends up
+// `new`, including pre-create/post-create hooks), and repos already part of
+// it can be removed (same teardown as `rm`, including pre-remove/post-remove
+// hooks, minus deleting the task file itself unless every repo ends up
 // removed). Both add/remove selections are made up front, before any
 // git/hook work starts, mirroring `new`'s patch-selection front-loading.
 func cmdEdit(ticket string) error {
@@ -101,7 +102,7 @@ func cmdEdit(ticket string) error {
 			kept = append(kept, r)
 			continue
 		}
-		if err := removeRepoWorktree(cfg, r); err != nil {
+		if err := removeRepoWorktree(cfg, ticket, r); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: removing worktree %s: %v\n", r.WorktreePath, err)
 			kept = append(kept, r)
 			removeFailures++

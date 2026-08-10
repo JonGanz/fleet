@@ -89,9 +89,10 @@ down and recreating the whole task:
    `new`, and for the same reason — front-load every prompt before any
    git/hook work starts).
 3. Removes the selected repos first, using the same per-repo teardown as
-   `rm` (and the same partial-failure handling: a repo that fails to remove
-   stays in the task's state for the next `edit`/`rm` to retry, rather than
-   silently vanishing from `fleet-task list`).
+   `rm` (pre-remove/post-remove hooks and all — see below) and the same
+   partial-failure handling: a repo that fails to remove stays in the
+   task's state for the next `edit`/`rm` to retry, rather than silently
+   vanishing from `fleet-task list`.
 4. Adds the selected repos, using the same per-repo setup as `new` — the
    branch name is computed from the task's existing `description`, not
    re-prompted, so repos added later get names consistent with the ones
@@ -106,11 +107,31 @@ run `fleet-run stop` for that ticket first if you want a clean switch.
 
 ### `fleet-task rm <ticket>`
 
-Loads that ticket's state file, runs `git worktree remove --force` for
-each repo (looking up the repo's `base` bare clone from `repos.yaml`; if
-the repo entry is gone, it best-effort falls back to a plain
-`worktree remove` and warns rather than aborting), then deletes the state
-file.
+Loads that ticket's state file, then for each repo: runs `pre-remove`
+hooks, runs `git worktree remove --force` (looking up the repo's `base`
+bare clone from `repos.yaml`; if the repo entry is gone, it best-effort
+falls back to a plain `worktree remove` and warns rather than aborting),
+then runs `post-remove` hooks. Once every repo is removed successfully,
+deletes the state file. A repo that fails to remove is kept in the state
+file (hooks still ran for it) so a rerun of `rm` retries just that repo.
+
+### Hooks
+
+Any executable file under `<config dir>/hooks/<phase>/*` runs (in
+filename-sorted order) at the matching point in `new`/`edit`/`rm`, with
+`FLEET_TICKET`/`FLEET_REPO`/`FLEET_WORKTREE_DIR` set in its environment.
+Hook failures (non-zero exit) only print a warning to stderr — they never
+abort `new`/`edit`/`rm`. See `../docs/CONTRACT.md` for the full contract.
+
+| Phase          | Runs around                                          |
+|----------------|-------------------------------------------------------|
+| `pre-create`   | Before a repo's worktree is created (`new`, `edit`'s add-repo path) |
+| `post-create`  | After a repo's worktree is created and patches applied (`new`, `edit`'s add-repo path) |
+| `pre-remove`   | Before a repo's worktree is torn down (`rm`, `edit`'s remove-repo path) |
+| `post-remove`  | After a repo's worktree is torn down (`rm`, `edit`'s remove-repo path) — `FLEET_WORKTREE_DIR` points to a path that's typically already gone from disk |
+
+`pre-run`/`post-run` also exist in the contract, reserved for `fleet-run`
+around per-window launches — `fleet-task` doesn't run them.
 
 ## Config & state file locations
 
@@ -122,7 +143,7 @@ All paths are XDG-compliant and overridable via `FLEET_*` env vars — see
 | Config dir           | `~/.config/fleet` (default)                     | `FLEET_CONFIG_DIR`  |
 | Repos config file    | `<config dir>/repos.yaml`                       | `FLEET_REPOS_FILE`  |
 | Patches dir          | `<config dir>/patches/<repo>/*.patch`           | -                   |
-| Hooks dir            | `<config dir>/hooks/{pre-create,post-create}/*` | -                   |
+| Hooks dir            | `<config dir>/hooks/{pre-create,post-create,pre-remove,post-remove}/*` | -   |
 | State dir            | `~/.local/state/fleet` (default)                | `FLEET_STATE_DIR`   |
 | Per-task state file  | `<state dir>/tasks/<ticket>.json`               | -                   |
 | Worktree root        | `<state dir>/worktrees` or `repos.yaml`'s `worktree_root` | -         |
