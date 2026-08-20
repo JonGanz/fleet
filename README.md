@@ -9,11 +9,34 @@ They coordinate purely through files on disk (a config you write, state files th
 shelling out to each other by name — no shared Go code, no daemon. See `docs/CONTRACT.md` for the
 full shared contract (paths, `repos.yaml` schema, state file format, hook/tmux conventions).
 
+## Disclaimer
+
+This repository's contents — code, tests, and documentation — are 100% LLM-produced.
+
 ## Requirements
 
 - Go 1.22+ to build.
 - `git` 2.5+ (worktrees), `tmux`, `fzf`, `npm`.
 - WSL2 only if you need the `runtime: windows` path (shells out to `powershell.exe`).
+
+## Build / Install
+
+```sh
+./install.sh
+```
+
+This builds all three CLIs (`fleet-task`, `fleet-run`, `fleet-cache`) and installs them to
+`~/.local/bin` — make sure that's on your `$PATH`. `fleet-cache` in particular must be reachable
+even though you won't invoke it directly, since `fleet-task new` shells out to it.
+
+Then source the shell helper (needed for `fj`, since a subprocess can't `cd` its parent shell) from
+your shell profile:
+
+```sh
+source /path/to/fleet-task/contrib/fleet.sh
+```
+
+Finally, write a `repos.yaml` — see "Gluing it together" below for the schema.
 
 ## Pieces
 
@@ -81,13 +104,7 @@ fj
 fleet-task rm PROJ-1234     # done: remove worktrees + state
 ```
 
-Put all three binaries on `PATH` (`fleet-cache` in particular must be reachable, since
-`fleet-task new` shells out to it). Source the shell helper for jumping between worktrees, since a
-subprocess can't `cd` its parent shell:
-
-```sh
-source /path/to/fleet-task/contrib/fleet.sh
-```
+(See "Build / Install" above for getting the binaries and `fj` shell helper in place.)
 
 ## Development
 
