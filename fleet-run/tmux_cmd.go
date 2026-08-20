@@ -21,19 +21,41 @@ func hasSessionArgs(session string) []string {
 	return []string{"has-session", "-t", exactTarget(session)}
 }
 
-// newSessionArgv builds the full argv (including the leading "-f <file>"
-// global flag, if configFile is set) for creating the fixed fleet session.
+// newSessionPrefix builds the leading "-f <file>" global flag (if configFile
+// is set) plus the "new-session -d -s <session>" argv shared by both
+// runtime variants below.
 //
 // Note: -f is a global tmux flag, not a `new-session` flag, so it must
 // precede the subcommand: `tmux -f <config_file> new-session -d -s <name>`,
 // not `tmux new-session -f <config_file> ...`.
-func newSessionArgv(session, configFile string) []string {
+func newSessionPrefix(session, configFile string) []string {
 	var args []string
 	if configFile != "" {
 		args = append(args, "-f", configFile)
 	}
-	args = append(args, "new-session", "-d", "-s", session)
-	return args
+	return append(args, "new-session", "-d", "-s", session)
+}
+
+// newSessionWithWindowArgsLinux builds argv that creates the fleet session
+// and its first window in one atomic tmux call, running cmd directly in cwd
+// (the linux-runtime case). Creating the session and the first real window
+// together -- rather than a content-less `new-session` followed by a
+// separate `new-window` -- avoids tmux's own implicit default window (which
+// it names "bash"), so every window in the session is always a real, named
+// app window.
+func newSessionWithWindowArgsLinux(session, configFile, name, cwd, cmd string) []string {
+	args := newSessionPrefix(session, configFile)
+	return append(args, "-n", name, "-c", cwd, cmd)
+}
+
+// newSessionWithWindowArgsWindows builds argv that creates the fleet session
+// and its first window in one atomic tmux call, running cmd via
+// powershell.exe (the windows-runtime case). winDir must already be the
+// win32-form path, per the same requirement as newWindowArgsWindows.
+func newSessionWithWindowArgsWindows(session, configFile, name, winDir, cmd string) []string {
+	psCmd := windowsPowershellCommand(winDir, cmd)
+	args := newSessionPrefix(session, configFile)
+	return append(args, "-n", name, "powershell.exe", "-NoExit", "-Command", psCmd)
 }
 
 // listWindowsArgs builds argv for listing window names in a session.

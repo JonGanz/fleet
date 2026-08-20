@@ -4,17 +4,40 @@ import "reflect"
 
 import "testing"
 
-func TestNewSessionArgv(t *testing.T) {
-	got := newSessionArgv("fleet", "")
-	want := []string{"new-session", "-d", "-s", "fleet"}
+func TestNewSessionWithWindowArgsLinux(t *testing.T) {
+	got := newSessionWithWindowArgsLinux("fleet", "", "PROJ-1234-backend-api", "/state/worktrees/PROJ-1234/backend", "npm run start:dev")
+	want := []string{"new-session", "-d", "-s", "fleet", "-n", "PROJ-1234-backend-api", "-c", "/state/worktrees/PROJ-1234/backend", "npm run start:dev"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("newSessionArgv(no config) = %v, want %v", got, want)
+		t.Errorf("newSessionWithWindowArgsLinux(no config) = %v, want %v", got, want)
 	}
 
-	got = newSessionArgv("fleet", "/home/jon/.config/fleet/tmux.conf")
-	want = []string{"-f", "/home/jon/.config/fleet/tmux.conf", "new-session", "-d", "-s", "fleet"}
+	got = newSessionWithWindowArgsLinux("fleet", "/home/jon/.config/fleet/tmux.conf", "PROJ-1234-backend-api", "/state/worktrees/PROJ-1234/backend", "npm run start:dev")
+	want = []string{"-f", "/home/jon/.config/fleet/tmux.conf", "new-session", "-d", "-s", "fleet", "-n", "PROJ-1234-backend-api", "-c", "/state/worktrees/PROJ-1234/backend", "npm run start:dev"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("newSessionArgv(with config) = %v, want %v", got, want)
+		t.Errorf("newSessionWithWindowArgsLinux(with config) = %v, want %v", got, want)
+	}
+}
+
+func TestNewSessionWithWindowArgsWindows(t *testing.T) {
+	got := newSessionWithWindowArgsWindows("fleet", "", "PROJ-1234-admin-ui-dev", `C:\worktrees\PROJ-1234\admin-ui`, "npm run dev")
+	want := []string{
+		"new-session", "-d", "-s", "fleet", "-n", "PROJ-1234-admin-ui-dev",
+		"powershell.exe", "-NoExit", "-Command",
+		`cd 'C:\worktrees\PROJ-1234\admin-ui'; npm run dev`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("newSessionWithWindowArgsWindows(no config) = %v, want %v", got, want)
+	}
+
+	got = newSessionWithWindowArgsWindows("fleet", "/home/jon/.config/fleet/tmux.conf", "PROJ-1234-admin-ui-dev", `C:\worktrees\PROJ-1234\admin-ui`, "npm run dev")
+	want = []string{
+		"-f", "/home/jon/.config/fleet/tmux.conf",
+		"new-session", "-d", "-s", "fleet", "-n", "PROJ-1234-admin-ui-dev",
+		"powershell.exe", "-NoExit", "-Command",
+		`cd 'C:\worktrees\PROJ-1234\admin-ui'; npm run dev`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("newSessionWithWindowArgsWindows(with config) = %v, want %v", got, want)
 	}
 }
 

@@ -105,10 +105,6 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 	if session == "" {
 		return fmt.Errorf("repos.yaml tmux.session_name is required")
 	}
-	if err := ensureSession(session, cfg.Tmux.ConfigFile); err != nil {
-		return err
-	}
-
 	active, hasActive, err := activeTicket()
 	if err != nil {
 		return err
@@ -119,12 +115,9 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 			return err
 		}
 		// Killing every window -- including the last one -- makes tmux
-		// destroy the session itself as a side effect, so it must be
-		// recreated before anything below (setActiveTicket, listWindows,
-		// newWindow) can target it again.
-		if err := ensureSession(session, cfg.Tmux.ConfigFile); err != nil {
-			return err
-		}
+		// destroy the session itself as a side effect. That's fine: the
+		// newWindow call below recreates it together with whichever window
+		// gets created first, the same way a session-less `start` would.
 	}
 	if err := setActiveTicket(ts); err != nil {
 		return fmt.Errorf("recording active ticket: %w", err)
@@ -150,7 +143,7 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 			fmt.Fprintf(os.Stderr, "warning: window %q already exists, skipping\n", wname)
 			continue
 		}
-		if err := newWindow(session, wname, pair); err != nil {
+		if err := newWindow(session, cfg.Tmux.ConfigFile, wname, pair); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to start window %q: %v\n", wname, err)
 			continue
 		}

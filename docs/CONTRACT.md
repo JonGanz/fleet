@@ -195,8 +195,13 @@ currently exist" by globbing `tasks/*.json` — never by reading a single aggreg
 ## tmux session & window naming
 
 - Session name is the single fixed value from `repos.yaml` `tmux.session_name` (e.g. `fleet`).
-  `fleet-run` creates it once (`tmux new-session -d -s <name> -f <config_file>` if `config_file`
-  is set) if it doesn't already exist, and reuses it for every ticket thereafter.
+  `fleet-run` creates it, if it doesn't already exist, the first time it creates a window in it —
+  folding session creation into that first `new-session -d -s <name> -f <config_file> -n <name> ...`
+  call rather than a separate content-less `new-session` — and reuses it for every ticket
+  thereafter. This is deliberate: a bare `new-session` with no window/command gives tmux the
+  chance to create its own implicit default window (which it names `bash`), which would show up
+  in `fleet-run stop`'s picker and never get cleaned up, breaking both that picker and the
+  "nothing left running" detection below.
 - **Only one ticket's windows are ever live in the session at a time** — the point of `fleet-run`
   is switching the whole runtime environment to a different work context, not running several
   tickets' app sets side by side. `fleet-run start --ticket X` for any ticket other than whatever's

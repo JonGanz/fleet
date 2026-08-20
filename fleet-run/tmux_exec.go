@@ -51,23 +51,6 @@ func sessionExists(session string) bool {
 	return cmd.Run() == nil
 }
 
-// ensureSession makes sure the single fixed fleet session exists, creating
-// it (optionally with a custom tmux config file) if not. It never renames or
-// recreates an existing session.
-func ensureSession(session, configFile string) error {
-	if sessionExists(session) {
-		return nil
-	}
-	if configFile != "" {
-		configFile = expandHome(configFile)
-	}
-	args := newSessionArgv(session, configFile)
-	if err := runTmux(args...); err != nil {
-		return fmt.Errorf("create tmux session %q: %w", session, err)
-	}
-	return nil
-}
-
 // listWindows returns the names of all windows currently in the session.
 // Returns an empty slice (not an error) if the session doesn't exist yet.
 func listWindows(session string) ([]string, error) {
@@ -150,7 +133,29 @@ func windowsWorktreeWinPath(dir string) (string, error) {
 // directly in the worktree dir; for windows-runtime repos it translates the
 // worktree dir to a win32 path and wraps the command in a powershell.exe
 // invocation.
-func newWindow(session, name string, p RunPair) error {
+//
+// If the session doesn't exist yet, this creates it together with this
+// window in one atomic tmux call (rather than a content-less `new-session`
+// followed by a separate `new-window`), so tmux never gets the chance to
+// create its own implicit default "bash" window -- every window in the
+// session is always a real, named app window, which is what lets
+// `fleet-run stop`'s picker and its "nothing left running" detection work
+// correctly.
+func newWindow(session, configFile, name string, p RunPair) error {
+	if !sessionExists(session) {
+		if configFile != "" {
+			configFile = expandHome(configFile)
+		}
+		if p.Runtime == "windows" {
+			winDir, err := windowsWorktreeWinPath(p.WorktreeDir)
+			if err != nil {
+				return err
+			}
+			return runTmux(newSessionWithWindowArgsWindows(session, configFile, name, winDir, p.Cmd)...)
+		}
+		return runTmux(newSessionWithWindowArgsLinux(session, configFile, name, p.WorktreeDir, p.Cmd)...)
+	}
+
 	index, err := nextFreeWindowIndex(session)
 	if err != nil {
 		return err
