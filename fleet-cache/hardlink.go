@@ -78,23 +78,30 @@ func hardlinkTree(src, dst string) error {
 	})
 }
 
-// lockDownPermissions chmods every regular file under root read-only.
-// Called once, right after `npm ci` populates a cache entry -- since
-// permission bits belong to the inode, not the directory entry, this takes
-// effect for every worktree the file is later hardlinked into, not just the
-// cache copy. Directories are left writable so entries can still be
-// added/removed/replaced (required for `ensure`'s own RemoveAll+rebuild and
-// for `npm link`'s directory-entry-replacement mechanism to keep working);
-// only in-place edits to existing file content are blocked, turning what
-// would otherwise be silent cross-worktree corruption (every worktree
-// shares this inode) into a loud permission error instead.
+// lockDownPermissions chmods every regular file under root read-only, while
+// preserving each file's existing executable bits. Called once, right after
+// `npm ci` populates a cache entry -- since permission bits belong to the
+// inode, not the directory entry, this takes effect for every worktree the
+// file is later hardlinked into, not just the cache copy. Directories are
+// left writable so entries can still be added/removed/replaced (required for
+// `ensure`'s own RemoveAll+rebuild and for `npm link`'s directory-entry-
+// replacement mechanism to keep working); only in-place edits to existing
+// file content are blocked, turning what would otherwise be silent
+// cross-worktree corruption (every worktree shares this inode) into a loud
+// permission error instead.
+//
+// Executable bits must survive this, or scripts invoked directly (e.g.
+// node_modules/.bin symlink targets like env-cmd's) fail with "Permission
+// denied" once hardlinked into a worktree -- a real regression caught via
+// backend-api's env-cmd failing under `fleet-cache ensure`.
 func lockDownPermissions(root string) error {
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.Mode().IsRegular() {
-			return os.Chmod(path, 0o444)
+			mode := os.FileMode(0o444) | (info.Mode() & 0o111)
+			return os.Chmod(path, mode)
 		}
 		return nil
 	})

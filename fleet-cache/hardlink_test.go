@@ -105,6 +105,9 @@ func TestLockDownPermissions(t *testing.T) {
 	if err := os.Symlink(filepath.Join("pkg", "index.js"), filepath.Join(root, "link")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "pkg", "bin.js"), []byte("#!/usr/bin/env node"), 0o755); err != nil {
+		t.Fatalf("write bin.js: %v", err)
+	}
 
 	if err := lockDownPermissions(root); err != nil {
 		t.Fatalf("lockDownPermissions: %v", err)
@@ -116,6 +119,14 @@ func TestLockDownPermissions(t *testing.T) {
 	}
 	if perm := fileInfo.Mode().Perm(); perm != 0o444 {
 		t.Errorf("index.js perm = %o, want 0444", perm)
+	}
+
+	binInfo, err := os.Stat(filepath.Join(root, "pkg", "bin.js"))
+	if err != nil {
+		t.Fatalf("stat bin.js: %v", err)
+	}
+	if perm := binInfo.Mode().Perm(); perm != 0o555 {
+		t.Errorf("bin.js perm = %o, want 0555 (executable bits preserved)", perm)
 	}
 
 	dirInfo, err := os.Stat(filepath.Join(root, "pkg"))
