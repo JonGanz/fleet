@@ -218,7 +218,13 @@ currently exist" by globbing `tasks/*.json` — never by reading a single aggreg
   assertion (errors out, stopping nothing, if `X` isn't the active ticket) rather than as a filter,
   since there's nothing else running to filter out. These options are also there for your own tmux
   config to read directly in a status-line format string, e.g.
-  `#{@fleet_task_ticket}: #{@fleet_task_description}`.
+  `#{@fleet_task_ticket}: #{@fleet_task_description}`. `fleet-task` reads `@fleet_task_ticket` too
+  (`tmux_check.go`, a plain `tmux show-options -g -v` shell-out, not shared code): `rm` and `edit`'s
+  repo-removal path refuse to tear down a worktree for the ticket fleet-run currently has live,
+  since a running dev server can race the delete and write into its own untracked cache dir (e.g.
+  Vite's `.vite/deps_temp_*`) at the exact moment git tries to remove it, leaving `git worktree
+  remove --force` failing with "Directory not empty" — the fix is `fleet-run stop` first, not a
+  smarter retry.
 
 ## CLI contracts between tools (subprocess boundary, not shared code)
 

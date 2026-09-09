@@ -67,6 +67,18 @@ func cmdRm(ticket string) error {
 		ticket = t
 	}
 
+	// Removing a worktree out from under a still-running fleet-run app is
+	// what produces the "Directory not empty" mess selfHealWorktreeRemove
+	// papers over above: a live dev server can be writing into its own
+	// untracked cache dir at the exact moment git tries to delete it, and
+	// the affected repo may have open file handles into its (hardlinked,
+	// shared-cache) node_modules besides. Catch the common case up front
+	// with an actionable error instead of racing it and hoping self-heal
+	// covers whatever's left.
+	if active, found := activeFleetTicket(); found && active == ticket {
+		return fmt.Errorf("%s is currently active in fleet-run; run `fleet-run stop --ticket %s` (or `fleet-run stop --all`) before removing it", ticket, ticket)
+	}
+
 	tf, err := taskFile(ticket)
 	if err != nil {
 		return err
@@ -156,10 +168,10 @@ func removeRepoWorktree(cfg *ReposConfig, ticket string, r TaskRepo) error {
 	case repo != nil && repo.Runtime == "windows":
 		removeErr = removeWorktreeWindows(repo, r.WorktreePath)
 	case repo != nil && expandHome(repo.Base) != "":
-		removeErr = gitWorktreeRemove(expandHome(repo.Base), r.WorktreePath)
+		removeErr = selfHealWorktreeRemove(r.WorktreePath, gitWorktreeRemove(expandHome(repo.Base), r.WorktreePath))
 	default:
 		fmt.Fprintf(os.Stderr, "warning: repo %q not found in repos.yaml, trying worktree remove without a base\n", r.Repo)
-		removeErr = runGit("-C", r.WorktreePath, "worktree", "remove", r.WorktreePath, "--force")
+		removeErr = selfHealWorktreeRemove(r.WorktreePath, runGit("-C", r.WorktreePath, "worktree", "remove", r.WorktreePath, "--force"))
 	}
 	if removeErr != nil {
 		return removeErr
@@ -169,6 +181,48 @@ func removeRepoWorktree(cfg *ReposConfig, ticket string, r TaskRepo) error {
 		fmt.Fprintf(os.Stderr, "warning: post-remove hooks for %s: %v\n", r.Repo, err)
 	}
 	return nil
+}
+
+// selfHealWorktreeRemove papers over a specific `git worktree remove --force`
+// failure mode: git deregisters the worktree (removes its .git file/entry
+// and everything it tracks) and only then hits a filesystem error trying to
+// rmdir the now-empty-of-tracked-content directory, because something else
+// -- typically a still-running dev server for this same ticket under
+// `fleet-run`, writing into an untracked cache dir like `.vite/deps_temp_*`
+// -- raced the delete and repopulated it, so git's own rmdir sees "Directory
+// not empty". At that point git has fully committed to removing the
+// worktree; there's nothing left to retry via git, so a plain rerun of `rm`
+// just fails again with a *different*, more confusing error ("not a working
+// tree") since git no longer considers the path a worktree at all. Detect
+// that state (worktreePath still exists on disk but no longer has a .git
+// entry inside it) and sweep the untracked leftovers ourselves instead of
+// leaving the caller to retry something that can never succeed the same way
+// twice.
+func selfHealWorktreeRemove(worktreePath string, removeErr error) error {
+	if removeErr == nil {
+		return nil
+	}
+	if _, statErr := os.Stat(worktreePath); statErr != nil {
+		// Nothing on disk to sweep -- surface the original error as-is.
+		return removeErr
+	}
+	if !worktreeAdminGone(worktreePath) {
+		// git still considers this a live worktree; the failure is real.
+		return removeErr
+	}
+	if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
+		return fmt.Errorf("%w (also failed to remove leftover directory: %v)", removeErr, rmErr)
+	}
+	fmt.Fprintf(os.Stderr, "note: git had already deregistered %s; removed leftover directory\n", worktreePath)
+	return nil
+}
+
+// worktreeAdminGone reports whether worktreePath no longer has a .git entry
+// inside it, meaning git has already fully torn down its worktree
+// registration and tracked content -- see selfHealWorktreeRemove.
+func worktreeAdminGone(worktreePath string) bool {
+	_, err := os.Lstat(filepath.Join(worktreePath, ".git"))
+	return os.IsNotExist(err)
 }
 
 // removeWorktreeWindows tears down a runtime: windows repo's worktree: the

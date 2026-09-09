@@ -72,6 +72,17 @@ func cmdEdit(ticket string) error {
 		return nil
 	}
 
+	// Same race `rm` guards against: removing a repo's worktree while its
+	// dev server is still running under fleet-run for this exact ticket can
+	// leave untracked cruft behind git's own cleanup (see
+	// selfHealWorktreeRemove in cmd_rm.go). Adding repos is unaffected, so
+	// only check when a removal is actually requested.
+	if len(toRemove) > 0 {
+		if active, found := activeFleetTicket(); found && active == ticket {
+			return fmt.Errorf("%s is currently active in fleet-run; run `fleet-run stop --ticket %s` (or `fleet-run stop --all`) before removing repos from it", ticket, ticket)
+		}
+	}
+
 	// Ask about every to-be-added repo's patches up front too, for the same
 	// reason `new` does: front-load all interactive prompts before any
 	// (potentially slow) git/hook work starts.
