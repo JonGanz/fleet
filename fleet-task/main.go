@@ -17,7 +17,7 @@ commands:
   list [--json]    list existing tasks
   jump             select a worktree and print its path (for `+"`cd $(fleet-task jump)`"+`)
   edit <ticket>    add and/or remove repos from an existing task
-  rm <ticket>      remove a task's worktrees and state file`)
+  rm [ticket]      remove a task's worktrees and state file (interactive picker if omitted)`)
 }
 
 func main() {
@@ -47,11 +47,11 @@ func main() {
 		}
 		err = cmdEdit(os.Args[2])
 	case "rm":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: fleet-task rm <ticket>")
-			os.Exit(1)
+		ticket := ""
+		if len(os.Args) >= 3 {
+			ticket = os.Args[2]
 		}
-		err = cmdRm(os.Args[2])
+		err = cmdRm(ticket)
 	case "-h", "--help", "help":
 		usage()
 		return

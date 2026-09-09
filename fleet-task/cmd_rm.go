@@ -1,12 +1,72 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"text/tabwriter"
 )
 
+// rmEntryLines renders tasks as column-aligned "TICKET  DESCRIPTION" rows
+// for `rm`'s interactive ticket picker, same tabwriter-padding approach as
+// `jump`'s entries (see jumpEntryLines) so columns don't drift row to row.
+func rmEntryLines(tasks []*TaskState) []string {
+	var buf bytes.Buffer
+	tw := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
+	for _, t := range tasks {
+		fmt.Fprintf(tw, "%s\t%s\n", t.Ticket, t.Description)
+	}
+	tw.Flush()
+	out := strings.TrimSuffix(buf.String(), "\n")
+	if out == "" {
+		return nil
+	}
+	return strings.Split(out, "\n")
+}
+
+// pickTicket shows an interactive picker over every existing task, for
+// `rm` invoked with no ticket argument, and returns the chosen ticket id.
+func pickTicket() (string, error) {
+	td, err := tasksDir()
+	if err != nil {
+		return "", err
+	}
+	tasks, err := listTasks(td)
+	if err != nil {
+		return "", err
+	}
+	if len(tasks) == 0 {
+		return "", fmt.Errorf("no tasks found")
+	}
+
+	lines := rmEntryLines(tasks)
+	byLine := make(map[string]string, len(tasks))
+	for i, t := range tasks {
+		byLine[lines[i]] = t.Ticket
+	}
+
+	chosen, err := selectOne(lines)
+	if err != nil {
+		return "", err
+	}
+	ticket, ok := byLine[chosen]
+	if !ok {
+		return "", fmt.Errorf("internal error: selection %q not found", chosen)
+	}
+	return ticket, nil
+}
+
 func cmdRm(ticket string) error {
+	if ticket == "" {
+		t, err := pickTicket()
+		if err != nil {
+			return err
+		}
+		ticket = t
+	}
+
 	tf, err := taskFile(ticket)
 	if err != nil {
 		return err
@@ -54,6 +114,24 @@ func cmdRm(ticket string) error {
 		return fmt.Errorf("remove task state %s: %w", tf, err)
 	}
 	fmt.Printf("removed task state %s\n", tf)
+
+	// Every repo's worktree_path is <worktree_root>/<ticket>/<repo> (per
+	// docs/CONTRACT.md, true for runtime: windows repos too -- that path is
+	// the WSL-side symlink even though the real tree lives under
+	// windows_worktree_root), so once every repo is torn down the
+	// per-ticket parent directory is left empty and should go with it
+	// rather than accumulating stale empty dirs under worktree_root.
+	wtRoot, err := worktreeRoot(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: resolving worktree root to remove ticket workspace dir: %v\n", err)
+		return nil
+	}
+	ticketDir := filepath.Join(wtRoot, ticket)
+	if err := os.RemoveAll(ticketDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: removing ticket workspace dir %s: %v\n", ticketDir, err)
+		return nil
+	}
+	fmt.Printf("removed ticket workspace dir %s\n", ticketDir)
 	return nil
 }
 
