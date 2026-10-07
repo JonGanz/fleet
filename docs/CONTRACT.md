@@ -192,6 +192,14 @@ array.
 `fleet-task list`/`fleet-task jump` and `fleet-run` all build their view of "what tickets/worktrees
 currently exist" by globbing `tasks/*.json` — never by reading a single aggregate file.
 
+A ticket id is not permanently fixed once created: `fleet-task mv <old> <new>` renames it in
+place — moving `tasks/<old>.json` to `tasks/<new>.json` (updating `ticket` to match), and every
+repo's worktree from `<worktree_root>/<old>/<repo>` to `<worktree_root>/<new>/<repo>` via
+`git worktree move` (so git's own worktree registration stays consistent, unlike a plain filesystem
+rename). It refuses to touch a ticket that's currently active under `fleet-run` (same guard `rm`
+uses). It does **not** rename `branch` — branch names come from `branch_template` and aren't
+necessarily derived from the ticket at all, so they're left as-is even after a rename.
+
 ## tmux session & window naming
 
 - Session name is the single fixed value from `repos.yaml` `tmux.session_name` (e.g. `fleet`).

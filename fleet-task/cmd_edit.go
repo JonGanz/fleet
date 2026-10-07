@@ -30,6 +30,14 @@ func availableRepoNames(cfg *ReposConfig, attached []TaskRepo) []string {
 // removed). Both add/remove selections are made up front, before any
 // git/hook work starts, mirroring `new`'s patch-selection front-loading.
 func cmdEdit(ticket string) error {
+	if ticket == "" {
+		picked, err := pickTicket()
+		if err != nil {
+			return err
+		}
+		ticket = picked
+	}
+
 	tf, err := taskFile(ticket)
 	if err != nil {
 		return err

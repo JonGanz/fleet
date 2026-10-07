@@ -16,7 +16,8 @@ commands:
   new              interactively create a new task's worktrees
   list [--json]    list existing tasks
   jump             select a worktree and print its path (for `+"`cd $(fleet-task jump)`"+`)
-  edit <ticket>    add and/or remove repos from an existing task
+  edit [ticket]    add and/or remove repos from an existing task (interactive picker if omitted)
+  mv [old] [new]   rename a task's ticket id (interactive picker/prompt if omitted)
   rm [ticket]      remove a task's worktrees and state file (interactive picker if omitted)`)
 }
 
@@ -41,11 +42,20 @@ func main() {
 	case "jump":
 		err = cmdJump()
 	case "edit":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: fleet-task edit <ticket>")
-			os.Exit(1)
+		ticket := ""
+		if len(os.Args) >= 3 {
+			ticket = os.Args[2]
 		}
-		err = cmdEdit(os.Args[2])
+		err = cmdEdit(ticket)
+	case "mv":
+		oldTicket, newTicket := "", ""
+		if len(os.Args) >= 3 {
+			oldTicket = os.Args[2]
+		}
+		if len(os.Args) >= 4 {
+			newTicket = os.Args[3]
+		}
+		err = cmdMv(oldTicket, newTicket)
 	case "rm":
 		ticket := ""
 		if len(os.Args) >= 3 {

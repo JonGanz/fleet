@@ -95,6 +95,15 @@ func gitWorktreeRemove(base, worktreePath string) error {
 	return runGit("-C", base, "worktree", "remove", worktreePath, "--force")
 }
 
+// gitWorktreeMove runs `git -C <base> worktree move <oldPath> <newPath>`,
+// relocating a worktree while keeping git's own worktree administrative
+// data (the .git file inside it, and base's internal worktree registration)
+// consistent -- unlike a plain filesystem rename, which would leave git
+// still pointing at the old location.
+func gitWorktreeMove(base, oldPath, newPath string) error {
+	return runGit("-C", base, "worktree", "move", oldPath, newPath)
+}
+
 // --- Windows-native counterparts, for runtime: windows repos ---
 //
 // These mirror the functions above one-for-one, but run via git.exe inside a
@@ -145,6 +154,12 @@ func winGitWorktreeAddExistingBranch(winBase, winWorktreePath, ticket string) er
 // with cwd winBase.
 func winGitWorktreeRemove(winBase, winWorktreePath string) error {
 	return runWindowsCommand(winBase, "git", "worktree", "remove", winWorktreePath, "--force")
+}
+
+// winGitWorktreeMove runs `git worktree move <winOldPath> <winNewPath>` with
+// cwd winBase, the Windows-native counterpart of gitWorktreeMove.
+func winGitWorktreeMove(winBase, winOldPath, winNewPath string) error {
+	return runWindowsCommand(winBase, "git", "worktree", "move", winOldPath, winNewPath)
 }
 
 // checkSSHAgent runs `ssh-add -l` and prints a warning to stderr if it

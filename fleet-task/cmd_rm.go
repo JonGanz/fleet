@@ -27,7 +27,7 @@ func rmEntryLines(tasks []*TaskState) []string {
 }
 
 // pickTicket shows an interactive picker over every existing task, for
-// `rm` invoked with no ticket argument, and returns the chosen ticket id.
+// `rm`/`mv`/`edit` invoked with no ticket argument, and returns the chosen ticket id.
 func pickTicket() (string, error) {
 	td, err := tasksDir()
 	if err != nil {

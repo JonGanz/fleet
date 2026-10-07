@@ -73,7 +73,7 @@ source /path/to/fleet-task/contrib/fleet.sh
 fj   # select a worktree, cd into it
 ```
 
-### `fleet-task edit <ticket>`
+### `fleet-task edit [ticket]`
 
 Lets an already-created task's repo list grow or shrink, without tearing
 down and recreating the whole task:
@@ -104,6 +104,34 @@ down and recreating the whole task:
 Note: `fleet-task` has no visibility into `fleet-run`'s live tmux windows,
 so removing a repo that currently has a running window won't stop it —
 run `fleet-run stop` for that ticket first if you want a clean switch.
+
+### `fleet-task mv [old-ticket] [new-ticket]`
+
+Renames a ticket in place, without tearing down and recreating its
+worktrees:
+
+1. If `old-ticket` is omitted, shows the same interactive ticket picker as
+   `rm`. If `new-ticket` is omitted, prompts for it.
+2. Refuses if `old-ticket` is currently active under `fleet-run` (same guard
+   `rm`/`edit` use) — renaming a live ticket would desync `fleet-run`'s tmux
+   state from the new filename.
+3. Validates `new-ticket` (non-empty, no path separators, doesn't already
+   have a state file or worktree directory).
+4. For each repo, moves its worktree from `<worktree_root>/old/<repo>` to
+   `<worktree_root>/new/<repo>` via `git worktree move` — not a plain
+   filesystem rename, so git's own worktree registration stays consistent.
+   If a move fails partway through a multi-repo task, stops and reports
+   exactly which repos moved and which didn't, without writing any state
+   file yet, so the old ticket's state stays the sole consistent record
+   until the rest are finished (by hand, or by rerunning `mv` after fixing
+   the failure).
+5. Once every repo has moved, writes `<state dir>/tasks/<new-ticket>.json`
+   (with `ticket` updated to match), removes the old state file, and
+   removes the now-empty old ticket workspace directory.
+
+Branch names are **not** renamed — they come from `branch_template` and
+aren't necessarily derived from the ticket at all (see "Design notes"
+above), so `TaskRepo.Branch` is left as-is.
 
 ### `fleet-task rm <ticket>`
 
