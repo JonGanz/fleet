@@ -108,11 +108,52 @@ func cmdMv(oldTicket, newTicket string) error {
 	}
 	os.Remove(oldFile + ".lock") // best-effort: stale lockfile from a crashed prior run, if any
 
-	if err := os.RemoveAll(oldTicketDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: removing old ticket workspace dir %s: %v\n", oldTicketDir, err)
+	if err := moveTicketDirLeftovers(oldTicketDir, newTicketDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}
 
 	fmt.Printf("renamed task %s -> %s; state written to %s\n", oldTicket, newTicket, newFile)
+	return nil
+}
+
+// moveTicketDirLeftovers moves everything still in oldDir after the repo
+// worktrees have been relocated (notes, env files, anything the user keeps
+// at the ticket root) into newDir, then removes oldDir only if it ended up
+// empty. Entries that would collide with something already in newDir are
+// left in place, so nothing is ever deleted here.
+func moveTicketDirLeftovers(oldDir, newDir string) error {
+	entries, err := os.ReadDir(oldDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading old ticket workspace dir %s: %w", oldDir, err)
+	}
+	if len(entries) > 0 {
+		if err := os.MkdirAll(newDir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", newDir, err)
+		}
+	}
+	var failed []string
+	for _, e := range entries {
+		src := filepath.Join(oldDir, e.Name())
+		dst := filepath.Join(newDir, e.Name())
+		if _, err := os.Lstat(dst); err == nil {
+			failed = append(failed, fmt.Sprintf("%s (already exists in %s)", e.Name(), newDir))
+			continue
+		}
+		if err := os.Rename(src, dst); err != nil {
+			failed = append(failed, fmt.Sprintf("%s (%v)", e.Name(), err))
+			continue
+		}
+		fmt.Printf("moved %s -> %s\n", src, dst)
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("left in old ticket workspace dir %s: %s", oldDir, strings.Join(failed, ", "))
+	}
+	if err := os.Remove(oldDir); err != nil {
+		return fmt.Errorf("removing old ticket workspace dir %s: %w", oldDir, err)
+	}
 	return nil
 }
 
