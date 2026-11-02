@@ -80,8 +80,14 @@ func tasksDir() (string, error) {
 	return filepath.Join(sd, "tasks"), nil
 }
 
-// taskFile returns <state dir>/tasks/<ticket>.json.
+// taskFile returns <state dir>/tasks/<ticket>.json. The ticket id is
+// validated first (see validateTicketName), so every command that accepts a
+// ticket from user input -- new/edit/rm/mv/jump -- is protected against ids
+// like "a/b" or ".." escaping the tasks dir by construction.
 func taskFile(ticket string) (string, error) {
+	if err := validateTicketName(ticket); err != nil {
+		return "", err
+	}
 	td, err := tasksDir()
 	if err != nil {
 		return "", err

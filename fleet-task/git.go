@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 // runGit runs `git <args...>` with stdout/stderr inherited, returning an
@@ -18,7 +20,48 @@ func runGit(args ...string) error {
 	return nil
 }
 
-// gitCloneBare runs `git clone --bare <origin> <base>`, then configures a
+// runGitCapture is runGit for commands whose failure the caller wants to
+// inspect or retry: stderr is captured (not shown live) and included in the
+// returned error, so a failure reads "git worktree add ...: exit status 128:
+// fatal: invalid reference: origin/mian" instead of a bare "exit status 128".
+func runGitCapture(args ...string) error {
+	cmd := exec.Command("git", args...)
+	var stderr bytes.Buffer
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git %s: %w%s", strings.Join(args, " "), err, stderrSuffix(stderr.String()))
+	}
+	return nil
+}
+
+// stderrSuffix formats captured stderr for appending to an error message.
+func stderrSuffix(stderr string) string {
+	s := strings.TrimSpace(stderr)
+	if s == "" {
+		return ""
+	}
+	return ": " + s
+}
+
+// linuxGit is the gitRunner for runtime: linux repos: plain WSL/Linux-native
+// `git` against WSL-side paths.
+type linuxGit struct{}
+
+func (linuxGit) Preflight(base, worktreePath string) error { return nil }
+
+func (linuxGit) BaseExists(base string) (bool, error) {
+	_, err := os.Stat(base)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+// CloneBare runs `git clone --bare <origin> <base>`, then configures a
 // standard remote-tracking fetch refspec and does an initial fetch.
 //
 // `git clone --bare` on its own copies the remote's branches straight into
@@ -28,44 +71,70 @@ func runGit(args ...string) error {
 // Configuring the usual `+refs/heads/*:refs/remotes/origin/*` refspec
 // up front (mirroring what a non-bare `git clone` does automatically)
 // keeps `origin/<default_branch>` resolvable for worktree add, both now
-// and after every subsequent gitFetch.
-func gitCloneBare(origin, base string) error {
+// and after every subsequent Fetch.
+func (g linuxGit) CloneBare(origin, base string) error {
+	if isSSHURL(origin) {
+		checkSSHAgent()
+	}
+	if err := os.MkdirAll(parentDir(base), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", parentDir(base), err)
+	}
 	if err := runGit("clone", "--bare", origin, base); err != nil {
 		return err
 	}
 	if err := runGit("-C", base, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
 		return err
 	}
-	return gitFetch(base)
+	return g.Fetch(base)
 }
 
-// gitFetch runs `git -C <base> fetch origin`.
-func gitFetch(base string) error {
+// Fetch runs `git -C <base> fetch origin`.
+func (linuxGit) Fetch(base string) error {
 	return runGit("-C", base, "fetch", "origin")
 }
 
-// gitWorktreePrune runs `git -C <base> worktree prune`, clearing any
+// Prune runs `git -C <base> worktree prune`, clearing any
 // registered-but-missing worktree entries left behind by an earlier
 // interrupted run or a worktree directory removed without `git worktree
 // remove`. Safe to call unconditionally: a no-op when nothing is stale.
-func gitWorktreePrune(base string) error {
+func (linuxGit) Prune(base string) error {
 	return runGit("-C", base, "worktree", "prune")
 }
 
-// gitWorktreeAddNewBranch runs
-// `git -C <base> worktree add <worktreePath> -b <ticket> origin/<defaultBranch>`.
-func gitWorktreeAddNewBranch(base, worktreePath, ticket, defaultBranch string) error {
-	return runGit("-C", base, "worktree", "add", worktreePath, "-b", ticket, "origin/"+defaultBranch)
+// WorktreeAdd creates the worktree: `worktree add <path> -b <branch>
+// origin/<defaultBranch>`, falling back to attaching the existing branch
+// (a rerun of `new` for the same ticket, or `edit` re-adding a repo).
+func (linuxGit) WorktreeAdd(base, worktreePath, branch, defaultBranch string) error {
+	if err := os.MkdirAll(parentDir(worktreePath), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", parentDir(worktreePath), err)
+	}
+	return addWorktreeWithFallback(branch,
+		func() error {
+			return runGitCapture("-C", base, "worktree", "add", worktreePath, "-b", branch, "origin/"+defaultBranch)
+		},
+		func() error {
+			return runGitCapture("-C", base, "worktree", "add", worktreePath, branch)
+		})
 }
 
-// gitWorktreeAddExistingBranch runs
-// `git -C <base> worktree add <worktreePath> <ticket>` (branch already
-// exists, e.g. a rerun of `fleet-task new` for the same ticket).
-func gitWorktreeAddExistingBranch(base, worktreePath, ticket string) error {
-	return runGit("-C", base, "worktree", "add", worktreePath, ticket)
+// WorktreeRemove runs `git -C <base> worktree remove <worktreePath> --force`.
+func (linuxGit) WorktreeRemove(base, worktreePath string) error {
+	return runGit("-C", base, "worktree", "remove", worktreePath, "--force")
 }
 
-// gitApplyPatch runs `git -C <worktreePath> apply <patchFile>`.
+// WorktreeMove runs `git -C <base> worktree move <oldPath> <newPath>`,
+// relocating a worktree while keeping git's own worktree administrative
+// data (the .git file inside it, and base's internal worktree registration)
+// consistent -- unlike a plain filesystem rename, which would leave git
+// still pointing at the old location.
+func (linuxGit) WorktreeMove(base, oldPath, newPath string) error {
+	if err := os.MkdirAll(parentDir(newPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", parentDir(newPath), err)
+	}
+	return runGit("-C", base, "worktree", "move", oldPath, newPath)
+}
+
+// ApplyPatch runs `git -C <worktreePath> apply <patchFile>`.
 //
 // We use `apply` rather than `am` for v1: `am` expects RFC 2822-style
 // commit-message headers (as produced by `git format-patch`) and will
@@ -75,91 +144,8 @@ func gitWorktreeAddExistingBranch(base, worktreePath, ticket string) error {
 // of the user's own commits in the new worktree, `apply` is simpler and
 // sufficient; not preserving patch authorship/message metadata is an
 // accepted trade-off for v1.
-func gitApplyPatch(worktreePath, patchFile string) error {
+func (linuxGit) ApplyPatch(worktreePath, patchFile string) error {
 	return runGit("-C", worktreePath, "apply", patchFile)
-}
-
-// winGitApplyPatch runs `git apply <winPatchFile>` with cwd winWorktreePath,
-// the Windows-native counterpart of gitApplyPatch. Required because a
-// runtime: windows worktree's .git file contains a Windows-style gitdir:
-// pointer written by git.exe; WSL-native git run against the WSL-side
-// symlink into that worktree can't parse it and fails with "not a git
-// repository" (it treats the drive-letter path as relative instead of
-// absolute).
-func winGitApplyPatch(winWorktreePath, winPatchFile string) error {
-	return runWindowsCommand(winWorktreePath, "git", "apply", winPatchFile)
-}
-
-// gitWorktreeRemove runs `git -C <base> worktree remove <worktreePath> --force`.
-func gitWorktreeRemove(base, worktreePath string) error {
-	return runGit("-C", base, "worktree", "remove", worktreePath, "--force")
-}
-
-// gitWorktreeMove runs `git -C <base> worktree move <oldPath> <newPath>`,
-// relocating a worktree while keeping git's own worktree administrative
-// data (the .git file inside it, and base's internal worktree registration)
-// consistent -- unlike a plain filesystem rename, which would leave git
-// still pointing at the old location.
-func gitWorktreeMove(base, oldPath, newPath string) error {
-	return runGit("-C", base, "worktree", "move", oldPath, newPath)
-}
-
-// --- Windows-native counterparts, for runtime: windows repos ---
-//
-// These mirror the functions above one-for-one, but run via git.exe inside a
-// spawned powershell.exe process (see winpath.go's runWindowsCommand) against
-// win32-form paths, instead of WSL's own `git` against WSL paths. This keeps
-// the actual git checkout for windows-runtime repos entirely on the NTFS
-// side, since WSL git writing through the 9P bridge into what's nominally a
-// Windows-mounted path is what this whole mechanism exists to avoid.
-
-// winGitCloneBare runs `git clone --bare <origin> <winBase>` (cwd: winBase's
-// parent, since winBase doesn't exist yet) then configures the same
-// remote-tracking fetch refspec as gitCloneBare and does an initial fetch.
-func winGitCloneBare(origin, winParentDir, winBase string) error {
-	if err := runWindowsCommand(winParentDir, "git", "clone", "--bare", origin, winBase); err != nil {
-		return err
-	}
-	if err := runWindowsCommand(winBase, "git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
-		return err
-	}
-	return winGitFetch(winBase)
-}
-
-// winGitFetch runs `git fetch origin` with cwd winBase.
-func winGitFetch(winBase string) error {
-	return runWindowsCommand(winBase, "git", "fetch", "origin")
-}
-
-// winGitWorktreePrune runs `git worktree prune` with cwd winBase, the
-// Windows-native counterpart of gitWorktreePrune.
-func winGitWorktreePrune(winBase string) error {
-	return runWindowsCommand(winBase, "git", "worktree", "prune")
-}
-
-// winGitWorktreeAddNewBranch runs
-// `git worktree add <winWorktreePath> -b <ticket> origin/<defaultBranch>`
-// with cwd winBase.
-func winGitWorktreeAddNewBranch(winBase, winWorktreePath, ticket, defaultBranch string) error {
-	return runWindowsCommand(winBase, "git", "worktree", "add", winWorktreePath, "-b", ticket, "origin/"+defaultBranch)
-}
-
-// winGitWorktreeAddExistingBranch runs
-// `git worktree add <winWorktreePath> <ticket>` with cwd winBase.
-func winGitWorktreeAddExistingBranch(winBase, winWorktreePath, ticket string) error {
-	return runWindowsCommand(winBase, "git", "worktree", "add", winWorktreePath, ticket)
-}
-
-// winGitWorktreeRemove runs `git worktree remove <winWorktreePath> --force`
-// with cwd winBase.
-func winGitWorktreeRemove(winBase, winWorktreePath string) error {
-	return runWindowsCommand(winBase, "git", "worktree", "remove", winWorktreePath, "--force")
-}
-
-// winGitWorktreeMove runs `git worktree move <winOldPath> <winNewPath>` with
-// cwd winBase, the Windows-native counterpart of gitWorktreeMove.
-func winGitWorktreeMove(winBase, winOldPath, winNewPath string) error {
-	return runWindowsCommand(winBase, "git", "worktree", "move", winOldPath, winNewPath)
 }
 
 // checkSSHAgent runs `ssh-add -l` and prints a warning to stderr if it

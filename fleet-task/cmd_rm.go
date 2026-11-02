@@ -1,62 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 )
-
-// rmEntryLines renders tasks as column-aligned "TICKET  DESCRIPTION" rows
-// for `rm`'s interactive ticket picker, same tabwriter-padding approach as
-// `jump`'s entries (see jumpEntryLines) so columns don't drift row to row.
-func rmEntryLines(tasks []*TaskState) []string {
-	var buf bytes.Buffer
-	tw := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
-	for _, t := range tasks {
-		fmt.Fprintf(tw, "%s\t%s\n", t.Ticket, t.Description)
-	}
-	tw.Flush()
-	out := strings.TrimSuffix(buf.String(), "\n")
-	if out == "" {
-		return nil
-	}
-	return strings.Split(out, "\n")
-}
-
-// pickTicket shows an interactive picker over every existing task, for
-// `rm`/`mv`/`edit` invoked with no ticket argument, and returns the chosen ticket id.
-func pickTicket() (string, error) {
-	td, err := tasksDir()
-	if err != nil {
-		return "", err
-	}
-	tasks, err := listTasks(td)
-	if err != nil {
-		return "", err
-	}
-	if len(tasks) == 0 {
-		return "", fmt.Errorf("no tasks found")
-	}
-
-	lines := rmEntryLines(tasks)
-	byLine := make(map[string]string, len(tasks))
-	for i, t := range tasks {
-		byLine[lines[i]] = t.Ticket
-	}
-
-	chosen, err := selectOne(lines)
-	if err != nil {
-		return "", err
-	}
-	ticket, ok := byLine[chosen]
-	if !ok {
-		return "", fmt.Errorf("internal error: selection %q not found", chosen)
-	}
-	return ticket, nil
-}
 
 func cmdRm(ticket string) error {
 	if ticket == "" {
@@ -67,16 +16,11 @@ func cmdRm(ticket string) error {
 		ticket = t
 	}
 
-	// Removing a worktree out from under a still-running fleet-run app is
-	// what produces the "Directory not empty" mess selfHealWorktreeRemove
-	// papers over above: a live dev server can be writing into its own
-	// untracked cache dir at the exact moment git tries to delete it, and
-	// the affected repo may have open file handles into its (hardlinked,
-	// shared-cache) node_modules besides. Catch the common case up front
-	// with an actionable error instead of racing it and hoping self-heal
+	// Catch the "still running under fleet-run" case up front with an
+	// actionable error instead of racing it and hoping selfHealWorktreeRemove
 	// covers whatever's left.
-	if active, found := activeFleetTicket(); found && active == ticket {
-		return fmt.Errorf("%s is currently active in fleet-run; run `fleet-run stop --ticket %s` (or `fleet-run stop --all`) before removing it", ticket, ticket)
+	if err := requireNotActive(ticket, "removing it"); err != nil {
+		return err
 	}
 
 	tf, err := taskFile(ticket)
@@ -90,20 +34,14 @@ func cmdRm(ticket string) error {
 
 	// repos.yaml is optional here: if it's missing or no longer has the
 	// repo entry, we still try to remove the worktree (best-effort, via
-	// git run from the worktree's parent) rather than aborting the whole
-	// rm.
-	var cfg *ReposConfig
-	if rf, err := reposFile(); err == nil {
-		if c, err := loadReposConfig(rf); err == nil {
-			cfg = c
-		}
-	}
+	// git run from the worktree itself) rather than aborting the whole rm.
+	cfg := loadReposConfigOptional()
 
 	var remaining []TaskRepo
 
 	for _, r := range st.Repos {
 		if rmErr := removeRepoWorktree(cfg, ticket, r); rmErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: removing worktree %s: %v\n", r.WorktreePath, rmErr)
+			warnf("removing worktree %s: %v", r.WorktreePath, rmErr)
 			remaining = append(remaining, r)
 			continue
 		}
@@ -131,19 +69,25 @@ func cmdRm(ticket string) error {
 	// docs/CONTRACT.md, true for runtime: windows repos too -- that path is
 	// the WSL-side symlink even though the real tree lives under
 	// windows_worktree_root), so once every repo is torn down the
-	// per-ticket parent directory is left empty and should go with it
-	// rather than accumulating stale empty dirs under worktree_root.
+	// per-ticket parent directory is normally left empty and goes with it.
+	// But it may also hold files the user keeps at the ticket root (notes,
+	// env files; see `mv`, which moves them), so it's only removed if empty
+	// -- never with RemoveAll.
 	wtRoot, err := worktreeRoot(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: resolving worktree root to remove ticket workspace dir: %v\n", err)
+		warnf("resolving worktree root to remove ticket workspace dir: %v", err)
 		return nil
 	}
 	ticketDir := filepath.Join(wtRoot, ticket)
-	if err := os.RemoveAll(ticketDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: removing ticket workspace dir %s: %v\n", ticketDir, err)
-		return nil
+	removed, leftovers, err := removeDirIfEmpty(ticketDir)
+	switch {
+	case err != nil:
+		warnf("removing ticket workspace dir %s: %v", ticketDir, err)
+	case removed:
+		fmt.Printf("removed ticket workspace dir %s\n", ticketDir)
+	case len(leftovers) > 0:
+		warnf("left ticket workspace dir %s in place; it still contains: %s", ticketDir, strings.Join(leftovers, ", "))
 	}
-	fmt.Printf("removed ticket workspace dir %s\n", ticketDir)
 	return nil
 }
 
@@ -158,27 +102,22 @@ func cmdRm(ticket string) error {
 // stderr by runHooks) and never block the removal.
 func removeRepoWorktree(cfg *ReposConfig, ticket string, r TaskRepo) error {
 	if err := runHooks("pre-remove", ticket, r.Repo, r.WorktreePath); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: pre-remove hooks for %s: %v\n", r.Repo, err)
+		warnf("pre-remove hooks for %s: %v", r.Repo, err)
 	}
 
-	repo := cfg.findRepo(r.Repo)
-
-	var removeErr error
-	switch {
-	case repo != nil && repo.Runtime == "windows":
-		removeErr = removeWorktreeWindows(repo, r.WorktreePath)
-	case repo != nil && expandHome(repo.Base) != "":
-		removeErr = selfHealWorktreeRemove(r.WorktreePath, gitWorktreeRemove(expandHome(repo.Base), r.WorktreePath))
-	default:
-		fmt.Fprintf(os.Stderr, "warning: repo %q not found in repos.yaml, trying worktree remove without a base\n", r.Repo)
-		removeErr = selfHealWorktreeRemove(r.WorktreePath, runGit("-C", r.WorktreePath, "worktree", "remove", r.WorktreePath, "--force"))
+	runner, base, err := gitForExisting(cfg, r.Repo, r.WorktreePath, "worktree remove")
+	if err != nil {
+		return err
 	}
+	removeErr := selfHealWorktreeRemove(r.WorktreePath, runner.WorktreeRemove(base, r.WorktreePath), func() error {
+		return runner.Prune(base)
+	})
 	if removeErr != nil {
 		return removeErr
 	}
 
 	if err := runHooks("post-remove", ticket, r.Repo, r.WorktreePath); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: post-remove hooks for %s: %v\n", r.Repo, err)
+		warnf("post-remove hooks for %s: %v", r.Repo, err)
 	}
 	return nil
 }
@@ -198,12 +137,26 @@ func removeRepoWorktree(cfg *ReposConfig, ticket string, r TaskRepo) error {
 // entry inside it) and sweep the untracked leftovers ourselves instead of
 // leaving the caller to retry something that can never succeed the same way
 // twice.
-func selfHealWorktreeRemove(worktreePath string, removeErr error) error {
+//
+// The other recoverable state is the mirror image: worktreePath is already
+// gone (deleted by hand), so git's "remove" fails but there's nothing left
+// to remove. That's treated as success after calling prune (which clears
+// git's stale registration for it).
+func selfHealWorktreeRemove(worktreePath string, removeErr error, prune func() error) error {
 	if removeErr == nil {
 		return nil
 	}
-	if _, statErr := os.Stat(worktreePath); statErr != nil {
-		// Nothing on disk to sweep -- surface the original error as-is.
+	if _, statErr := os.Lstat(worktreePath); os.IsNotExist(statErr) {
+		// The directory was already deleted by hand, so git can't remove
+		// it -- but the goal (worktree gone) is met. Drop git's stale
+		// registration (best-effort; a later `new` prunes again) and treat
+		// the removal as done instead of failing forever.
+		if pruneErr := prune(); pruneErr != nil {
+			warnf("worktree prune after removing missing %s: %v", worktreePath, pruneErr)
+		}
+		fmt.Fprintf(os.Stderr, "note: %s was already gone from disk; pruned its worktree registration\n", worktreePath)
+		return nil
+	} else if statErr != nil {
 		return removeErr
 	}
 	if !worktreeAdminGone(worktreePath) {
@@ -223,39 +176,4 @@ func selfHealWorktreeRemove(worktreePath string, removeErr error) error {
 func worktreeAdminGone(worktreePath string) bool {
 	_, err := os.Lstat(filepath.Join(worktreePath, ".git"))
 	return os.IsNotExist(err)
-}
-
-// removeWorktreeWindows tears down a runtime: windows repo's worktree: the
-// real git worktree (resolved via the WSL-side symlink) is deregistered
-// through Windows-native git.exe, then the symlink itself is removed. If we
-// only removed the symlink, the real Windows-native tree and its worktree
-// registration in windows_base would silently leak.
-func removeWorktreeWindows(repo *RepoConfig, worktreePath string) error {
-	if repo.WindowsBase == "" {
-		return fmt.Errorf("repo %s is runtime: windows but has no windows_base", repo.Name)
-	}
-	winBaseWin, err := wslToWindowsPath(expandHome(repo.WindowsBase))
-	if err != nil {
-		return fmt.Errorf("resolving windows_base: %w", err)
-	}
-
-	realWorktree, err := filepath.EvalSymlinks(worktreePath)
-	if err != nil {
-		// Symlink is already gone/broken; nothing left to deregister on the
-		// Windows side, just fall through to removing whatever's here.
-		fmt.Fprintf(os.Stderr, "warning: resolving symlink %s: %v\n", worktreePath, err)
-	} else {
-		winWorktreeWin, err := wslToWindowsPath(realWorktree)
-		if err != nil {
-			return fmt.Errorf("resolving worktree path: %w", err)
-		}
-		if err := winGitWorktreeRemove(winBaseWin, winWorktreeWin); err != nil {
-			return fmt.Errorf("git worktree remove: %w", err)
-		}
-	}
-
-	if err := os.Remove(worktreePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing symlink %s: %w", worktreePath, err)
-	}
-	return nil
 }

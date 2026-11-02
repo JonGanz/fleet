@@ -29,6 +29,8 @@ func availableRepoNames(cfg *ReposConfig, attached []TaskRepo) []string {
 // hooks, minus deleting the task file itself unless every repo ends up
 // removed). Both add/remove selections are made up front, before any
 // git/hook work starts, mirroring `new`'s patch-selection front-loading.
+// Every selected repo is attempted even if some fail; failures make the
+// command exit non-zero once everything has been tried and state saved.
 func cmdEdit(ticket string) error {
 	if ticket == "" {
 		picked, err := pickTicket()
@@ -47,116 +49,44 @@ func cmdEdit(ticket string) error {
 		return fmt.Errorf("read task %s: %w", ticket, err)
 	}
 
-	rf, err := reposFile()
-	if err != nil {
-		return err
-	}
-	cfg, err := loadReposConfig(rf)
+	cfg, _, err := loadConfig()
 	if err != nil {
 		return err
 	}
 
-	attachedNames := make([]string, len(st.Repos))
-	for i, r := range st.Repos {
-		attachedNames[i] = r.Repo
-	}
-
-	// selectMultiOptionalTitled, not selectMultiTitled: an empty selection is
-	// a common, valid answer on both of these pickers (e.g. you may only be
-	// here to remove a repo and add none, or vice versa), so a bare enter
-	// with nothing checked must confirm "nothing" rather than falling back
-	// to whatever repo the cursor happens to be on.
-	toAdd, err := selectMultiOptionalTitled(fmt.Sprintf("%s: select repos to add", ticket), availableRepoNames(cfg, st.Repos))
+	toAdd, toRemove, err := selectEditRepos(cfg, ticket, st)
 	if err != nil {
-		return fmt.Errorf("add-repo selection: %w", err)
+		return err
 	}
-	toRemove, err := selectMultiOptionalTitled(fmt.Sprintf("%s: select repos to remove", ticket), attachedNames)
-	if err != nil {
-		return fmt.Errorf("remove-repo selection: %w", err)
-	}
-
 	if len(toAdd) == 0 && len(toRemove) == 0 {
-		fmt.Fprintln(os.Stderr, "no changes selected")
+		fmt.Println("no changes selected")
 		return nil
 	}
 
-	// Same race `rm` guards against: removing a repo's worktree while its
-	// dev server is still running under fleet-run for this exact ticket can
-	// leave untracked cruft behind git's own cleanup (see
-	// selfHealWorktreeRemove in cmd_rm.go). Adding repos is unaffected, so
-	// only check when a removal is actually requested.
+	// Removing a repo's worktree while its dev server is still running under
+	// fleet-run for this exact ticket can leave untracked cruft behind git's
+	// own cleanup (see selfHealWorktreeRemove in cmd_rm.go). Adding repos is
+	// unaffected, so only check when a removal is actually requested.
 	if len(toRemove) > 0 {
-		if active, found := activeFleetTicket(); found && active == ticket {
-			return fmt.Errorf("%s is currently active in fleet-run; run `fleet-run stop --ticket %s` (or `fleet-run stop --all`) before removing repos from it", ticket, ticket)
+		if err := requireNotActive(ticket, "removing repos from it"); err != nil {
+			return err
 		}
 	}
 
 	// Ask about every to-be-added repo's patches up front too, for the same
 	// reason `new` does: front-load all interactive prompts before any
 	// (potentially slow) git/hook work starts.
-	patchesByRepo := make(map[string][]string, len(toAdd))
-	for _, repoName := range toAdd {
-		patches, err := selectPatches(repoName)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: patch selection for %s: %v\n", repoName, err)
-			continue
-		}
-		patchesByRepo[repoName] = patches
-	}
+	patchesByRepo := selectPatchesFor(cfg, toAdd)
 
-	toRemoveSet := make(map[string]bool, len(toRemove))
-	for _, name := range toRemove {
-		toRemoveSet[name] = true
-	}
-
-	// Removals run first and are persisted before any additions start, so a
-	// failure partway through additions doesn't lose already-successful
-	// removals. Repos that fail to remove are kept in the task (same
-	// partial-failure contract as `rm`), so a rerun of `edit` retries them.
-	var kept []TaskRepo
-	removedCount := 0
-	removeFailures := 0
-	for _, r := range st.Repos {
-		if !toRemoveSet[r.Repo] {
-			kept = append(kept, r)
-			continue
-		}
-		if err := removeRepoWorktree(cfg, ticket, r); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: removing worktree %s: %v\n", r.WorktreePath, err)
-			kept = append(kept, r)
-			removeFailures++
-			continue
-		}
-		fmt.Printf("removed worktree %s (%s)\n", r.WorktreePath, r.Repo)
-		removedCount++
-	}
-	st.Repos = kept
-	if removedCount > 0 {
-		if err := writeTaskState(tf, st); err != nil {
-			return fmt.Errorf("update task state %s after removal: %w", tf, err)
-		}
-	}
-
-	wtRoot, err := worktreeRoot(cfg)
+	removed, removeFailures, err := editRemovePhase(cfg, ticket, tf, st, toRemove)
 	if err != nil {
 		return err
 	}
-
-	addedCount := 0
-	for _, repoName := range toAdd {
-		repo := cfg.findRepo(repoName)
-		if repo == nil {
-			fmt.Fprintf(os.Stderr, "warning: repo %q not found in config, skipping\n", repoName)
-			continue
-		}
-		tr, err := createRepoWorktree(cfg, repo, ticket, st.Description, wtRoot, patchesByRepo[repoName])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			continue
-		}
-		st.Repos = append(st.Repos, tr)
-		addedCount++
+	added, addFailures, err := editAddPhase(cfg, ticket, st, toAdd, patchesByRepo)
+	if err != nil {
+		return err
 	}
+	failures := removeFailures + addFailures
 
 	// If every repo ended up removed and none were added, drop the task
 	// file entirely rather than leaving an empty-repos state file behind --
@@ -166,14 +96,98 @@ func cmdEdit(ticket string) error {
 			return fmt.Errorf("remove task state %s: %w", tf, err)
 		}
 		fmt.Printf("task %s has no repos left; removed task state %s\n", ticket, tf)
-		return nil
+	} else {
+		if err := writeTaskState(tf, st); err != nil {
+			return fmt.Errorf("write task state: %w", err)
+		}
+		fmt.Printf("task %s updated: added %d, removed %d (%d failure(s)); state written to %s\n",
+			ticket, added, removed, failures, tf)
 	}
 
-	if err := writeTaskState(tf, st); err != nil {
-		return fmt.Errorf("write task state: %w", err)
+	if failures > 0 {
+		return fmt.Errorf("%d repo operation(s) failed for %s (see messages above); rerun `fleet-task edit %s` to retry", failures, ticket, ticket)
 	}
-
-	fmt.Printf("task %s updated: added %d, removed %d (%d removal failure(s)); state written to %s\n",
-		ticket, addedCount, removedCount, removeFailures, tf)
 	return nil
+}
+
+// selectEditRepos shows the add and remove repo pickers and returns the
+// chosen repo names. An empty selection is a common, valid answer on both
+// (you may only be here to remove a repo and add none, or vice versa), so
+// CursorFallback is off: a bare enter with nothing checked confirms "nothing"
+// rather than whatever repo the cursor happens to be on.
+func selectEditRepos(cfg *ReposConfig, ticket string, st *TaskState) (toAdd, toRemove []string, err error) {
+	attachedNames := make([]string, len(st.Repos))
+	for i, r := range st.Repos {
+		attachedNames[i] = r.Repo
+	}
+
+	toAdd, err = runSelect(selectOpts{
+		Title: fmt.Sprintf("%s: select repos to add", ticket),
+		Items: availableRepoNames(cfg, st.Repos),
+		Multi: true,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("add-repo selection: %w", err)
+	}
+	toRemove, err = runSelect(selectOpts{
+		Title: fmt.Sprintf("%s: select repos to remove", ticket),
+		Items: attachedNames,
+		Multi: true,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("remove-repo selection: %w", err)
+	}
+	return toAdd, toRemove, nil
+}
+
+// editRemovePhase removes the selected repos' worktrees, updating st.Repos
+// in place and persisting it before any additions start, so a failure
+// partway through additions doesn't lose already-successful removals. Repos
+// that fail to remove stay in the task (same partial-failure contract as
+// `rm`), so a rerun of `edit` retries them.
+func editRemovePhase(cfg *ReposConfig, ticket, tf string, st *TaskState, toRemove []string) (removed, failures int, err error) {
+	toRemoveSet := make(map[string]bool, len(toRemove))
+	for _, name := range toRemove {
+		toRemoveSet[name] = true
+	}
+
+	var kept []TaskRepo
+	for _, r := range st.Repos {
+		if !toRemoveSet[r.Repo] {
+			kept = append(kept, r)
+			continue
+		}
+		if err := removeRepoWorktree(cfg, ticket, r); err != nil {
+			warnf("removing worktree %s: %v", r.WorktreePath, err)
+			kept = append(kept, r)
+			failures++
+			continue
+		}
+		fmt.Printf("removed worktree %s (%s)\n", r.WorktreePath, r.Repo)
+		removed++
+	}
+	st.Repos = kept
+	if removed > 0 {
+		if err := writeTaskState(tf, st); err != nil {
+			return removed, failures, fmt.Errorf("update task state %s after removal: %w", tf, err)
+		}
+	}
+	return removed, failures, nil
+}
+
+// editAddPhase sets up worktrees for the selected repos (same per-repo setup
+// as `new`, using the task's existing description so branch names stay
+// consistent with the repos added at `new` time), appending the successes to
+// st.Repos. Returns how many were added and how many failed.
+func editAddPhase(cfg *ReposConfig, ticket string, st *TaskState, toAdd []string, patchesByRepo map[string][]string) (added, failures int, err error) {
+	if len(toAdd) == 0 {
+		return 0, 0, nil
+	}
+	wtRoot, err := worktreeRoot(cfg)
+	if err != nil {
+		return 0, 0, err
+	}
+	newRepos, failures := addRepos(cfg, ticket, st.Description, wtRoot, toAdd, patchesByRepo)
+	st.Repos = append(st.Repos, newRepos...)
+	return len(newRepos), failures, nil
 }

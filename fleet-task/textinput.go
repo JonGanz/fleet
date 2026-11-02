@@ -46,16 +46,6 @@ func promptForm(labels []string) ([]string, error) {
 	return values, nil
 }
 
-// promptText is promptForm for a single field, for callers that only need
-// one value.
-func promptText(label string) (string, error) {
-	values, err := promptForm([]string{label})
-	if err != nil {
-		return "", err
-	}
-	return values[0], nil
-}
-
 type formField struct {
 	label  string
 	value  []rune

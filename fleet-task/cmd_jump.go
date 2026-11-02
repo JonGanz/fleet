@@ -1,39 +1,12 @@
 package main
 
-import (
-	"bytes"
-	"fmt"
-	"strings"
-	"text/tabwriter"
-)
+import "fmt"
 
 // jumpEntry is one selectable row for `fleet-task jump`.
 type jumpEntry struct {
 	Ticket       string
 	Repo         string
 	WorktreePath string
-}
-
-// jumpEntryLines renders entries as column-aligned rows using tabwriter,
-// which pads with real spaces rather than leaving literal tab characters
-// in the string. Raw tabs expand to the terminal's tab stops, which
-// depend on the cursor column reached by whatever text preceded them —
-// different per row since ticket/repo names vary in length — so the
-// picker's columns visibly drifted row to row and its line-diffing
-// repaint left stale characters behind (rendering as duplicated text).
-// Fixed-width rows sidestep both.
-func jumpEntryLines(entries []jumpEntry) []string {
-	var buf bytes.Buffer
-	tw := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
-	for _, e := range entries {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", e.Ticket, e.Repo, e.WorktreePath)
-	}
-	tw.Flush()
-	out := strings.TrimSuffix(buf.String(), "\n")
-	if out == "" {
-		return nil
-	}
-	return strings.Split(out, "\n")
 }
 
 // buildJumpEntries flattens all tasks' repos into a flat list of jump
@@ -52,7 +25,9 @@ func buildJumpEntries(tasks []*TaskState) []jumpEntry {
 	return entries
 }
 
-func cmdJump() error {
+// cmdJump prints a chosen worktree path. If ticket is non-empty, the picker
+// is restricted to that ticket's repos.
+func cmdJump(ticket string) error {
 	td, err := tasksDir()
 	if err != nil {
 		return err
@@ -60,6 +35,22 @@ func cmdJump() error {
 	tasks, err := listTasks(td)
 	if err != nil {
 		return err
+	}
+
+	if ticket != "" {
+		if err := validateTicketName(ticket); err != nil {
+			return err
+		}
+		var filtered []*TaskState
+		for _, t := range tasks {
+			if t.Ticket == ticket {
+				filtered = append(filtered, t)
+			}
+		}
+		if len(filtered) == 0 {
+			return fmt.Errorf("no task found for ticket %s", ticket)
+		}
+		tasks = filtered
 	}
 
 	entries := buildJumpEntries(tasks)
@@ -73,7 +64,7 @@ func cmdJump() error {
 		byLine[lines[i]] = e
 	}
 
-	chosen, err := selectOne(lines)
+	chosen, err := selectOneLine(lines)
 	if err != nil {
 		// Cancelled (e.g. Esc/q): exit non-zero, no stdout.
 		return err

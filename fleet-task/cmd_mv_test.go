@@ -97,3 +97,85 @@ func TestMoveTicketDirLeftoversMissingOldDir(t *testing.T) {
 		t.Errorf("missing old dir: %v", err)
 	}
 }
+
+func TestAlreadyMoved(t *testing.T) {
+	root := t.TempDir()
+	oldP := filepath.Join(root, "old")
+	newP := filepath.Join(root, "new")
+
+	if alreadyMoved(oldP, newP) {
+		t.Error("neither exists: not moved")
+	}
+	if !alreadyMoved(newP, newP) {
+		t.Error("state path already equals destination: moved")
+	}
+	if err := os.Mkdir(oldP, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if alreadyMoved(oldP, newP) {
+		t.Error("source still exists: not moved")
+	}
+	if err := os.Mkdir(newP, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if alreadyMoved(oldP, newP) {
+		t.Error("both exist: ambiguous, must not be treated as moved")
+	}
+	if err := os.Remove(oldP); err != nil {
+		t.Fatal(err)
+	}
+	if !alreadyMoved(oldP, newP) {
+		t.Error("source gone, destination present: moved")
+	}
+}
+
+func TestCheckNewTicketDir(t *testing.T) {
+	root := t.TempDir()
+	oldDir := filepath.Join(root, "OLD-1")
+	newDir := filepath.Join(root, "NEW-1")
+	repos := []TaskRepo{
+		{Repo: "backend", WorktreePath: filepath.Join(oldDir, "backend")},
+		{Repo: "ui", WorktreePath: filepath.Join(oldDir, "ui")},
+	}
+
+	// Missing: fine.
+	if err := checkNewTicketDir(newDir, repos); err != nil {
+		t.Errorf("missing dir: %v", err)
+	}
+
+	// Empty: fine (mv creates the dir before the first move).
+	if err := os.MkdirAll(newDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkNewTicketDir(newDir, repos); err != nil {
+		t.Errorf("empty dir: %v", err)
+	}
+
+	// backend already moved (source gone, destination present): fine.
+	if err := os.MkdirAll(filepath.Join(newDir, "backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkNewTicketDir(newDir, repos); err != nil {
+		t.Errorf("resumable dir: %v", err)
+	}
+
+	// Unrelated entry: refused.
+	if err := os.WriteFile(filepath.Join(newDir, "stranger.txt"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkNewTicketDir(newDir, repos); err == nil {
+		t.Error("unrelated entry should be refused")
+	}
+	os.Remove(filepath.Join(newDir, "stranger.txt"))
+
+	// A repo-named dir whose source still exists is someone else's: refused.
+	if err := os.MkdirAll(filepath.Join(oldDir, "ui"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(newDir, "ui"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkNewTicketDir(newDir, repos); err == nil {
+		t.Error("collision with a not-yet-moved repo should be refused")
+	}
+}

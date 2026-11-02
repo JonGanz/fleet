@@ -13,6 +13,11 @@ import (
 // from a template (branchName) that isn't necessarily equal to the ticket
 // string, and renaming a possibly-already-pushed branch is a separate,
 // riskier operation than renaming the ticket identity itself.
+//
+// mv is resumable: after each repo's worktree moves, the old ticket's state
+// file is rewritten with that repo's new worktree path, so state always
+// reflects reality. If a later repo fails, rerunning `mv old new` skips the
+// repos already at their destination and carries on with the rest.
 func cmdMv(oldTicket, newTicket string) error {
 	if oldTicket == "" {
 		t, err := pickTicket()
@@ -21,13 +26,12 @@ func cmdMv(oldTicket, newTicket string) error {
 		}
 		oldTicket = t
 	}
+	if err := validateTicketName(oldTicket); err != nil {
+		return err
+	}
 
-	// Same race `rm`/`edit` guard against: renaming a ticket that's live
-	// under fleet-run would desync its tmux @fleet_task_ticket option (and
-	// fleet-run's own in-memory state) from the new filename, so refuse
-	// outright rather than trying to handle it.
-	if active, found := activeFleetTicket(); found && active == oldTicket {
-		return fmt.Errorf("%s is currently active in fleet-run; run `fleet-run stop --ticket %s` (or `fleet-run stop --all`) before renaming it", oldTicket, oldTicket)
+	if err := requireNotActive(oldTicket, "renaming it"); err != nil {
+		return err
 	}
 
 	oldFile, err := taskFile(oldTicket)
@@ -61,12 +65,7 @@ func cmdMv(oldTicket, newTicket string) error {
 		return fmt.Errorf("a task already exists at %s", newFile)
 	}
 
-	var cfg *ReposConfig
-	if rf, err := reposFile(); err == nil {
-		if c, err := loadReposConfig(rf); err == nil {
-			cfg = c
-		}
-	}
+	cfg := loadReposConfigOptional()
 
 	wtRoot, err := worktreeRoot(cfg)
 	if err != nil {
@@ -74,32 +73,44 @@ func cmdMv(oldTicket, newTicket string) error {
 	}
 	oldTicketDir := filepath.Join(wtRoot, oldTicket)
 	newTicketDir := filepath.Join(wtRoot, newTicket)
-	if _, err := os.Stat(newTicketDir); err == nil {
-		return fmt.Errorf("worktree directory %s already exists", newTicketDir)
+	if err := checkNewTicketDir(newTicketDir, st.Repos); err != nil {
+		return err
 	}
 
-	// Move every repo's worktree before touching any state file: a
-	// half-moved task (some repos already relocated, some not) is worse to
-	// persist under either ticket name than to just report and let the
-	// remaining repos be finished by hand, so nothing is written until every
-	// repo below has succeeded.
-	movedRepos := make([]TaskRepo, 0, len(st.Repos))
-	for i, r := range st.Repos {
+	// Move one repo at a time, persisting after each. A half-moved task is
+	// recorded as exactly that (moved repos carry their new paths), so the
+	// state file never points at directories that no longer exist, and a
+	// rerun resumes where this one stopped.
+	for i := range st.Repos {
+		r := st.Repos[i]
 		newWorktreePath := filepath.Join(newTicketDir, r.Repo)
-		if err := moveRepoWorktree(cfg, oldTicket, newTicket, r, newWorktreePath); err != nil {
-			remaining := st.Repos[i+1:]
+
+		if alreadyMoved(r.WorktreePath, newWorktreePath) {
+			fmt.Printf("worktree %s already at %s, skipping\n", r.Repo, newWorktreePath)
+			st.Repos[i].WorktreePath = newWorktreePath
+			continue
+		}
+
+		if err := moveRepoWorktree(cfg, r, newWorktreePath); err != nil {
+			remaining := st.Repos[i:]
+			// Moves are persisted as they happen; this only flushes paths
+			// updated by the "already moved" skip branch above.
+			if werr := writeTaskState(oldFile, st); werr != nil {
+				warnf("update task state %s: %v", oldFile, werr)
+			}
 			return fmt.Errorf(
-				"moving worktree %s (%s): %w\n%d of %d repo(s) already moved to %s; %d repo(s) (%s) were not -- finish moving them by hand (e.g. `git worktree move <old> <new>`), then rerun `fleet-task mv %s %s`",
-				r.WorktreePath, r.Repo, err, len(movedRepos), len(st.Repos), newTicketDir, len(remaining)+1, repoNames(append([]TaskRepo{r}, remaining...)), oldTicket, newTicket,
+				"moving worktree %s (%s): %w\n%d of %d repo(s) moved to %s; %d (%s) not yet -- fix the problem and rerun `fleet-task mv %s %s` to finish (state still lives under %s)",
+				r.WorktreePath, r.Repo, err, i, len(st.Repos), newTicketDir, len(remaining), repoNames(remaining), oldTicket, newTicket, oldTicket,
 			)
 		}
 		fmt.Printf("moved worktree %s -> %s (%s)\n", r.WorktreePath, newWorktreePath, r.Repo)
-		r.WorktreePath = newWorktreePath
-		movedRepos = append(movedRepos, r)
+		st.Repos[i].WorktreePath = newWorktreePath
+		if err := writeTaskState(oldFile, st); err != nil {
+			return fmt.Errorf("update task state %s after moving %s (worktree is already at %s): %w", oldFile, r.Repo, newWorktreePath, err)
+		}
 	}
 
 	st.Ticket = newTicket
-	st.Repos = movedRepos
 	if err := writeTaskState(newFile, st); err != nil {
 		return fmt.Errorf("write task state %s: %w", newFile, err)
 	}
@@ -109,10 +120,52 @@ func cmdMv(oldTicket, newTicket string) error {
 	os.Remove(oldFile + ".lock") // best-effort: stale lockfile from a crashed prior run, if any
 
 	if err := moveTicketDirLeftovers(oldTicketDir, newTicketDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		warnf("%v", err)
 	}
 
 	fmt.Printf("renamed task %s -> %s; state written to %s\n", oldTicket, newTicket, newFile)
+	return nil
+}
+
+// alreadyMoved reports whether a repo's worktree is already at its
+// destination: the state path equals it (a prior `mv` run moved it and
+// recorded that), or the source is gone and the destination exists (a
+// prior run was interrupted between the move and the state write).
+func alreadyMoved(oldPath, newPath string) bool {
+	if oldPath == newPath {
+		return true
+	}
+	if _, err := os.Lstat(oldPath); !os.IsNotExist(err) {
+		return false
+	}
+	_, err := os.Lstat(newPath)
+	return err == nil
+}
+
+// checkNewTicketDir decides whether newDir is an acceptable destination for
+// `mv`. A missing or empty dir is fine, and so is one containing only
+// worktrees of this very task that an earlier, interrupted `mv` already
+// moved there (alreadyMoved). Anything else -- another task's worktrees,
+// unrelated files, a repo dir that isn't ours -- is refused rather than
+// merged into.
+func checkNewTicketDir(newDir string, repos []TaskRepo) error {
+	entries, err := os.ReadDir(newDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", newDir, err)
+	}
+	byName := make(map[string]TaskRepo, len(repos))
+	for _, r := range repos {
+		byName[r.Repo] = r
+	}
+	for _, e := range entries {
+		r, ok := byName[e.Name()]
+		if !ok || !alreadyMoved(r.WorktreePath, filepath.Join(newDir, e.Name())) {
+			return fmt.Errorf("worktree directory %s already exists and contains %q, which is not a worktree of this task moved by an earlier `mv`", newDir, e.Name())
+		}
+	}
 	return nil
 }
 
@@ -159,91 +212,19 @@ func moveTicketDirLeftovers(oldDir, newDir string) error {
 
 // moveRepoWorktree relocates a single repo's worktree from r.WorktreePath to
 // newWorktreePath, using `git worktree move` (not a plain filesystem rename)
-// so git's own worktree administrative data stays consistent. cfg may be
+// so git's own worktree administrative data stays consistent. For
+// runtime: windows repos the real tree under windows_worktree_root moves and
+// the WSL-side symlink is recreated (see windowsGit.WorktreeMove). cfg may be
 // nil, or missing this repo's entry entirely (repos.yaml changed since the
 // task was created); best-effort falls back to running the move from
 // within the worktree itself rather than aborting, mirroring
 // removeRepoWorktree's fallback in cmd_rm.go.
-func moveRepoWorktree(cfg *ReposConfig, oldTicket, newTicket string, r TaskRepo, newWorktreePath string) error {
-	if err := os.MkdirAll(filepath.Dir(newWorktreePath), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(newWorktreePath), err)
-	}
-
-	repo := cfg.findRepo(r.Repo)
-	switch {
-	case repo != nil && repo.Runtime == "windows":
-		return moveWorktreeWindows(cfg, repo, oldTicket, newTicket, r.WorktreePath, newWorktreePath)
-	case repo != nil && expandHome(repo.Base) != "":
-		return gitWorktreeMove(expandHome(repo.Base), r.WorktreePath, newWorktreePath)
-	default:
-		fmt.Fprintf(os.Stderr, "warning: repo %q not found in repos.yaml, trying worktree move without a base\n", r.Repo)
-		return gitWorktreeMove(r.WorktreePath, r.WorktreePath, newWorktreePath)
-	}
-}
-
-// moveWorktreeWindows is the runtime: windows counterpart of
-// moveRepoWorktree: the real git worktree lives under
-// windows_worktree_root/<ticket>/<repo> on the Windows-native side and is
-// moved there via git.exe, then the WSL-side symlink at worktreePath (what
-// every other consumer expects) is recreated pointing at the new location --
-// mirroring how removeWorktreeWindows in cmd_rm.go handles teardown for the
-// same repo shape.
-func moveWorktreeWindows(cfg *ReposConfig, repo *RepoConfig, oldTicket, newTicket, oldWorktreePath, newWorktreePath string) error {
-	if repo.WindowsBase == "" {
-		return fmt.Errorf("repo %s is runtime: windows but has no windows_base", repo.Name)
-	}
-	winBaseWin, err := wslToWindowsPath(expandHome(repo.WindowsBase))
-	if err != nil {
-		return fmt.Errorf("resolving windows_base: %w", err)
-	}
-
-	_, oldWinReal, err := windowsWorktreePaths(cfg, repo, oldTicket)
+func moveRepoWorktree(cfg *ReposConfig, r TaskRepo, newWorktreePath string) error {
+	runner, base, err := gitForExisting(cfg, r.Repo, r.WorktreePath, "worktree move")
 	if err != nil {
 		return err
 	}
-	newWslReal, newWinReal, err := windowsWorktreePaths(cfg, repo, newTicket)
-	if err != nil {
-		return err
-	}
-
-	winNewParent, err := wslToWindowsPath(filepath.Dir(newWslReal))
-	if err != nil {
-		return fmt.Errorf("resolving new worktree parent: %w", err)
-	}
-	if err := windowsMkdirAll(winNewParent); err != nil {
-		return fmt.Errorf("mkdir %s: %w", winNewParent, err)
-	}
-
-	if err := winGitWorktreeMove(winBaseWin, oldWinReal, newWinReal); err != nil {
-		return fmt.Errorf("git worktree move: %w", err)
-	}
-
-	if err := os.Remove(oldWorktreePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing old symlink %s: %w", oldWorktreePath, err)
-	}
-	if err := os.MkdirAll(filepath.Dir(newWorktreePath), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(newWorktreePath), err)
-	}
-	if err := os.Symlink(newWslReal, newWorktreePath); err != nil {
-		return fmt.Errorf("symlink %s -> %s: %w", newWorktreePath, newWslReal, err)
-	}
-	return nil
-}
-
-// validateTicketName rejects ticket ids that can't safely become both a
-// JSON filename (<tasks dir>/<ticket>.json) and a worktree directory
-// component (<worktree_root>/<ticket>/<repo>).
-func validateTicketName(ticket string) error {
-	if ticket == "" {
-		return fmt.Errorf("ticket id is required")
-	}
-	if ticket != filepath.Base(ticket) || strings.Contains(ticket, "/") || strings.Contains(ticket, `\`) {
-		return fmt.Errorf("ticket id %q must not contain path separators", ticket)
-	}
-	if ticket == "." || ticket == ".." {
-		return fmt.Errorf("ticket id %q is not valid", ticket)
-	}
-	return nil
+	return runner.WorktreeMove(base, r.WorktreePath, newWorktreePath)
 }
 
 // repoNames renders repos as a comma-separated list of repo names, for the

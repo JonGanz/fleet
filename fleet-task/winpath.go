@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,36 +20,60 @@ func wslToWindowsPath(dir string) (string, error) {
 }
 
 // psQuote wraps s in single quotes for embedding in a PowerShell -Command
-// string, doubling any embedded single quotes per PowerShell's own escaping
-// convention (`it''s` for a literal `it's`).
+// string, doubling any embedded single quote per PowerShell's own escaping
+// convention.
 func psQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// runWindowsCommand runs args as a native Windows process (e.g. git.exe,
-// npm) with working directory winDir (a win32-form path), by shelling out to
-// powershell.exe from WSL. Every arg is individually single-quoted, so this
-// resolves against the *spawned PowerShell process's own Windows PATH* --
-// it does not depend on WSL's own $PATH/interop.appendWindowsPath, only on
-// powershell.exe itself being reachable (already an existing dependency via
-// fleet-run's run-command support).
+// windowsCommandScript builds the PowerShell -Command script that runs args
+// as a native Windows process with working directory winDir. Every arg is
+// individually single-quoted, so this resolves against the *spawned
+// PowerShell process's own Windows PATH* -- it does not depend on WSL's own
+// $PATH/interop.appendWindowsPath.
 //
+// Failure handling: setting the directory runs under
+// $ErrorActionPreference='Stop' inside try/catch, so a failed cd can't
+// silently run the command in the wrong directory (it exits 1 instead). The
+// preference is then relaxed to 'Continue' for the native command itself, so
+// git's progress output on stderr isn't promoted to a terminating error.
 // The trailing `exit $LASTEXITCODE` is required: PowerShell does not
 // reliably propagate a native command's exit code as its own process exit
-// code otherwise, which would make failures here silently look like success
-// to Go's exec.Cmd.Run().
-func runWindowsCommand(winDir string, args ...string) error {
+// code otherwise, which would make failures look like success to Go's
+// exec.Cmd.Run().
+func windowsCommandScript(winDir string, args ...string) string {
 	quoted := make([]string, len(args))
 	for i, a := range args {
 		quoted[i] = psQuote(a)
 	}
-	psCmd := fmt.Sprintf("cd %s; & %s; exit $LASTEXITCODE", psQuote(winDir), strings.Join(quoted, " "))
+	return fmt.Sprintf(
+		"$ErrorActionPreference='Stop'; try { Set-Location -LiteralPath %s; $ErrorActionPreference='Continue'; & %s; exit $LASTEXITCODE } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
+		psQuote(winDir), strings.Join(quoted, " "))
+}
 
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", psCmd)
+// runWindowsCommand runs args as a native Windows process (e.g. git.exe,
+// npm) with working directory winDir (a win32-form path), by shelling out to
+// powershell.exe from WSL. See windowsCommandScript.
+func runWindowsCommand(winDir string, args ...string) error {
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", windowsCommandScript(winDir, args...))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("powershell (%v) in %s: %w", args, winDir, err)
+	}
+	return nil
+}
+
+// runWindowsCommandCapture is runWindowsCommand with stderr captured into
+// the returned error instead of shown live, for commands whose failure the
+// caller retries or reports itself (see addWorktreeWithFallback).
+func runWindowsCommandCapture(winDir string, args ...string) error {
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", windowsCommandScript(winDir, args...))
+	var stderr bytes.Buffer
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("powershell (%v) in %s: %w%s", args, winDir, err, stderrSuffix(stderr.String()))
 	}
 	return nil
 }
@@ -69,11 +94,20 @@ func windowsPathExists(winDir string) (bool, error) {
 	return false, fmt.Errorf("Test-Path %s: %w", winDir, err)
 }
 
+// windowsMkdirScript builds the PowerShell script for windowsMkdirAll. New-Item
+// is a cmdlet, which does not set $LASTEXITCODE (so `exit $LASTEXITCODE`
+// would exit 0 even when it fails); under $ErrorActionPreference='Stop' a
+// failure throws and the catch block exits non-zero.
+func windowsMkdirScript(winDir string) string {
+	return fmt.Sprintf(
+		"$ErrorActionPreference='Stop'; try { New-Item -ItemType Directory -Force -Path %s | Out-Null; exit 0 } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
+		psQuote(winDir))
+}
+
 // windowsMkdirAll creates winDir (and any missing parents) via PowerShell's
 // New-Item, mirroring os.MkdirAll but as a Windows-native operation.
 func windowsMkdirAll(winDir string) error {
-	psCmd := fmt.Sprintf("New-Item -ItemType Directory -Force -Path %s | Out-Null; exit $LASTEXITCODE", psQuote(winDir))
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", psCmd)
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", windowsMkdirScript(winDir))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

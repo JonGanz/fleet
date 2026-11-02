@@ -1,6 +1,6 @@
 # fleet-task shell integration.
 #
-# `fleet-task jump` fzf-selects a worktree and prints its path on stdout
+# `fleet-task jump` shows an interactive picker to select a worktree and prints its path on stdout
 # (and only that). A subprocess can't change its parent shell's working
 # directory, so the `cd` has to happen in the calling shell itself -- this
 # `fj` function wraps `fleet-task jump` and does the `cd` for you.

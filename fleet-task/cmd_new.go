@@ -13,15 +13,19 @@ func cmdNew() error {
 		return fmt.Errorf("read ticket/description: %w", err)
 	}
 	ticket, description := values[0], values[1]
-	if ticket == "" {
-		return fmt.Errorf("ticket id is required")
-	}
 
-	rf, err := reposFile()
+	// taskFile validates the ticket id (no path separators, not "." / "..").
+	tf, err := taskFile(ticket)
 	if err != nil {
 		return err
 	}
-	cfg, err := loadReposConfig(rf)
+	// `new` on an existing ticket would overwrite its state with only this
+	// run's repos and reset created_at, orphaning the earlier worktrees.
+	if _, err := os.Stat(tf); err == nil {
+		return fmt.Errorf("task %s already exists (%s); use `fleet-task edit %s` to add or remove repos, or `fleet-task rm %s` to start over", ticket, tf, ticket, ticket)
+	}
+
+	cfg, rf, err := loadConfig()
 	if err != nil {
 		return err
 	}
@@ -29,7 +33,7 @@ func cmdNew() error {
 		return fmt.Errorf("no repos defined in %s", rf)
 	}
 
-	selectedRepos, err := selectMulti(cfg.repoNames())
+	selectedRepos, err := runSelect(selectOpts{Items: cfg.repoNames(), Multi: true, CursorFallback: true})
 	if err != nil {
 		return fmt.Errorf("repo selection: %w", err)
 	}
@@ -42,38 +46,8 @@ func cmdNew() error {
 		return err
 	}
 
-	// Ask about every repo's patches up front, before any directory/worktree
-	// work starts, so all user interaction for `new` front-loads instead of
-	// interleaving prompts with (potentially slow) git/hook/cache work.
-	patchesByRepo := make(map[string][]string, len(selectedRepos))
-	for _, repoName := range selectedRepos {
-		if cfg.findRepo(repoName) == nil {
-			continue
-		}
-		patches, err := selectPatches(repoName)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: patch selection for %s: %v\n", repoName, err)
-			continue
-		}
-		patchesByRepo[repoName] = patches
-	}
-
-	var taskRepos []TaskRepo
-
-	for _, repoName := range selectedRepos {
-		repo := cfg.findRepo(repoName)
-		if repo == nil {
-			fmt.Fprintf(os.Stderr, "warning: repo %q not found in config, skipping\n", repoName)
-			continue
-		}
-
-		tr, err := createRepoWorktree(cfg, repo, ticket, description, wtRoot, patchesByRepo[repoName])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			continue
-		}
-		taskRepos = append(taskRepos, tr)
-	}
+	patchesByRepo := selectPatchesFor(cfg, selectedRepos)
+	taskRepos, failed := addRepos(cfg, ticket, description, wtRoot, selectedRepos, patchesByRepo)
 
 	if len(taskRepos) == 0 {
 		return fmt.Errorf("no repos were successfully set up; not writing task state")
@@ -85,47 +59,94 @@ func cmdNew() error {
 		CreatedAt:   time.Now().UTC(),
 		Repos:       taskRepos,
 	}
-
-	tf, err := taskFile(ticket)
-	if err != nil {
-		return err
-	}
 	if err := writeTaskState(tf, st); err != nil {
 		return fmt.Errorf("write task state: %w", err)
 	}
 
 	fmt.Printf("Task %s created with %d repo(s); state written to %s\n", ticket, len(taskRepos), tf)
+	if failed > 0 {
+		return fmt.Errorf("%d of %d repo(s) failed to set up; the rest were recorded -- retry the failed ones with `fleet-task edit %s`", failed, len(selectedRepos), ticket)
+	}
 	return nil
+}
+
+// selectPatchesFor asks about every named repo's patches up front, before
+// any directory/worktree work starts, so all user interaction front-loads
+// instead of interleaving prompts with (potentially slow) git/hook/cache
+// work. Shared by `new` and `edit`'s add phase. A repo whose patch selection
+// fails gets a warning and no patches.
+func selectPatchesFor(cfg *ReposConfig, repoNames []string) map[string][]string {
+	patchesByRepo := make(map[string][]string, len(repoNames))
+	for _, repoName := range repoNames {
+		if cfg.findRepo(repoName) == nil {
+			continue
+		}
+		patches, err := selectPatches(repoName)
+		if err != nil {
+			warnf("patch selection for %s: %v", repoName, err)
+			continue
+		}
+		patchesByRepo[repoName] = patches
+	}
+	return patchesByRepo
+}
+
+// addRepos sets up a worktree for each named repo (createRepoWorktree) and
+// returns the ones that succeeded plus a count of failures (unknown repo, or
+// worktree setup error). Every repo is attempted even after a failure; the
+// caller decides how to report a nonzero failure count.
+func addRepos(cfg *ReposConfig, ticket, description, wtRoot string, repoNames []string, patchesByRepo map[string][]string) (added []TaskRepo, failed int) {
+	for _, repoName := range repoNames {
+		repo := cfg.findRepo(repoName)
+		if repo == nil {
+			errorf("repo %q not found in config, skipping", repoName)
+			failed++
+			continue
+		}
+		tr, err := createRepoWorktree(cfg, repo, ticket, description, wtRoot, patchesByRepo[repoName])
+		if err != nil {
+			errorf("%v", err)
+			failed++
+			continue
+		}
+		added = append(added, tr)
+	}
+	return added, failed
 }
 
 // createRepoWorktree performs the full per-repo worktree setup, shared
 // between `new` (every repo for a brand new task) and `edit`'s add-repo
 // path (a subset of repos added to an already-existing task): pre-create
-// hook, worktree creation/branch checkout, patch application, post-create
-// hook, and node_modules cache priming. Hook and patch failures are
-// non-fatal (warned to stderr, same as before this was extracted); a
-// failure setting up the worktree itself is returned as an error so the
-// caller can skip this repo and keep going with the rest.
+// hook, then base clone/fetch and worktree creation/branch checkout, patch
+// application, post-create hook, and node_modules cache priming. Note the
+// order: pre-create hooks run *before* the base clone is ensured, so they
+// can't assume the base exists. Hook and patch failures are non-fatal
+// (warned to stderr); a failure setting up the worktree itself is returned
+// as an error so the caller can skip this repo and keep going with the rest.
 func createRepoWorktree(cfg *ReposConfig, repo *RepoConfig, ticket, description, wtRoot string, patches []string) (TaskRepo, error) {
 	worktreePath := filepath.Join(wtRoot, ticket, repo.Name)
 	branch := branchName(repo.BranchTemplate, ticket, description)
 
 	if err := runHooks("pre-create", ticket, repo.Name, worktreePath); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: pre-create hooks for %s: %v\n", repo.Name, err)
+		warnf("pre-create hooks for %s: %v", repo.Name, err)
 	}
 
-	if err := setupWorktree(cfg, repo, ticket, branch, worktreePath); err != nil {
+	runner, base, err := gitFor(cfg, repo)
+	if err != nil {
+		return TaskRepo{}, fmt.Errorf("setting up worktree for %s: %w", repo.Name, err)
+	}
+	if err := setupWorktree(runner, repo, base, branch, worktreePath); err != nil {
 		return TaskRepo{}, fmt.Errorf("setting up worktree for %s: %w", repo.Name, err)
 	}
 
 	for _, p := range patches {
-		if err := applyPatch(cfg, repo, ticket, worktreePath, p); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: applying patch %s to %s: %v\n", p, repo.Name, err)
+		if err := runner.ApplyPatch(worktreePath, p); err != nil {
+			warnf("applying patch %s to %s: %v", p, repo.Name, err)
 		}
 	}
 
 	if err := runHooks("post-create", ticket, repo.Name, worktreePath); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: post-create hooks for %s: %v\n", repo.Name, err)
+		warnf("post-create hooks for %s: %v", repo.Name, err)
 	}
 
 	if _, err := os.Stat(filepath.Join(worktreePath, "package-lock.json")); err == nil {
@@ -172,7 +193,7 @@ func selectPatches(repo string) ([]string, error) {
 	}
 
 	title := fmt.Sprintf("%s: select patches to apply", repo)
-	selectedNames, err := selectMultiPreselectedTitled(title, names)
+	selectedNames, err := runSelect(selectOpts{Title: title, Items: names, Multi: true, Preselected: true})
 	if err != nil {
 		return nil, err
 	}
@@ -184,177 +205,39 @@ func selectPatches(repo string) ([]string, error) {
 	return selected, nil
 }
 
-// applyPatch applies patchFile to worktreePath. For runtime: windows repos,
-// worktreePath is a WSL-side symlink into a worktree created by native
-// git.exe, whose .git file WSL-native git can't parse (see winGitApplyPatch),
-// so it resolves the Windows-native worktree/patch paths and applies there
-// instead of using worktreePath directly.
-func applyPatch(cfg *ReposConfig, repo *RepoConfig, ticket, worktreePath, patchFile string) error {
-	if repo.Runtime != "windows" {
-		return gitApplyPatch(worktreePath, patchFile)
-	}
-
-	_, winWorktreeWin, err := windowsWorktreePaths(cfg, repo, ticket)
-	if err != nil {
-		return err
-	}
-	winPatchFile, err := wslToWindowsPath(patchFile)
-	if err != nil {
-		return fmt.Errorf("resolving patch file %s: %w", patchFile, err)
-	}
-	return winGitApplyPatch(winWorktreeWin, winPatchFile)
-}
-
-// windowsWorktreePaths computes the WSL-visible and win32-form paths for a
-// runtime: windows repo's worktree, shared between setupWorktreeWindows and
-// applyPatch so the formula only exists once.
-func windowsWorktreePaths(cfg *ReposConfig, repo *RepoConfig, ticket string) (wslPath, winPath string, err error) {
-	wslPath = filepath.Join(expandHome(cfg.WindowsWorktreeRoot), ticket, repo.Name)
-	winPath, err = wslToWindowsPath(wslPath)
-	if err != nil {
-		return "", "", fmt.Errorf("resolving windows_worktree_root %s: %w", wslPath, err)
-	}
-	return wslPath, winPath, nil
-}
-
 // setupWorktree ensures the repo's base bare clone exists (cloning or
-// fetching as needed) and creates the worktree for ticket at worktreePath on
-// branch. For runtime: windows repos this delegates entirely to
-// setupWorktreeWindows, since the actual git checkout must live on an NTFS
-// volume, operated on by Windows-native git.exe.
-func setupWorktree(cfg *ReposConfig, repo *RepoConfig, ticket, branch, worktreePath string) error {
-	if repo.Runtime == "windows" {
-		return setupWorktreeWindows(cfg, repo, ticket, branch, worktreePath)
+// fetching as needed) and creates the worktree at worktreePath on branch.
+// Runtime differences (WSL git vs Windows-native git.exe plus a WSL-side
+// symlink) live behind runner; base is the bare clone's WSL-visible path.
+func setupWorktree(runner gitRunner, repo *RepoConfig, base, branch, worktreePath string) error {
+	if base == "" {
+		return fmt.Errorf("repo %s has no base (set `base` directly or via defaults.base_root)", repo.Name)
 	}
-
-	base := expandHome(repo.Base)
-
-	if _, err := os.Stat(base); os.IsNotExist(err) {
-		if isSSHURL(repo.Origin) {
-			checkSSHAgent()
-		}
-		if err := os.MkdirAll(filepath.Dir(base), 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", filepath.Dir(base), err)
-		}
-		if err := gitCloneBare(repo.Origin, base); err != nil {
-			return fmt.Errorf("clone %s: %w", repo.Origin, err)
-		}
-	} else {
-		if err := gitFetch(base); err != nil {
-			return fmt.Errorf("fetch %s: %w", base, err)
-		}
-	}
-
-	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(worktreePath), err)
-	}
-
-	if err := gitWorktreePrune(base); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: worktree prune for %s: %v\n", base, err)
-	}
-
-	if err := gitWorktreeAddNewBranch(base, worktreePath, branch, repo.DefaultBranch); err != nil {
-		// Branch may already exist from a prior `fleet-task new` run for
-		// this ticket; fall back to adding a worktree for the existing
-		// branch instead of treating this as fatal.
-		fmt.Fprintf(os.Stderr, "warning: worktree add -b failed (%v), retrying without -b (branch may already exist)\n", err)
-		if err2 := gitWorktreeAddExistingBranch(base, worktreePath, branch); err2 != nil {
-			return fmt.Errorf("worktree add (existing branch): %w", err2)
-		}
-	}
-
-	return nil
-}
-
-// setupWorktreeWindows is the runtime: windows counterpart of setupWorktree:
-// the bare clone and git worktree are created via Windows-native git.exe
-// under repo.WindowsBase / cfg.WindowsWorktreeRoot (win32 paths, though
-// configured in WSL-visible /mnt/... form), and worktreePath -- the normal
-// WSL-side <worktree_root>/<ticket>/<repo> location every other consumer
-// (fleet-run, hooks, fleet-cache) expects -- is left as a symlink into that
-// location instead of a real directory.
-func setupWorktreeWindows(cfg *ReposConfig, repo *RepoConfig, ticket, branch, worktreePath string) error {
-	if repo.WindowsBase == "" {
-		return fmt.Errorf("repo %s is runtime: windows but has no windows_base (set it directly or via defaults.windows_base_root)", repo.Name)
-	}
-	if cfg == nil || cfg.WindowsWorktreeRoot == "" {
-		return fmt.Errorf("repo %s is runtime: windows but repos.yaml has no top-level windows_worktree_root", repo.Name)
-	}
-
-	winBaseWSL := expandHome(repo.WindowsBase)
-	winBaseWin, err := wslToWindowsPath(winBaseWSL)
-	if err != nil {
-		return fmt.Errorf("resolving windows_base %s: %w", winBaseWSL, err)
-	}
-
-	winWorktreeWSL, winWorktreeWin, err := windowsWorktreePaths(cfg, repo, ticket)
-	if err != nil {
+	if err := runner.Preflight(base, worktreePath); err != nil {
 		return err
 	}
 
-	if err := checkSameDrive(map[string]string{
-		"windows_base":          winBaseWin,
-		"windows_worktree_root": winWorktreeWin,
-	}); err != nil {
-		return err
-	}
-
-	exists, err := windowsPathExists(winBaseWin)
+	exists, err := runner.BaseExists(base)
 	if err != nil {
-		return fmt.Errorf("checking windows base %s: %w", winBaseWin, err)
+		return fmt.Errorf("checking base %s: %w", base, err)
 	}
 	if !exists {
-		// Note: unlike the Linux path, we deliberately skip checkSSHAgent()
-		// here -- that checks WSL's own ssh-add, which has no bearing on
-		// Windows git.exe's own credential setup (Git for Windows / Windows
-		// OpenSSH manage that independently).
-		winParentDir, err := wslToWindowsPath(filepath.Dir(winBaseWSL))
-		if err != nil {
-			return fmt.Errorf("resolving parent of windows_base: %w", err)
-		}
-		if err := windowsMkdirAll(winParentDir); err != nil {
-			return fmt.Errorf("mkdir %s: %w", winParentDir, err)
-		}
-		if err := winGitCloneBare(repo.Origin, winParentDir, winBaseWin); err != nil {
+		if err := runner.CloneBare(repo.Origin, base); err != nil {
 			return fmt.Errorf("clone %s: %w", repo.Origin, err)
 		}
-	} else {
-		if err := winGitFetch(winBaseWin); err != nil {
-			return fmt.Errorf("fetch %s: %w", winBaseWin, err)
-		}
+	} else if err := runner.Fetch(base); err != nil {
+		return fmt.Errorf("fetch %s: %w", base, err)
 	}
 
-	winWorktreeParentWin, err := wslToWindowsPath(filepath.Dir(winWorktreeWSL))
-	if err != nil {
-		return fmt.Errorf("resolving worktree parent: %w", err)
-	}
-	if err := windowsMkdirAll(winWorktreeParentWin); err != nil {
-		return fmt.Errorf("mkdir %s: %w", winWorktreeParentWin, err)
+	if err := runner.Prune(base); err != nil {
+		warnf("worktree prune for %s: %v", base, err)
 	}
 
-	if err := winGitWorktreePrune(winBaseWin); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: worktree prune for %s: %v\n", winBaseWin, err)
+	// WorktreeAdd falls back from "create branch" to "attach existing
+	// branch" (a prior run for this ticket) and reports both errors if both
+	// fail.
+	if err := runner.WorktreeAdd(base, worktreePath, branch, repo.DefaultBranch); err != nil {
+		return err
 	}
-
-	if err := winGitWorktreeAddNewBranch(winBaseWin, winWorktreeWin, branch, repo.DefaultBranch); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: worktree add -b failed (%v), retrying without -b (branch may already exist)\n", err)
-		if err2 := winGitWorktreeAddExistingBranch(winBaseWin, winWorktreeWin, branch); err2 != nil {
-			return fmt.Errorf("worktree add (existing branch): %w", err2)
-		}
-	}
-
-	// Only now that the real Windows-native worktree exists, create the
-	// WSL-side symlink every other consumer (fleet-run, hooks, fleet-cache)
-	// expects at the normal worktreePath location.
-	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(worktreePath), err)
-	}
-	if err := os.RemoveAll(worktreePath); err != nil {
-		return fmt.Errorf("removing stale %s: %w", worktreePath, err)
-	}
-	if err := os.Symlink(winWorktreeWSL, worktreePath); err != nil {
-		return fmt.Errorf("symlink %s -> %s: %w", worktreePath, winWorktreeWSL, err)
-	}
-
 	return nil
 }

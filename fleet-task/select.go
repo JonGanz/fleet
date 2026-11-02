@@ -9,84 +9,43 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// selectMulti replaces the old fzf --multi picker with an in-process
-// bubbletea list: vim movement (j/k, gg/G), space to toggle a checkbox,
-// "/" to filter, enter to confirm. Pressing enter with nothing checked
-// confirms just the item under the cursor (mirrors fzf's behavior of a
-// bare enter selecting the highlighted line). Returns (nil, error) if the
-// user cancels (esc/ctrl-c), matching the old fzfSelectMulti contract.
-func selectMulti(items []string) ([]string, error) {
-	return selectMultiTitled("", items)
+// selectOpts configures runSelect, the single entry point for every
+// in-process picker (replacing the old family of selectMulti*/selectOne
+// wrappers). The picker has vim movement (j/k, gg/G), space to toggle a
+// checkbox (multi mode), "/" to filter and enter to confirm.
+type selectOpts struct {
+	// Title is an optional line rendered above the picker, for pickers where
+	// the item list alone doesn't say what's being chosen or why.
+	Title string
+	Items []string
+	// Multi shows checkboxes and allows several items to be confirmed;
+	// otherwise enter confirms the highlighted item.
+	Multi bool
+	// Preselected starts every item checked, so the user unchecks what they
+	// don't want rather than checking what they do (e.g. patch selection).
+	Preselected bool
+	// CursorFallback makes a bare enter with nothing checked confirm the row
+	// under the cursor (fzf's behavior). When false, it confirms an empty
+	// selection -- for pickers where "select nothing" is a valid, deliberate
+	// answer (e.g. `edit`'s add/remove repo pickers).
+	CursorFallback bool
 }
 
-// selectMultiTitled is selectMulti with a title line rendered above the
-// picker, for pickers where the item list alone doesn't say what's being
-// chosen or why.
-func selectMultiTitled(title string, items []string) ([]string, error) {
-	if len(items) == 0 {
+// runSelect runs the picker described by opts and returns the confirmed
+// items. It returns (nil, nil) without showing anything when there are no
+// items, and (nil, error) if the user cancels (esc/q/ctrl-c).
+func runSelect(opts selectOpts) ([]string, error) {
+	if len(opts.Items) == 0 {
 		return nil, nil
 	}
-	return runSelect(title, items, true, nil, true)
-}
-
-// selectMultiOptional is selectMulti but a bare enter with nothing checked
-// confirms an empty selection instead of falling back to whatever row the
-// cursor is on -- for pickers where "select nothing" is a common, valid
-// answer (e.g. `edit`'s separate add/remove repo pickers, where you might
-// only be here to remove one repo and add none).
-func selectMultiOptional(items []string) ([]string, error) {
-	return selectMultiOptionalTitled("", items)
-}
-
-// selectMultiOptionalTitled is selectMultiOptional with a title line
-// rendered above the picker.
-func selectMultiOptionalTitled(title string, items []string) ([]string, error) {
-	if len(items) == 0 {
-		return nil, nil
+	var preselected map[string]bool
+	if opts.Preselected {
+		preselected = make(map[string]bool, len(opts.Items))
+		for _, it := range opts.Items {
+			preselected[it] = true
+		}
 	}
-	return runSelect(title, items, true, nil, false)
-}
-
-// selectMultiPreselected is selectMulti but with every item checked by
-// default, so the user can uncheck the ones they don't want instead of
-// having to check everything they do. Unlike selectMulti, confirming
-// with nothing checked returns an empty (not cursor-fallback) selection:
-// once a picker starts preselected, an empty result is a deliberate
-// "none of these" rather than "I forgot to check anything."
-func selectMultiPreselected(items []string) ([]string, error) {
-	return selectMultiPreselectedTitled("", items)
-}
-
-// selectMultiPreselectedTitled is selectMultiPreselected with a title line
-// rendered above the picker, for pickers (like patch selection) where the
-// item list alone doesn't say what's being chosen or why.
-func selectMultiPreselectedTitled(title string, items []string) ([]string, error) {
-	if len(items) == 0 {
-		return nil, nil
-	}
-	checked := make(map[string]bool, len(items))
-	for _, it := range items {
-		checked[it] = true
-	}
-	return runSelect(title, items, true, checked, false)
-}
-
-// selectOne replaces the old fzf single-select picker with the same
-// vim-navigable, filterable list, but without checkboxes: enter
-// immediately confirms the highlighted item.
-func selectOne(items []string) (string, error) {
-	selected, err := runSelect("", items, false, nil, true)
-	if err != nil {
-		return "", err
-	}
-	if len(selected) == 0 {
-		return "", fmt.Errorf("no selection made")
-	}
-	return selected[0], nil
-}
-
-func runSelect(title string, items []string, multi bool, preselected map[string]bool, cursorFallback bool) ([]string, error) {
-	m := newSelectModel(title, items, multi, preselected, cursorFallback)
+	m := newSelectModel(opts.Title, opts.Items, opts.Multi, preselected, opts.CursorFallback)
 
 	// Render/read against the controlling terminal directly rather than
 	// os.Stdin/os.Stdout: callers like `jump` are meant to be run as
