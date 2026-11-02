@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // hardlinkTree walks the tree rooted at src and recreates it rooted at dst:
@@ -68,7 +70,7 @@ func hardlinkTree(src, dst string) error {
 				}
 			}
 			if err := os.Link(path, target); err != nil {
-				return fmt.Errorf("link %s -> %s: %w", path, target, err)
+				return linkError(path, target, err)
 			}
 		default:
 			// Skip other special file types (sockets, devices, etc.) — not
@@ -76,6 +78,16 @@ func hardlinkTree(src, dst string) error {
 		}
 		return nil
 	})
+}
+
+// linkError wraps an os.Link failure, spelling out the cross-device case
+// (EXDEV): the cache and the target live on different filesystems, which no
+// amount of retrying will fix.
+func linkError(src, dst string, err error) error {
+	if errors.Is(err, syscall.EXDEV) {
+		return fmt.Errorf("link %s -> %s: cache and target are on different filesystems, so hardlinking is impossible; point --cache-root (or $FLEET_CACHE_DIR) at the same filesystem as the worktree: %w", src, dst, err)
+	}
+	return fmt.Errorf("link %s -> %s: %w", src, dst, err)
 }
 
 // lockDownPermissions chmods every regular file under root read-only, while

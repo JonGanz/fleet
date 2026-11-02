@@ -19,24 +19,31 @@ if (-not (Test-Path -LiteralPath $Src -PathType Container)) {
     throw "source $Src is not a directory"
 }
 
-New-Item -ItemType Directory -Force -Path $Dst | Out-Null
+# Walks one directory level at a time instead of Get-ChildItem -Recurse:
+# under Windows PowerShell 5.1, -Recurse descends into directory symlinks and
+# junctions, which would link the *contents* of whatever they point at.
+# Reparse points are recreated as symlinks and never descended into.
+function Link-Tree {
+    param([string]$SrcDir, [string]$DstDir)
 
-Get-ChildItem -LiteralPath $Src -Recurse -Force | ForEach-Object {
-    $rel = $_.FullName.Substring($Src.Length).TrimStart('\')
-    $target = Join-Path $Dst $rel
+    New-Item -ItemType Directory -Force -Path $DstDir | Out-Null
 
-    $isReparsePoint = $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint
+    foreach ($item in Get-ChildItem -LiteralPath $SrcDir -Force) {
+        $target = Join-Path $DstDir $item.Name
+        $isReparsePoint = $item.Attributes -band [System.IO.FileAttributes]::ReparsePoint
 
-    if ($_.PSIsContainer -and -not $isReparsePoint) {
-        New-Item -ItemType Directory -Force -Path $target | Out-Null
-    } elseif ($isReparsePoint) {
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
-        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -Recurse }
-        $linkTarget = (Get-Item -LiteralPath $_.FullName).Target
-        New-Item -ItemType SymbolicLink -Path $target -Target $linkTarget | Out-Null
-    } else {
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
-        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force }
-        New-Item -ItemType HardLink -Path $target -Value $_.FullName | Out-Null
+        if ($isReparsePoint) {
+            if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -Recurse }
+            $linkTarget = $item.Target
+            if ($linkTarget -is [array]) { $linkTarget = $linkTarget[0] }
+            New-Item -ItemType SymbolicLink -Path $target -Target $linkTarget | Out-Null
+        } elseif ($item.PSIsContainer) {
+            Link-Tree -SrcDir $item.FullName -DstDir $target
+        } else {
+            if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force }
+            New-Item -ItemType HardLink -Path $target -Value $item.FullName | Out-Null
+        }
     }
 }
+
+Link-Tree -SrcDir $Src -DstDir $Dst

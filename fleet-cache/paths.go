@@ -7,8 +7,12 @@ import (
 
 // cacheRoot returns the fleet cache root directory per the shared contract:
 //
-//	$FLEET_CACHE_DIR if set, else $XDG_CACHE_HOME/fleet if set, else ~/.cache/fleet
-func cacheRoot() (string, error) {
+//	--cache-root if given, else $FLEET_CACHE_DIR, else $XDG_CACHE_HOME/fleet,
+//	else ~/.cache/fleet
+func cacheRoot(flagVal string) (string, error) {
+	if flagVal != "" {
+		return flagVal, nil
+	}
 	if v := os.Getenv("FLEET_CACHE_DIR"); v != "" {
 		return v, nil
 	}
@@ -23,19 +27,6 @@ func cacheRoot() (string, error) {
 }
 
 // nodeCacheDir returns <cache root>/node-cache.
-func nodeCacheDir() (string, error) {
-	root, err := cacheRoot()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(root, "node-cache"), nil
-}
-
-// entryDir returns the cache entry directory for a given package-lock.json hash.
-func entryDir(hash string) (string, error) {
-	nc, err := nodeCacheDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(nc, hash), nil
+func nodeCacheDir(root string) string {
+	return filepath.Join(root, "node-cache")
 }

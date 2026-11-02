@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -151,5 +154,25 @@ func TestLockDownPermissions(t *testing.T) {
 	// directory-entry replacement working despite the lockdown.
 	if err := os.Remove(filepath.Join(root, "pkg", "index.js")); err != nil {
 		t.Errorf("removing read-only file should succeed (dir stays writable): %v", err)
+	}
+}
+
+func TestLinkErrorEXDEV(t *testing.T) {
+	err := linkError("a", "b", &os.LinkError{Op: "link", Old: "a", New: "b", Err: syscall.EXDEV})
+	if !errors.Is(err, syscall.EXDEV) || !strings.Contains(err.Error(), "different filesystems") {
+		t.Errorf("err = %v", err)
+	}
+	if err := linkError("a", "b", os.ErrPermission); strings.Contains(err.Error(), "different filesystems") {
+		t.Errorf("non-EXDEV error got EXDEV message: %v", err)
+	}
+}
+
+func TestSameDevice(t *testing.T) {
+	same, err := sameDevice(t.TempDir(), t.TempDir())
+	if err != nil || !same {
+		t.Errorf("two temp dirs: same=%v err=%v", same, err)
+	}
+	if got := nearestExisting(filepath.Join(t.TempDir(), "a", "b")); got == "" {
+		t.Error("nearestExisting returned empty")
 	}
 }

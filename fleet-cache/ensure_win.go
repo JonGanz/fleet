@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
 	"fmt"
 	"os"
@@ -12,22 +13,27 @@ import (
 var hardlinkWindowsScript []byte
 
 // runEnsureWindows implements `fleet-cache ensure-windows <wsl-worktree-dir>
-// [--cache-root <wsl-cache-root>]`, the runtime: windows counterpart of
-// runEnsure. The cache entry (npm ci) and the target node_modules tree are
-// populated entirely via native Windows processes (PowerShell/npm), since
-// hardlinks can't cross the WSL9P boundary and bulk file operations across
-// it are slow; only single-file operations here (hashing, copying
-// package.json/package-lock.json in) stay as plain Go os.* calls, per the
-// project's pragmatic scope decision.
-func runEnsureWindows(wslWorktreeDir, cacheRootFlag string) error {
-	lockPath := filepath.Join(wslWorktreeDir, "package-lock.json")
-	if _, err := os.Stat(lockPath); err != nil {
-		return fmt.Errorf("no package-lock.json in %s: %w", wslWorktreeDir, err)
+// [--force] [--cache-root <wsl-cache-root>]`, the runtime: windows
+// counterpart of runEnsure. The cache entry (npm ci) and the target
+// node_modules tree are populated entirely via native Windows processes
+// (PowerShell/npm), since hardlinks can't cross the WSL9P boundary and bulk
+// file operations across it are slow; only single-file operations here
+// (hashing, copying package.json/package-lock.json in, the skip marker)
+// stay as plain Go os.* calls, per the project's pragmatic scope decision.
+//
+// Like ensure, it skips (leaving node_modules -- and any `npm link`s --
+// untouched) when the target's .fleet-cache-hash marker already matches
+// the lockfile hash, unless force is set.
+func runEnsureWindows(wslWorktreeDir string, force bool, cacheRootFlag string) error {
+	lockPath, hash, err := lockfileHash(wslWorktreeDir)
+	if err != nil {
+		return err
 	}
 
-	hash, err := hashFile(lockPath)
-	if err != nil {
-		return fmt.Errorf("hashing %s: %w", lockPath, err)
+	targetNodeModulesWSL := filepath.Join(wslWorktreeDir, "node_modules")
+	if !force && alreadyLinked(targetNodeModulesWSL, hash) {
+		logf("node_modules already linked to windows cache %s, nothing to do", shortHash(hash))
+		return nil
 	}
 
 	cacheRootWSL, err := resolveWindowsCacheRoot(cacheRootFlag)
@@ -39,7 +45,7 @@ func runEnsureWindows(wslWorktreeDir, cacheRootFlag string) error {
 	if err != nil {
 		return fmt.Errorf("resolving worktree path: %w", err)
 	}
-	entryWSL := filepath.Join(cacheRootWSL, "node-cache", hash)
+	entryWSL := filepath.Join(nodeCacheDir(cacheRootWSL), hash)
 	entryWin, err := wslToWindowsPath(entryWSL)
 	if err != nil {
 		return fmt.Errorf("resolving cache entry dir: %w", err)
@@ -52,13 +58,28 @@ func runEnsureWindows(wslWorktreeDir, cacheRootFlag string) error {
 		return err
 	}
 
-	entryNodeModulesWSL := filepath.Join(entryWSL, "node_modules")
-	if _, err := os.Stat(entryNodeModulesWSL); os.IsNotExist(err) {
-		if err := populateCacheEntryWindows(entryWSL, entryWin, lockPath); err != nil {
+	removeWin := func(wslPath string) error {
+		winPath, err := wslToWindowsPath(wslPath)
+		if err != nil {
 			return err
 		}
-	} else if err != nil {
-		return fmt.Errorf("checking cache entry %s: %w", entryWSL, err)
+		return runWindowsRemoveAll(winPath)
+	}
+	err = ensureCacheEntry(entryWSL, hash, lockPath, entryOps{
+		install: func(staging string) error {
+			stagingWin, err := wslToWindowsPath(staging)
+			if err != nil {
+				return err
+			}
+			if err := runWindowsCommand(stagingWin, "npm", "ci"); err != nil {
+				return fmt.Errorf("npm ci failed in %s: %w", stagingWin, err)
+			}
+			return nil
+		},
+		remove: removeWin,
+	})
+	if err != nil {
+		return err
 	}
 
 	targetNodeModulesWin := winJoin(targetWin, "node_modules")
@@ -79,58 +100,24 @@ func runEnsureWindows(wslWorktreeDir, cacheRootFlag string) error {
 		"-Dst", targetNodeModulesWin,
 	}
 	cmd := exec.Command("powershell.exe", psArgs...)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("hardlinking node_modules into %s: %w", targetWin, err)
 	}
 
-	shortHash := hash
-	if len(shortHash) > 8 {
-		shortHash = shortHash[:8]
-	}
-	fmt.Printf("linked node_modules from windows cache %s\n", shortHash)
-	return nil
-}
-
-// populateCacheEntryWindows creates the cache entry dir, copies
-// package-lock.json/package.json in (single-file Go ops, pragmatic), and
-// runs `npm ci` as a native Windows process so node_modules gets populated
-// under the Windows-native cache entry.
-func populateCacheEntryWindows(entryWSL, entryWin, lockPath string) error {
-	if err := os.MkdirAll(entryWSL, 0o755); err != nil {
-		return fmt.Errorf("creating cache entry dir %s: %w", entryWSL, err)
+	if err := writeMarker(targetNodeModulesWSL, hash); err != nil {
+		logf("warning: writing cache marker: %v", err)
 	}
 
-	if err := copyFile(lockPath, filepath.Join(entryWSL, "package-lock.json")); err != nil {
-		return fmt.Errorf("copying package-lock.json into cache: %w", err)
-	}
-	pkgPath := filepath.Join(filepath.Dir(lockPath), "package.json")
-	if err := copyFile(pkgPath, filepath.Join(entryWSL, "package.json")); err != nil {
-		return fmt.Errorf("copying package.json into cache: %w", err)
-	}
-
-	if err := runWindowsCommand(entryWin, "npm", "ci"); err != nil {
-		// Best-effort cleanup so a failed install doesn't leave a bad cache
-		// entry that future ensure-windows calls treat as complete. npm ci
-		// can leave many thousands of partial files, so this cleanup itself
-		// runs as a native Windows bulk delete, not os.RemoveAll.
-		_ = runWindowsRemoveAll(entryWin)
-		return fmt.Errorf("npm ci failed in %s: %w", entryWin, err)
-	}
-
-	if _, err := os.Stat(filepath.Join(entryWSL, "node_modules")); err != nil {
-		_ = runWindowsRemoveAll(entryWin)
-		return fmt.Errorf("npm ci completed but node_modules missing in %s: %w", entryWin, err)
-	}
-
+	logf("linked node_modules from windows cache %s", shortHash(hash))
 	return nil
 }
 
 // resolveWindowsCacheRoot returns the Windows-native cache root in WSL-
 // visible form: cacheRootFlag if set (already expanded/WSL-form, as passed
 // through from repos.yaml's windows_cache_root by fleet-task), else
-// %LOCALAPPDATA%\fleet auto-detected via cmd.exe, mirroring the Linux
+// %LOCALAPPDATA%\fleet auto-detected via PowerShell, mirroring the Linux
 // cacheRoot() default of ~/.cache/fleet.
 func resolveWindowsCacheRoot(cacheRootFlag string) (string, error) {
 	if cacheRootFlag != "" {
@@ -146,15 +133,23 @@ func resolveWindowsCacheRoot(cacheRootFlag string) (string, error) {
 
 // writeHardlinkScript writes the embedded hardlink_windows.ps1 content to
 // <cacheRootWSL>/hardlink.ps1 (a single small file write, pragmatic) and
-// returns its win32-form path. Overwritten on every call since it's tiny and
-// static -- no versioning/staleness concern.
+// returns its win32-form path. The file is only rewritten when its content
+// differs, and replaced atomically (temp file + rename) so a concurrent
+// ensure-windows never runs a half-written script.
 func writeHardlinkScript(cacheRootWSL string) (string, error) {
 	if err := os.MkdirAll(cacheRootWSL, 0o755); err != nil {
 		return "", fmt.Errorf("creating cache root %s: %w", cacheRootWSL, err)
 	}
 	scriptWSL := filepath.Join(cacheRootWSL, "hardlink.ps1")
-	if err := os.WriteFile(scriptWSL, hardlinkWindowsScript, 0o644); err != nil {
-		return "", fmt.Errorf("writing hardlink script %s: %w", scriptWSL, err)
+	if existing, err := os.ReadFile(scriptWSL); err != nil || !bytes.Equal(existing, hardlinkWindowsScript) {
+		tmp := fmt.Sprintf("%s.tmp-%d", scriptWSL, os.Getpid())
+		if err := os.WriteFile(tmp, hardlinkWindowsScript, 0o644); err != nil {
+			return "", fmt.Errorf("writing hardlink script %s: %w", scriptWSL, err)
+		}
+		if err := os.Rename(tmp, scriptWSL); err != nil {
+			_ = os.Remove(tmp)
+			return "", fmt.Errorf("writing hardlink script %s: %w", scriptWSL, err)
+		}
 	}
 	return wslToWindowsPath(scriptWSL)
 }
