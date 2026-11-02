@@ -47,3 +47,23 @@ func TestNamesToWindowNames(t *testing.T) {
 		t.Error("expected error for malformed name")
 	}
 }
+
+func TestPickerLabelRoundTrip(t *testing.T) {
+	cfg, err := parseReposConfig([]byte(reposYAMLFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := windowLabels(cfg)
+	windows := []string{"backend-api", "admin-ui-dev", "orphan-thing"}
+	items := pickerItems(windows, labels)
+	want := []string{"backend:api", "admin-ui:dev", "orphan-thing"}
+	for i := range want {
+		if items[i] != want[i] {
+			t.Errorf("items[%d] = %q, want %q", i, items[i], want[i])
+		}
+	}
+	back := pickerSelectionToWindows([]string{"admin-ui:dev", "orphan-thing"}, windows, labels)
+	if len(back) != 2 || back[0] != "admin-ui-dev" || back[1] != "orphan-thing" {
+		t.Errorf("back = %v", back)
+	}
+}

@@ -62,3 +62,20 @@ func TestWindowsWorktreeWinPathNonSymlink(t *testing.T) {
 		t.Errorf("windowsWorktreeWinPath(plain dir) = %q, want %q", got, want)
 	}
 }
+
+func TestCheckWorktreeDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := checkWorktreeDir(dir); err != nil {
+		t.Errorf("existing dir: %v", err)
+	}
+	if err := checkWorktreeDir(dir + "/missing"); err == nil {
+		t.Error("expected error for missing dir")
+	}
+	f := dir + "/file"
+	if err := os.WriteFile(f, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkWorktreeDir(f); err == nil {
+		t.Error("expected error for non-directory")
+	}
+}

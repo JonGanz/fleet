@@ -1,5 +1,9 @@
 package main
 
+// NOTE: this file is a deliberate copy of fleet-task/select.go (the modules
+// share no Go code by design). Keep the two in sync by hand when either
+// changes.
+
 import (
 	"fmt"
 	"os"
@@ -20,23 +24,6 @@ func selectMulti(items []string) ([]string, error) {
 		return nil, nil
 	}
 	return runSelect(items, true, nil)
-}
-
-// selectMultiPreselected is selectMulti but with every item checked by
-// default, so the user can uncheck the ones they don't want instead of
-// having to check everything they do. Unlike selectMulti, confirming
-// with nothing checked returns an empty (not cursor-fallback) selection:
-// once a picker starts preselected, an empty result is a deliberate
-// "none of these" rather than "I forgot to check anything."
-func selectMultiPreselected(items []string) ([]string, error) {
-	if len(items) == 0 {
-		return nil, nil
-	}
-	checked := make(map[string]bool, len(items))
-	for _, it := range items {
-		checked[it] = true
-	}
-	return runSelect(items, true, checked)
 }
 
 // selectOne replaces the old fzf single-select picker with the same

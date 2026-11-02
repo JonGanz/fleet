@@ -31,8 +31,15 @@ func setActiveTicket(ts *TaskState) error {
 }
 
 // clearActiveTicket removes the active-ticket record, for when every window
-// in the session has been stopped and nothing is running anymore.
+// in the session has been stopped and nothing is running anymore. The
+// options are global (-g) and live only as long as the tmux server; if
+// killing the last window took the server down with it there's nothing to
+// clear (and `set-option` would fail with "no server running"), so that case
+// is a no-op.
 func clearActiveTicket() error {
+	if !serverRunning() {
+		return nil
+	}
 	if err := unsetSessionOption(activeTicketOption); err != nil {
 		return err
 	}

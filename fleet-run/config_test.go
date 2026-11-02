@@ -165,3 +165,31 @@ func TestParseReposConfigAppliesDefaults(t *testing.T) {
 		t.Errorf("roomLauncher.Base = %q, want empty (windows-runtime repos don't use base_root)", roomLauncher.Base)
 	}
 }
+
+func TestParseReposConfigRejectsColon(t *testing.T) {
+	for name, y := range map[string]string{
+		"repo": "repos:\n  - name: \"a:b\"\n    run:\n      - {name: x, cmd: y}\n",
+		"run":  "repos:\n  - name: a\n    run:\n      - {name: \"x:z\", cmd: y}\n",
+	} {
+		if _, err := parseReposConfig([]byte(y)); err == nil {
+			t.Errorf("%s with ':' in name: expected error", name)
+		}
+	}
+}
+
+func TestParseReposConfigRejectsWindowNameCollision(t *testing.T) {
+	cases := map[string]string{
+		"cross-repo": "repos:\n  - name: admin\n    run:\n      - {name: ui-dev, cmd: x}\n  - name: admin-ui\n    run:\n      - {name: dev, cmd: y}\n",
+		"duplicate":  "repos:\n  - name: a\n    run:\n      - {name: x, cmd: x}\n      - {name: x, cmd: y}\n",
+	}
+	for name, y := range cases {
+		_, err := parseReposConfig([]byte(y))
+		if err == nil {
+			t.Errorf("%s: expected collision error", name)
+		}
+	}
+	// Distinct names must still parse.
+	if _, err := parseReposConfig([]byte(reposYAMLFixture)); err != nil {
+		t.Errorf("fixture should be valid: %v", err)
+	}
+}

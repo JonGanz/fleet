@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -128,11 +129,28 @@ func windowsWorktreeWinPath(dir string) (string, error) {
 	return wslToWindowsPath(dir)
 }
 
-// newWindow creates a tmux window for the given pair under the given
-// ticket's window name. For linux-runtime repos it runs the command
-// directly in the worktree dir; for windows-runtime repos it translates the
-// worktree dir to a win32 path and wraps the command in a powershell.exe
-// invocation.
+// checkWorktreeDir verifies the worktree directory exists (following
+// symlinks, so a dangling windows-runtime worktree symlink is caught too).
+// Without this tmux silently falls back to $HOME when -c points at a missing
+// dir, and the app would run in the wrong place while reporting success.
+// For windows-runtime repos this checks the WSL-side path, before any
+// wslpath translation.
+func checkWorktreeDir(dir string) error {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("worktree dir %s is not accessible (stale task state? try fleet-task rm): %w", dir, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("worktree path %s is not a directory", dir)
+	}
+	return nil
+}
+
+// newWindow creates a tmux window for the given pair. For linux-runtime
+// repos it runs the command directly in the worktree dir; for
+// windows-runtime repos it translates the worktree dir to a win32 path and
+// wraps the command in a powershell.exe invocation. It fails (creating
+// nothing) if the worktree dir doesn't exist.
 //
 // If the session doesn't exist yet, this creates it together with this
 // window in one atomic tmux call (rather than a content-less `new-session`
@@ -142,15 +160,23 @@ func windowsWorktreeWinPath(dir string) (string, error) {
 // `fleet-run stop`'s picker and its "nothing left running" detection work
 // correctly.
 func newWindow(session, configFile, name string, p RunPair) error {
+	if err := checkWorktreeDir(p.WorktreeDir); err != nil {
+		return err
+	}
+	isWindows := p.Runtime == "windows"
+	var winDir string
+	if isWindows {
+		var err error
+		if winDir, err = windowsWorktreeWinPath(p.WorktreeDir); err != nil {
+			return err
+		}
+	}
+
 	if !sessionExists(session) {
 		if configFile != "" {
 			configFile = expandHome(configFile)
 		}
-		if p.Runtime == "windows" {
-			winDir, err := windowsWorktreeWinPath(p.WorktreeDir)
-			if err != nil {
-				return err
-			}
+		if isWindows {
 			return runTmux(newSessionWithWindowArgsWindows(session, configFile, name, winDir, p.Cmd)...)
 		}
 		return runTmux(newSessionWithWindowArgsLinux(session, configFile, name, p.WorktreeDir, p.Cmd)...)
@@ -160,11 +186,7 @@ func newWindow(session, configFile, name string, p RunPair) error {
 	if err != nil {
 		return err
 	}
-	if p.Runtime == "windows" {
-		winDir, err := windowsWorktreeWinPath(p.WorktreeDir)
-		if err != nil {
-			return err
-		}
+	if isWindows {
 		return runTmux(newWindowArgsWindows(session, name, winDir, p.Cmd, index)...)
 	}
 	return runTmux(newWindowArgsLinux(session, name, p.WorktreeDir, p.Cmd, index)...)
@@ -188,16 +210,26 @@ func unsetSessionOption(name string) error {
 }
 
 // getSessionOption reads a tmux user option's value. found is false if the
-// option isn't set (tmux prints nothing for an unset user option) or no
-// tmux server is currently running at all.
+// option isn't set or no tmux server is running (tmux exits non-zero in
+// both cases). A real exec failure -- e.g. the tmux binary isn't installed
+// -- is returned as an error instead of being mistaken for "nothing active".
 func getSessionOption(name string) (value string, found bool, err error) {
 	out, err := tmuxOutputQuiet(showSessionOptionArgs(name)...)
 	if err != nil {
-		return "", false, nil
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("run tmux: %w", err)
 	}
 	out = strings.TrimSpace(out)
 	if out == "" {
 		return "", false, nil
 	}
 	return out, true, nil
+}
+
+// serverRunning reports whether a tmux server is currently running.
+func serverRunning() bool {
+	return exec.Command("tmux", "list-sessions").Run() == nil
 }

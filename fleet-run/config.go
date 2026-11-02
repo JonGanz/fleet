@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -101,7 +102,37 @@ func parseReposConfig(data []byte) (*ReposConfig, error) {
 		return nil, err
 	}
 	cfg.applyDefaults()
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validate checks the invariants fleet-run relies on when turning
+// repo/run-name pairs into picker labels ("repo:run") and tmux window names
+// ("repo-run"): neither name may contain ":" (it would break "repo:run"
+// parsing), and the derived window names must be unique across the whole
+// config (e.g. repo "admin" + run "ui-dev" collides with repo "admin-ui" +
+// run "dev", and duplicate run names within a repo collide with themselves).
+func (c *ReposConfig) validate() error {
+	seen := make(map[string]string) // window name -> "repo:run" that claimed it
+	for _, r := range c.Repos {
+		if strings.Contains(r.Name, ":") {
+			return fmt.Errorf("repo name %q must not contain ':'", r.Name)
+		}
+		for _, run := range r.Run {
+			if strings.Contains(run.Name, ":") {
+				return fmt.Errorf("run name %q (repo %q) must not contain ':'", run.Name, r.Name)
+			}
+			wn := windowName(r.Name, run.Name)
+			label := r.Name + ":" + run.Name
+			if prev, dup := seen[wn]; dup {
+				return fmt.Errorf("repos %q and %q both produce the tmux window name %q; rename a repo or run so every <repo>-<run-name> is unique", prev, label, wn)
+			}
+			seen[wn] = label
+		}
+	}
+	return nil
 }
 
 // findRepo returns the RepoConfig with the given name, or nil if not found.

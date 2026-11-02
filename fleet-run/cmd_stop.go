@@ -15,9 +15,9 @@ func runStop(ticket string, all bool, names []string) error {
 	if err != nil {
 		return err
 	}
-	session := cfg.Tmux.SessionName
-	if session == "" {
-		return fmt.Errorf("repos.yaml tmux.session_name is required")
+	session, err := requireSession(cfg)
+	if err != nil {
+		return err
 	}
 
 	if ticket != "" {
@@ -52,11 +52,14 @@ func runStop(ticket string, all bool, names []string) error {
 		}
 
 	default:
-		selected, err := selectMulti(windows)
+		// Show the same "repo:run" form the positional args take; window
+		// names themselves stay "repo-run".
+		labels := windowLabels(cfg)
+		selected, err := selectMulti(pickerItems(windows, labels))
 		if err != nil {
 			return err
 		}
-		toKill = selected
+		toKill = pickerSelectionToWindows(selected, windows, labels)
 	}
 
 	if len(toKill) == 0 {
@@ -68,46 +71,58 @@ func runStop(ticket string, all bool, names []string) error {
 	for _, w := range windows {
 		runningSet[w] = true
 	}
-
+	var running []string
 	for _, wname := range toKill {
 		if !runningSet[wname] {
 			fmt.Fprintf(os.Stderr, "warning: window %q is not running, skipping\n", wname)
 			continue
 		}
-		if err := killWindow(session, wname); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to kill window %q: %v\n", wname, err)
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "stopped %s\n", wname)
+		running = append(running, wname)
 	}
+	failed := killWindows(session, running)
 
 	remaining, err := listWindows(session)
 	if err != nil {
 		return err
 	}
-	if len(remaining) == 0 {
+	if shouldClearActive(remaining) {
 		if err := clearActiveTicket(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: clearing active ticket record: %v\n", err)
 		}
 	}
+	if failed > 0 {
+		return fmt.Errorf("%d window(s) failed to stop", failed)
+	}
 	return nil
+}
+
+// killWindows kills each named window, reporting progress on stderr, and
+// returns how many kills failed. Shared by `stop` and the switch path in
+// `start`.
+func killWindows(session string, names []string) (failed int) {
+	for _, wname := range names {
+		if err := killWindow(session, wname); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to kill window %q: %v\n", wname, err)
+			failed++
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "stopped %s\n", wname)
+	}
+	return failed
 }
 
 // killAllWindowsInSession kills every window currently in the session,
 // unconditionally. Used internally by `start` when switching to a
 // different ticket than whatever's currently active (only one ticket's app
-// set is meant to be live at a time).
+// set is meant to be live at a time). Errors if any window couldn't be
+// killed, so a switch never proceeds on top of the old ticket's windows.
 func killAllWindowsInSession(session string) error {
 	windows, err := listWindows(session)
 	if err != nil {
 		return err
 	}
-	for _, wname := range windows {
-		if err := killWindow(session, wname); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to kill window %q: %v\n", wname, err)
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "stopped %s\n", wname)
+	if failed := killWindows(session, windows); failed > 0 {
+		return fmt.Errorf("%d window(s) failed to stop while switching tickets", failed)
 	}
 	return nil
 }

@@ -90,3 +90,24 @@ func TestResolveTicketStateMultipleErrors(t *testing.T) {
 		t.Error("expected error when multiple tasks exist and no --ticket given, got nil")
 	}
 }
+
+func TestTicketsFromFiles(t *testing.T) {
+	got := ticketsFromFiles([]string{"/x/tasks/A-1.json", "/x/tasks/B-2.json"})
+	if len(got) != 2 || got[0] != "A-1" || got[1] != "B-2" {
+		t.Errorf("ticketsFromFiles = %v", got)
+	}
+}
+
+func TestParseTaskStateCreatedAt(t *testing.T) {
+	ts, err := parseTaskState([]byte(taskStateFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ts.CreatedAt.Year() != 2026 || ts.CreatedAt.Minute() != 58 {
+		t.Errorf("CreatedAt = %v", ts.CreatedAt)
+	}
+	// fleet-task writes time.Time with fractional seconds / offsets.
+	if _, err := parseTaskState([]byte(`{"ticket":"A","created_at":"2026-08-02T15:58:00.123456789-07:00","repos":[]}`)); err != nil {
+		t.Errorf("RFC3339Nano with offset: %v", err)
+	}
+}

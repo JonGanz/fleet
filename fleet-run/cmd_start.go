@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 )
 
 // runStart implements `fleet-run start [--ticket <id>]`. Only one ticket's
@@ -22,6 +20,15 @@ func runStart(ticket string) error {
 	return startFlow(cfg, ts)
 }
 
+// requireSession returns the configured tmux session name, erroring if it's
+// missing. Called before any picker so misconfiguration fails fast.
+func requireSession(cfg *ReposConfig) (string, error) {
+	if cfg.Tmux.SessionName == "" {
+		return "", fmt.Errorf("repos.yaml tmux.session_name is required")
+	}
+	return cfg.Tmux.SessionName, nil
+}
+
 // loadStartContext loads repos.yaml and resolves the task state to operate
 // on.
 func loadStartContext(ticket string) (*ReposConfig, *TaskState, error) {
@@ -31,6 +38,10 @@ func loadStartContext(ticket string) (*ReposConfig, *TaskState, error) {
 	}
 	cfg, err := loadReposConfig(rf)
 	if err != nil {
+		return nil, nil, err
+	}
+
+	if _, err := requireSession(cfg); err != nil {
 		return nil, nil, err
 	}
 
@@ -66,11 +77,7 @@ func pickTicketIfAmbiguous(tasksDirPath string) (string, error) {
 		return "", nil
 	}
 
-	tickets := make([]string, 0, len(files))
-	for _, f := range files {
-		tickets = append(tickets, strings.TrimSuffix(filepath.Base(f), ".json"))
-	}
-	chosen, err := selectOne(tickets)
+	chosen, err := selectOne(ticketsFromFiles(files))
 	if err != nil {
 		return "", fmt.Errorf("select ticket: %w", err)
 	}
@@ -78,8 +85,14 @@ func pickTicketIfAmbiguous(tasksDirPath string) (string, error) {
 }
 
 // startFlow runs the interactive multiselect + tmux window creation flow
-// for the given already-resolved config/task.
+// for the given already-resolved config/task. It attempts every selected
+// pair, then returns an error if any of them failed to start (so the exit
+// code is non-zero on partial failure).
 func startFlow(cfg *ReposConfig, ts *TaskState) error {
+	session, err := requireSession(cfg)
+	if err != nil {
+		return err
+	}
 	pairs := availablePairs(cfg, ts)
 	if len(pairs) == 0 {
 		return fmt.Errorf("no repo:run-name targets available for ticket %s (check repos.yaml `run` entries against the task's worktrees)", ts.Ticket)
@@ -101,26 +114,23 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 		return nil
 	}
 
-	session := cfg.Tmux.SessionName
-	if session == "" {
-		return fmt.Errorf("repos.yaml tmux.session_name is required")
-	}
 	active, hasActive, err := activeTicket()
 	if err != nil {
 		return err
 	}
-	if hasActive && active != ts.Ticket {
+	if needsSwitch(active, hasActive, ts.Ticket) {
 		fmt.Fprintf(os.Stderr, "switching from %s to %s: stopping all currently running windows\n", active, ts.Ticket)
 		if err := killAllWindowsInSession(session); err != nil {
 			return err
 		}
 		// Killing every window -- including the last one -- makes tmux
-		// destroy the session itself as a side effect. That's fine: the
-		// newWindow call below recreates it together with whichever window
-		// gets created first, the same way a session-less `start` would.
-	}
-	if err := setActiveTicket(ts); err != nil {
-		return fmt.Errorf("recording active ticket: %w", err)
+		// destroy the session itself (and the server too, if it was the only
+		// session); the newWindow call below recreates it together with
+		// whichever window gets created first. If the server survived, the
+		// old ticket's record is stale now, so drop it.
+		if err := clearActiveTicket(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: clearing stale active ticket record: %v\n", err)
+		}
 	}
 
 	existing, err := listWindows(session)
@@ -132,10 +142,33 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 		existingSet[w] = true
 	}
 
+	// The active-ticket options are tmux server options, and `tmux
+	// set-option` does not start a server, so they can only be set once a
+	// window (hence a server) exists: right after the first successful
+	// creation, or immediately if the session already has windows.
+	recorded := false
+	record := func() error {
+		if recorded {
+			return nil
+		}
+		recorded = true
+		if err := setActiveTicket(ts); err != nil {
+			return fmt.Errorf("recording active ticket: %w", err)
+		}
+		return nil
+	}
+	if len(existingSet) > 0 {
+		if err := record(); err != nil {
+			return err
+		}
+	}
+
+	failed := 0
 	for _, label := range selected {
 		pair, ok := findPairByLabel(pairs, label)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "warning: unrecognized selection %q, skipping\n", label)
+			failed++
 			continue
 		}
 		wname := pair.WindowName()
@@ -145,10 +178,18 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 		}
 		if err := newWindow(session, cfg.Tmux.ConfigFile, wname, pair); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to start window %q: %v\n", wname, err)
+			failed++
 			continue
 		}
 		existingSet[wname] = true
 		fmt.Fprintf(os.Stderr, "started %s\n", wname)
+		if err := record(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+			failed++
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d selected targets failed to start", failed, len(selected))
 	}
 	return nil
 }

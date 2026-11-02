@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // TaskRepo is one repo's worktree entry inside a task state file.
@@ -20,7 +21,7 @@ type TaskRepo struct {
 type TaskState struct {
 	Ticket      string     `json:"ticket"`
 	Description string     `json:"description"`
-	CreatedAt   string     `json:"created_at"`
+	CreatedAt   time.Time  `json:"created_at"`
 	Repos       []TaskRepo `json:"repos"`
 }
 
@@ -86,10 +87,16 @@ func resolveTicketState(tasksDirPath, ticket string) (*TaskState, error) {
 	case 1:
 		return loadTaskState(files[0])
 	default:
-		tickets := make([]string, 0, len(files))
-		for _, f := range files {
-			tickets = append(tickets, strings.TrimSuffix(filepath.Base(f), ".json"))
-		}
-		return nil, fmt.Errorf("multiple tasks exist (%s); pass --ticket to pick one", strings.Join(tickets, ", "))
+		return nil, fmt.Errorf("multiple tasks exist (%s); pass --ticket to pick one", strings.Join(ticketsFromFiles(files), ", "))
 	}
+}
+
+// ticketsFromFiles derives ticket ids from task file paths
+// (<tasks dir>/<ticket>.json).
+func ticketsFromFiles(files []string) []string {
+	tickets := make([]string, 0, len(files))
+	for _, f := range files {
+		tickets = append(tickets, strings.TrimSuffix(filepath.Base(f), ".json"))
+	}
+	return tickets
 }
