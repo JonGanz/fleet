@@ -79,8 +79,8 @@ Field notes:
   one. Because `applyDefaults()` runs at parse time, everything downstream (`cmd_new.go`,
   `cmd_rm.go`, etc.) keeps reading `repo.Base`/`repo.DefaultBranch`/`repo.BranchTemplate`/
   `repo.WindowsBase` as plain, already-resolved fields — no caller needs to know defaults exist.
-  (`fleet-run` parses and preserves `branch_template` structurally but never reads it — branch
-  naming is entirely a `fleet-task new`-time concern.)
+  (`fleet-run` has no `branch_template` field at all and ignores it — branch naming is entirely a
+  `fleet-task new`-time concern.)
 - `branch_template`: the git branch name `fleet-task new` creates is computed by `branchName()`
   (`fleet-task/branch.go`) from this template, substituting `{ticket}` (verbatim) and
   `{description}` (lowercased, non-alphanumeric runs collapsed to `-`, capped at 40 chars). An
@@ -89,17 +89,19 @@ Field notes:
   given a different description, the computed branch name changes too, so the "reattach to the
   existing branch on rerun" fallback (below) won't find a match and a new branch gets created
   instead — a known, accepted tradeoff of allowing description-based names.
-- `origin` + `base`: on first use `fleet-task` runs `git clone --bare <origin> <base>`. On every
-  subsequent `fleet-task new` it runs `git -C <base> fetch origin`, then
+- `origin` + `base`: on first use `fleet-task` runs `git clone --bare <origin> <base>` (a *bare*
+  clone has a git history but no checked-out files, and is shared by every ticket's worktrees). On
+  every subsequent `fleet-task new` it runs `git -C <base> fetch origin`, then
   `git -C <base> worktree add <worktree_path> -b <branch> origin/<default_branch>`, where `<branch>`
   is the `branch_template`-derived name above (not necessarily the raw ticket id).
 - `runtime: windows` means: run commands for this repo are executed via
   `powershell.exe -NoExit -Command "..."` from WSL2, and its node_modules cache lives under a
-  separate Windows-side cache path (hardlinks can't cross the WSL9P boundary). `fleet-cache` and
-  `fleet-run` both need this field. As of this contract revision, `fleet-task` also needs it: the
-  bare clone and git worktree for a `runtime: windows` repo are created entirely by **Windows-native
-  `git.exe`**, invoked from WSL via `powershell.exe -NoProfile -Command "cd '<winDir>'; & git ...;
-  exit $LASTEXITCODE"` (see `fleet-task/winpath.go`'s `runWindowsCommand`), against paths under
+  separate Windows-side cache path (hardlinks can't cross the WSL 9P boundary, the file-sharing
+  protocol WSL2 uses to reach Windows drives). `fleet-cache`, `fleet-run` and `fleet-task` all use
+  this field: in `fleet-task`, the bare clone and git worktree for a `runtime: windows` repo
+  are created entirely by **Windows-native `git.exe`**, invoked from WSL via `powershell.exe -NoProfile -Command "<script>"` (the script
+  `cd`s into the Windows directory, runs `git`, and propagates its exit code; see
+  `fleet-task/winpath.go`'s `windowsCommandScript`), against paths under
   `windows_base`/`windows_worktree_root` rather than `base`/`worktree_root`. This keeps the actual
   checkout on an NTFS volume instead of WSL git writing through the 9P bridge into what's nominally
   a Windows-mounted path — the original bug this whole mechanism exists to fix.
@@ -120,9 +122,13 @@ Field notes:
     isn't a symlink) — do not remove this thinking it's redundant.
   - **NTFS hardlinks require the same drive.** `windows_base`, `windows_worktree_root`, and the
     resolved windows cache root must all resolve to the same drive letter, or `fleet-cache
-    ensure-windows`'s hardlink step fails. Both `fleet-task` and `fleet-cache` check this up front
-    (`checkSameDrive` in each module's `winpath.go`) and error clearly rather than let it fail
-    per-file inside a PowerShell script.
+    ensure-windows`'s hardlink step fails. Each tool checks what it can see, up front
+    (`checkSameDrive` in each module's `winpath.go`), and errors clearly rather than letting it fail
+    per-file inside a PowerShell script: `fleet-task` (`windowsGit.Preflight`) checks
+    `windows_base` against the real worktree location under `windows_worktree_root` (it never
+    looks at the cache root); `fleet-cache ensure-windows` checks the resolved cache root against
+    the target worktree. On Linux/WSL, `fleet-cache ensure` likewise compares the filesystem
+    device of the cache root and the target directory before running `npm ci`.
 - SSH remotes with passphrase-protected keys will hang in headless/non-interactive invocations.
   `fleet-task` should precheck `ssh-add -l` when `origin` looks like an SSH URL (`git@` or
   `ssh://`) and print a warning (not silently hang) if no identity is loaded. This check is WSL-side
@@ -133,8 +139,9 @@ Field notes:
 
 Directory listing only, no index file:
 `<config dir>/patches/<repo>/*.patch` — plain files produced by `git diff` / `git format-patch`.
-`fleet-task new` lets the user multiselect (bubbletea, by filename) which ones to apply per repo, applying each with
-`git apply` (or `git am` if the file has commit-message headers) in the new worktree.
+`fleet-task new` lets the user multiselect (in-process bubbletea picker, by filename) which ones
+to apply per repo, applying each with `git apply` in the new worktree (never `git am`; authorship/
+commit metadata in a patch is not preserved).
 
 ## Hooks
 
@@ -149,7 +156,10 @@ FLEET_WORKTREE_DIR=<absolute path>
 
 `pre-create`/`post-create` run around `fleet-task new`'s per-repo worktree setup, and around
 `fleet-task edit <ticket>`'s per-repo setup for any repos it adds (same underlying per-repo
-function, `createRepoWorktree`).
+function, `createRepoWorktree`). The per-repo order is: `pre-create` hooks → ensure the base bare
+clone exists (clone or fetch) → `git worktree add` → apply patches → `post-create` hooks → (if the
+worktree has a `package-lock.json`) `fleet-cache ensure`. Because `pre-create` runs first, those
+hooks must not assume the base clone exists yet.
 
 `pre-remove`/`post-remove` run around `fleet-task rm`'s per-repo teardown, and around `fleet-task
 edit <ticket>`'s per-repo teardown for any repos it removes (same underlying per-repo function,
@@ -163,8 +173,12 @@ not required for v1 but the directories/contract should exist).
 ## Per-task state file: `tasks/<ticket>.json`
 
 One file per ticket — never a single shared file — so two `fleet-task`/`fleet-run` invocations for
-*different* tickets never contend on the same file. Writes to a given ticket's own file should
-still take a `flock` on that file as a safety belt.
+*different* tickets never contend on the same file. `fleet-task` writes a given ticket's own file
+under an advisory lock as a safety belt: a `<file>.lock` sibling created with `O_EXCL` (not
+`flock(2)`) that contains the owner's pid. A lock whose pid is no longer alive, or that is older
+than 5 minutes, is treated as abandoned and taken over; otherwise writers wait up to 5 seconds and
+then fail with an error naming the lock file. Writes themselves go via a temp file + rename.
+Everything else (`fleet-run`) only reads these files.
 
 ```json
 {
@@ -218,9 +232,19 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
   reruns always worked. There is no separate `switch` command — this is `start`'s only behavior now.
 - Because only one ticket is ever running, each window is named just `<repo>-<run-name>`, e.g.
   `backend-api` — no ticket prefix. This is how `fleet-run stop` finds and kills the right windows —
-  never by session name, since the session itself never changes.
-- **Which ticket is active is tracked via two session-scoped tmux user options**, set by `start` and
-  cleared once `stop` leaves nothing running: `@fleet_task_ticket` (the ticket id) and
+  never by session name, since the session itself never changes. On the command line and in
+  pickers the same target is written `repo:run-name`. To keep both forms unambiguous,
+  `fleet-run` validates `repos.yaml` on load: it rejects `:` in any repo or run name, and rejects
+  any two repo/run pairs whose `<repo>-<run-name>` window names collide (repo `admin` + run
+  `ui-dev` vs repo `admin-ui` + run `dev`, or duplicate run names in one repo). `fleet-task` does
+  **not** enforce this (it never builds window names), so a config `fleet-task` accepts can still
+  be rejected by `fleet-run`.
+- `tmux.config_file` is passed as `tmux -f <file>`, a global flag that tmux only honours when it
+  starts the server; if a server is already running the file is not re-read.
+- **Which ticket is active is tracked via two global (`set-option -g`) tmux user options** — not
+  per-session ones; fleet only ever has the one session, and `-g` avoids tmux target resolution
+  needing an attached client. `start` sets them right after the session's first window exists
+  (tmux needs a running server first), and `stop` clears them once nothing is left running: `@fleet_task_ticket` (the ticket id) and
   `@fleet_task_description` (its description). Nothing else derives "what's currently active" from
   window names anymore — `fleet-run stop --ticket X` uses these options purely as a safety
   assertion (errors out, stopping nothing, if `X` isn't the active ticket) rather than as a filter,
@@ -238,16 +262,23 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
 
 - `fleet-task new` shells out to `fleet-cache ensure <worktree_dir>` after creating each repo's
   worktree, if that repo's dir has a `package-lock.json` — or, for `runtime: windows` repos,
-  `fleet-cache ensure-windows <worktree_dir> [--cache-root <windows_cache_root>]` instead. Both
+  `fleet-cache ensure-windows [--cache-root <windows_cache_root>] <worktree_dir>` instead (flags
+  may appear before or after `<dir>`; `fleet-task` happens to put them first). Both
   exit 0 on success, non-zero with a message on stderr on failure; `fleet-task` should not abort
   the whole `new` on a cache failure for one repo — warn and continue (node_modules install can be
-  retried manually). `ensure-windows` runs `npm ci`, the pre-install `node_modules` removal, and the
+  retried manually). `fleet-cache`'s progress messages and npm's output go to **stderr**, so
+  stdout stays clean for results. `ensure-windows` runs `npm ci`, the pre-install `node_modules` removal, and the
   hardlink population all as native Windows processes (PowerShell/npm) — only single-file
   operations (hashing the lockfile, copying `package.json`/`package-lock.json` into the cache
   entry) stay as plain Go file I/O against the `/mnt/...` path, since those are negligible one-off
-  costs rather than the many-small-file operations that are slow across the WSL9P boundary.
-  `gc-windows` mirrors `gc`'s `--roots`/`--force` safety semantics against the Windows-native cache
-  root instead.
+  costs rather than the many-small-file operations that are slow across the WSL 9P boundary.
+  `gc-windows` mirrors `gc`'s `--roots`/`--force`/`--json` semantics against the Windows-native
+  cache root instead. For both `gc` commands, every `--roots` directory must exist (a typo is an
+  error, not an empty root), and without both `--roots` and `--force` they only report.
+- Cache entries are built in a staging directory `<cache root>/node-cache/<hash>.tmp-<pid>` and
+  renamed to `<hash>` only once complete, so a `<hash>` directory is always a finished entry and
+  concurrent `ensure`s of one hash can't corrupt each other. Staging dirs left behind by a killed
+  run are reported by `gc` (and removed with `--force --roots`) once they're older than a day.
 - `fleet-cache ensure` (Linux/WSL2 path only) is safe to call repeatedly against the same
   `<worktree_dir>`: it's a no-op if `<worktree_dir>/node_modules` is already linked from the current
   `package-lock.json` hash (tracked via a `.fleet-cache-hash` marker inside `node_modules`), so
@@ -259,12 +290,17 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
   `ensure`'s own rebuild or `npm link`'s symlink-swap (both only need write access to the containing
   directory), but does turn any future in-place edit to a hardlinked file into a loud permission
   error instead of silently corrupting every other worktree sharing that lockfile hash. This does
-  not apply to `ensure-windows`, which uses a separate, non-hardlink-based mechanism.
+  not apply to `ensure-windows`: its hardlinks are made by PowerShell (`New-Item -ItemType
+  HardLink`, via the embedded `hardlink_windows.ps1`) and the entry's file permissions are not
+  locked down. `ensure-windows` has the same skip-marker and `--force` semantics as `ensure`.
 - `fleet-task jump` prints the chosen worktree path (and only that, no other output) on stdout so
   it composes with a shell function:
   ```bash
   fj() { local d; d=$(fleet-task jump) && cd "$d"; }
   ```
-- All three CLIs support `--json` on read commands (`list`, `jump` uses plain stdout since it's a
-  single path meant for `cd`) so they can be piped into `jq`/`fzf` by users directly, in keeping
-  with composing these tools as plain Unix pieces rather than a monolith.
+- Machine-readable output: `--json` is supported by `fleet-task list`, `fleet-run status`, and
+  `fleet-cache gc`/`gc-windows` (dry-run and `--force` alike). Nothing else has it: `fleet-task
+  jump` prints a single bare path on stdout for `cd`, and the mutating commands (`new`, `edit`,
+  `mv`, `rm`, `start`, `stop`, `ensure*`) are not meant to be parsed. Exit status is 0 on success and
+  1 on any failure, including usage errors and *partial* failure (every repo/window is attempted
+  before exiting 1) — in all three tools.

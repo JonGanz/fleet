@@ -1,123 +1,137 @@
 # fleet
 
-Three small CLIs for running several Jira tickets in parallel — each in its own set of git
-worktrees, each with its own subset of running applications — without their working trees or
-running processes stepping on each other. Useful once you're driving more than one AI-agent
-pipeline at a time and a single shared checkout per repo can't keep up.
+Run several Jira tickets in parallel, each in its own set of git worktrees and its own set of
+running apps, without their files or processes stepping on each other.
 
-They coordinate purely through files on disk (a config you write, state files they own) and by
-shelling out to each other by name — no shared Go code, no daemon. See `docs/CONTRACT.md` for the
-full shared contract (paths, `repos.yaml` schema, state file format, hook/tmux conventions).
+## The problem
 
-## Disclaimer
+A ticket often touches a few repos out of a larger suite (backend, database, several web UIs).
+Working it means checking out a branch in each, running the relevant apps to test, then pushing and
+moving the ticket along. A single checkout per repo can only be on one branch and in one state at a
+time, so working two tickets at once — or letting AI agents work several — means constant
+stashing, switching and port clashes.
 
-This repository's contents — code, tests, and documentation — are 100% LLM-produced.
+`fleet` gives each ticket its own directories and its own running apps:
+
+- **`fleet-task`** creates, per ticket, a *git worktree* in each repo the ticket touches (an
+  extra working directory on its own branch, sharing one git history with the others).
+- **`fleet-run`** starts that ticket's apps in tmux windows, and switches the whole running set to
+  another ticket when you ask.
+- **`fleet-cache`** makes the worktrees ready to use immediately by sharing one `npm ci` result
+  across worktrees whose `package-lock.json` is identical (via hardlinks: several directory
+  entries pointing at the same file on disk, so extra copies cost no space or install time).
+
+They are three independent Go programs that coordinate only through files on disk (a config you
+write, state files they own) and by running each other by name — no shared code, no daemon. The
+authoritative description of those files and conventions is [`docs/CONTRACT.md`](docs/CONTRACT.md).
+
+## Quick start
+
+1. **Install** (needs the tools in "Requirements" below):
+
+   ```sh
+   ./install.sh                                  # builds into ~/.local/bin (override with BIN_DIR=...)
+   source /path/to/fleet/fleet-task/contrib/fleet.sh   # from your shell profile; defines `fj`
+   ```
+
+2. **Write a minimal `~/.config/fleet/repos.yaml`:**
+
+   ```yaml
+   tmux:
+     session_name: fleet
+
+   repos:
+     - name: backend
+       origin: git@github.com:org/backend.git
+       base: ~/dev/.fleet-base/backend      # shared bare clone, created on first use
+       default_branch: main
+       runtime: linux
+       run:
+         - name: api
+           cmd: "npm run start:dev"
+   ```
+
+   This is the minimum. Other options (`defaults`, `branch_template`, `worktree_root`, the
+   `runtime: windows` settings, ...) are documented in [`docs/CONTRACT.md`](docs/CONTRACT.md),
+   which is the full reference for the config.
+
+3. **Work a ticket:**
+
+   ```sh
+   fleet-task new                        # prompts for ticket + description, pick repos/patches -> worktrees ready
+   fleet-run start --ticket PROJ-1234    # pick which apps to bring up in tmux
+   fj                                    # pick a worktree and cd into it (the shell helper from step 1)
+   fleet-run status                      # what's running, for which ticket
+   fleet-run stop --all                  # stop the apps
+   fleet-task rm PROJ-1234               # done: remove the worktrees and the ticket's state
+   ```
+
+   Running `fleet-run start --ticket PROJ-5678` while PROJ-1234's apps are up stops them first and
+   starts PROJ-5678's: only one ticket's apps run at a time.
 
 ## Requirements
 
-- Go 1.22+ to build.
-- `git` 2.5+ (worktrees), `tmux`, `fzf`, `npm`.
-- WSL2 only if you need the `runtime: windows` path (shells out to `powershell.exe`).
+- Go 1.25.4+ to build.
+- `git` 2.5+ (worktrees), `tmux`, `npm`.
+- WSL2 only if you need `runtime: windows` repos (apps and git that must run natively on
+  Windows; the tools shell out to `powershell.exe`).
 
-## Build / Install
+Pickers (repo/patch/ticket selection) are built in; no `fzf` or other external picker is needed.
 
-```sh
-./install.sh
-```
+## Install
 
-This builds all three CLIs (`fleet-task`, `fleet-run`, `fleet-cache`) and installs them to
-`~/.local/bin` — make sure that's on your `$PATH`. `fleet-cache` in particular must be reachable
-even though you won't invoke it directly, since `fleet-task new` shells out to it.
+`./install.sh` is a POSIX `sh` script (`set -eu`). It builds `fleet-task`, `fleet-cache` and
+`fleet-run` with `go build` and writes them into `$BIN_DIR` (default `~/.local/bin`, created if
+missing). Make sure that directory is on your `$PATH`: `fleet-task new` runs `fleet-cache` by name,
+so all three must be reachable.
 
-Then source the shell helper (needed for `fj`, since a subprocess can't `cd` its parent shell) from
-your shell profile:
+A subprocess can't change its parent shell's directory, so `fleet-task jump` only prints a path.
+Source `fleet-task/contrib/fleet.sh` from your shell profile to get `fj`, which wraps it and does the
+`cd`.
 
-```sh
-source /path/to/fleet-task/contrib/fleet.sh
-```
+## The commands
 
-Finally, write a `repos.yaml` — see "Gluing it together" below for the schema.
+Each tool's README has the full reference (flags, exit codes, behaviour).
 
-## Pieces
+- **`fleet-task`** — [`fleet-task/README.md`](fleet-task/README.md)
+  - `new` — create a ticket's worktrees (prompts for ticket/description, repos, patches; runs hooks;
+    installs `node_modules` via `fleet-cache`)
+  - `list [--json]` — list tickets
+  - `jump [ticket]` — pick a worktree and print its path (use via `fj`)
+  - `edit [ticket]` — add or remove repos of an existing ticket
+  - `mv [old] [new]` — rename a ticket, moving its worktrees
+  - `rm [ticket]` — remove a ticket's worktrees and state (picker if no ticket given)
+- **`fleet-run`** — [`fleet-run/README.md`](fleet-run/README.md)
+  - `start [--ticket <id>]` — start a ticket's apps, one tmux window each, named
+    `<repo>-<run-name>` (e.g. `backend-api`); switches tickets if another is active
+  - `stop [--ticket <id>] [--all] [repo:run-name ...]` — stop windows
+  - `status [--json]` — show the active ticket and running windows
+- **`fleet-cache`** — [`fleet-cache/README.md`](fleet-cache/README.md)
+  - `ensure <dir>` — link `<dir>/node_modules` from the shared cache (run for you by `fleet-task new`)
+  - `gc` — report, or with `--roots` and `--force` delete, cache entries no longer referenced
+  - `ensure-windows` / `gc-windows` — the same for `runtime: windows` repos, using a Windows-native cache
 
-- **`fleet-task`** — turns a ticket into a set of git worktrees. `fleet-task new` prompts for a
-  ticket/description, lets you fzf-multiselect which repos and which patches to apply, then for
-  each repo: clones/fetches a shared bare repo, adds a worktree on a branch named after the
-  ticket, applies patches, runs hooks, and populates `node_modules` via `fleet-cache`.
-  `fleet-task list`/`jump`/`rm` list, fzf-jump to, and tear down worktrees. See
-  [`fleet-task/README.md`](fleet-task/README.md).
-
-- **`fleet-run`** — runs each task's applications in tmux. One fixed, configurable session for
-  the whole fleet (never renamed per ticket); each running app is its own window named
-  `<ticket>-<repo>-<run-name>`. `start`/`stop`/`switch` let you fzf-multiselect which apps to
-  bring up, tear down, or swap for another ticket's set. See
-  [`fleet-run/README.md`](fleet-run/README.md).
-
-- **`fleet-cache`** — a `node_modules` hardlink cache keyed by the hash of `package-lock.json`, so
-  N worktrees of the same repo/lockfile share one `npm ci` instead of paying for it N times.
-  `fleet-task` calls this automatically; `fleet-cache gc` reclaims stale entries. See
-  [`fleet-cache/README.md`](fleet-cache/README.md).
-
-## Gluing it together
-
-All three read the same `repos.yaml` and the same `tasks/*.json` state files (one file per
-ticket, never a single shared one — so parallel tickets never contend on the same file). Start
-with a config like:
-
-```yaml
-tmux:
-  session_name: fleet
-  config_file: ~/.config/fleet/tmux.conf   # optional
-
-repos:
-  - name: backend
-    origin: git@github.com:org/backend.git
-    base: ~/dev/.fleet-base/backend
-    default_branch: main
-    runtime: linux
-    run:
-      - name: api
-        cmd: "npm run start:dev"
-
-  - name: admin-ui
-    origin: git@github.com:org/admin-ui.git
-    base: ~/dev/.fleet-base/admin-ui
-    default_branch: main
-    runtime: windows
-    run:
-      - name: dev
-        cmd: "npm run dev"
-```
-
-at `~/.config/fleet/repos.yaml`, then the usual flow is:
-
-```sh
-fleet-task new              # PROJ-1234, pick repos + patches -> worktrees ready
-fleet-run start --ticket PROJ-1234   # pick which apps to bring up
-
-# ...later, switch to a different ticket's apps without stopping PROJ-1234's worktrees:
-fleet-run switch --to PROJ-5678
-
-# jump a shell into any task's worktree (needs `fj`, below)
-fj
-
-fleet-task rm PROJ-1234     # done: remove worktrees + state
-```
-
-(See "Build / Install" above for getting the binaries and `fj` shell helper in place.)
+Config, state and cache live under XDG directories (`~/.config/fleet`, `~/.local/state/fleet`,
+`~/.cache/fleet`), overridable with `FLEET_CONFIG_DIR`, `FLEET_REPOS_FILE`, `FLEET_STATE_DIR` and
+`FLEET_CACHE_DIR`. Optional hook scripts and patch files live in the config directory; see
+`docs/CONTRACT.md`.
 
 ## Development
 
 Each CLI is an independent Go module:
 
 ```sh
-cd fleet-task && go build ./... && go test ./...
-cd fleet-run   && go build ./... && go test ./...
-cd fleet-cache && go build ./... && go test ./...
+cd fleet-task && go build ./... && go vet ./... && go test ./...
+cd fleet-run   && go build ./... && go vet ./... && go test ./...
+cd fleet-cache && go build ./... && go vet ./... && go test ./...
 ```
 
-Shell glue tests (requires [bats-core](https://github.com/bats-core/bats-core)):
+Shell glue test for `fj` (requires [bats-core](https://github.com/bats-core/bats-core)):
 
 ```sh
-cd fleet-task/contrib && bats fleet.bats fzf_integration.bats
+cd fleet-task/contrib && bats fleet.bats
 ```
+
+## Disclaimer
+
+This repository's contents — code, tests, and documentation — are 100% LLM-produced.
