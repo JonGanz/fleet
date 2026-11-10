@@ -37,7 +37,8 @@ Interactively:
      clone is ensured, so they must not assume the base exists yet.
    - Ensures the repo's shared bare clone (`base` in `repos.yaml`; a clone with
      history but no checked-out files) exists,
-     cloning it on first use or fetching `origin` otherwise. If `origin`
+     creating it on first use (`git init --bare` + `remote add` + `fetch`, so no local
+     branches are copied from the remote) or fetching `origin` otherwise. If `origin`
      looks like an SSH URL, runs `ssh-add -l` before cloning and warns (but
      doesn't block) if no identity looks loaded.
    - Creates a worktree at `<worktree_root>/<ticket>/<repo>` on a branch

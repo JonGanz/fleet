@@ -78,10 +78,12 @@ func (g windowsGit) CloneBare(origin, base string) error {
 	if err := windowsMkdirAll(winParent); err != nil {
 		return fmt.Errorf("mkdir %s: %w", winParent, err)
 	}
-	if err := runWindowsCommand(winParent, "git", "clone", "--bare", origin, winBase); err != nil {
+	// init + remote add + fetch instead of `clone --bare`: see linuxGit.CloneBare
+	// (no local branches copied from the remote).
+	if err := runWindowsCommand(winParent, "git", "init", "--bare", winBase); err != nil {
 		return err
 	}
-	if err := runWindowsCommand(winBase, "git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+	if err := runWindowsCommand(winBase, "git", "remote", "add", "origin", origin); err != nil {
 		return err
 	}
 	return g.Fetch(base)

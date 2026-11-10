@@ -61,17 +61,17 @@ func (linuxGit) BaseExists(base string) (bool, error) {
 	return false, err
 }
 
-// CloneBare runs `git clone --bare <origin> <base>`, then configures a
-// standard remote-tracking fetch refspec and does an initial fetch.
+// CloneBare creates a bare repo at base with `origin` pointing at origin and
+// fetches into refs/remotes/origin/* only -- `git init --bare` + `remote add`
+// + `fetch` rather than `git clone --bare`.
 //
-// `git clone --bare` on its own copies the remote's branches straight into
-// this repo's own refs/heads/* and does NOT set remote.origin.fetch, so
-// refs like origin/<branch> never exist and a later `git fetch origin`
-// would only update remote.origin.url bookkeeping, not any usable ref.
-// Configuring the usual `+refs/heads/*:refs/remotes/origin/*` refspec
-// up front (mirroring what a non-bare `git clone` does automatically)
-// keeps `origin/<default_branch>` resolvable for worktree add, both now
-// and after every subsequent Fetch.
+// `git clone --bare` copies every remote branch into the repo's own
+// refs/heads/* (a pile of local branches that go stale, since later fetches
+// only update origin/*) and does not set remote.origin.fetch. `remote add`
+// sets the standard `+refs/heads/*:refs/remotes/origin/*` refspec, so the
+// result has no local branches at all: worktrees branch off
+// `origin/<default_branch>`, and an existing remote ticket branch is picked
+// up by `worktree add`'s remote-branch DWIM.
 func (g linuxGit) CloneBare(origin, base string) error {
 	if isSSHURL(origin) {
 		checkSSHAgent()
@@ -79,10 +79,10 @@ func (g linuxGit) CloneBare(origin, base string) error {
 	if err := os.MkdirAll(parentDir(base), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", parentDir(base), err)
 	}
-	if err := runGit("clone", "--bare", origin, base); err != nil {
+	if err := runGit("init", "--bare", base); err != nil {
 		return err
 	}
-	if err := runGit("-C", base, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+	if err := runGit("-C", base, "remote", "add", "origin", origin); err != nil {
 		return err
 	}
 	return g.Fetch(base)

@@ -89,8 +89,10 @@ Field notes:
   given a different description, the computed branch name changes too, so the "reattach to the
   existing branch on rerun" fallback (below) won't find a match and a new branch gets created
   instead — a known, accepted tradeoff of allowing description-based names.
-- `origin` + `base`: on first use `fleet-task` runs `git clone --bare <origin> <base>` (a *bare*
-  clone has a git history but no checked-out files, and is shared by every ticket's worktrees). On
+- `origin` + `base`: on first use `fleet-task` runs `git init --bare <base>`, `git remote add origin <origin>`
+  and `git fetch origin` (a *bare* repo has git history but no checked-out files, and is shared by
+  every ticket's worktrees; unlike `git clone --bare` it creates no local branches — remote branches
+  live only under `refs/remotes/origin/*`). On
   every subsequent `fleet-task new` it runs `git -C <base> fetch origin`, then
   `git -C <base> worktree add <worktree_path> -b <branch> origin/<default_branch>`, where `<branch>`
   is the `branch_template`-derived name above (not necessarily the raw ticket id).

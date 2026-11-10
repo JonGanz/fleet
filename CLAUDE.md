@@ -110,10 +110,13 @@ three tools execute, not just what they run:
 Each repo in `repos.yaml` has an `origin` (remote URL) and a `base` (a local **bare** clone path
 shared across all tickets). `fleet-task new` clones `base` once (first use) and only `fetch`es
 thereafter; every ticket gets its own `git worktree add` off that same `base`, on a branch computed
-from `branch_template` (default: the ticket id). `gitCloneBare` (`git.go`) explicitly sets
-`remote.origin.fetch` to `+refs/heads/*:refs/remotes/origin/*` and fetches right after cloning — a
-bare clone does *not* set that refspec on its own, so `origin/<branch>` refs would otherwise never
-exist and every worktree add would fail (a real bug caught during end-to-end testing).
+from `branch_template` (default: the ticket id). `CloneBare` (`git.go`, `gitwin.go`) does
+`git init --bare` + `remote add origin` + `fetch` instead of `git clone --bare`: `clone --bare` copies
+every remote branch into local `refs/heads/*` (stale clutter, since later fetches only update
+`origin/*`) and doesn't set `remote.origin.fetch`. `remote add` sets the standard
+`+refs/heads/*:refs/remotes/origin/*` refspec, so the base has *no* local branches until a worktree
+creates one; worktrees branch off `origin/<default_branch>`, and an existing remote ticket branch is
+attached via `worktree add`'s remote-branch DWIM.
 
 How git is driven is behind the `gitRunner` interface (`gitrunner.go`; `linuxGit` in `git.go`,
 `windowsGit` in `gitwin.go`, PowerShell wrappers in `winpath.go`). `new`/`edit`/`rm`/`mv` go through
