@@ -324,13 +324,10 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
   HardLink`, via the embedded `hardlink_windows.ps1`) and the entry's file permissions are not
   locked down. `ensure-windows` has the same skip-marker and `--force` semantics as `ensure`.
 - `fleet-task jump` prints the chosen worktree path (and only that, no other output) on stdout so
-  it composes with a shell function:
-  ```bash
-  fj() { local d; d=$(fleet-task jump) && cd "$d"; }
-  ```
-- Machine-readable output: `--json` is supported by `fleet-task list`, `fleet-run status`, and
-  `fleet-cache gc`/`gc-windows` (dry-run and `--force` alike). Nothing else has it: `fleet-task
-  jump` prints a single bare path on stdout for `cd`, and the mutating commands (`new`, `edit`,
-  `mv`, `rm`, `start`, `stop`, `ensure*`) are not meant to be parsed. Exit status is 0 on success and
-  1 on any failure, including usage errors and *partial* failure (every repo/window is attempted
-  before exiting 1) — in all three tools.
+  it composes with `cd "$(fleet-task jump)"`.
+- Machine-readable output: `--json` is supported by every `fleet-task` and `fleet-run` command
+  except `fleet-task jump` (which prints a single bare path on stdout for `cd`), and by
+  `fleet-cache gc`/`gc-windows` (dry-run and `--force` alike); `fleet-cache ensure*` is not meant
+  to be parsed. Exit codes for fleet-task/fleet-run are in "CLI conventions shared by fleet-task and
+  fleet-run" above (0 / 1 / 2). `fleet-cache` exits 0 on success and 1 on any failure, including
+  usage errors. Every repo/window is attempted before a *partial* failure exits 1.

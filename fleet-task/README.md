@@ -112,18 +112,10 @@ Globs `<state dir>/tasks/*.json`, flattens all (ticket, repo, worktree
 path) rows across every task, and lets you pick one via the same
 in-process picker as `new` (single-select: no checkboxes, `enter`
 confirms the highlighted row). Prints *only* the chosen worktree path to
-stdout (nothing else), so it composes with a shell wrapper (a subprocess
-can't `cd` its parent shell). With a ticket argument, only that ticket's repos
+stdout (nothing else), so use it as `cd "$(fleet-task jump)"` (a
+subprocess can't `cd` its parent shell). With a ticket argument, only that ticket's repos
 are offered. If selection is cancelled (e.g. `Esc`/`q`),
 exits non-zero with no stdout output.
-
-See `contrib/fleet.sh` for the `fj` shell function that does the `cd` for
-you:
-
-```bash
-source /path/to/fleet-task/contrib/fleet.sh
-fj   # select a worktree, cd into it
-```
 
 ### `fleet-task edit [ticket] [--add <repo>]... [--remove <repo>]... [--skip-patch <repo>:<name>]... [--no-patches] [--json]`
 

@@ -80,16 +80,8 @@ it (`rm fleet-task/fleet-task`) rather than leaving it around or committing it.
 `~/.claude/skills/fleet`) to that copy — never to the checkout, so the skill matches the installed
 binaries. `./install.sh --uninstall` reverses it.
 
-Shell integration test (requires [bats-core](https://github.com/bats-core/bats-core)):
-
-```sh
-cd fleet-task/contrib && bats fleet.bats
-```
-
-`fleet.bats` sources `contrib/fleet.sh` and tests the `fj` function against a stub `fleet-task` on
-`PATH`: it must `cd` to the path `jump` prints, and must *not* `cd` when `jump` exits non-zero
-(cancelled picker) or prints a nonexistent path. The bubbletea pickers themselves have no headless
-integration test; their state machines are unit tested by feeding synthetic key messages.
+The bubbletea pickers have no headless integration test; their state machines are unit tested by
+feeding synthetic key messages.
 
 There is no CI config in this repo yet — the commands above are the full verification loop.
 

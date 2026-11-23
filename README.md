@@ -7,6 +7,10 @@ A "ticket" is just an id you choose: a Jira key (`PROJ-123`), a GitHub issue (`g
 or GitLab id, or a plain name (`fix-login`). fleet never talks to an issue tracker; the id only
 names the task's state file, worktree directory and (via `branch_template`) its branches.
 
+## Disclaimer
+
+This repository's contents — code, tests, and documentation — are 100% LLM-produced.
+
 ## The problem
 
 A ticket often touches a few repos out of a larger suite (backend, database, several web UIs).
@@ -35,7 +39,6 @@ authoritative description of those files and conventions is [`docs/CONTRACT.md`]
 
    ```sh
    ./install.sh                                  # builds into ~/.local/bin (override with BIN_DIR=...)
-   source /path/to/fleet/fleet-task/contrib/fleet.sh   # from your shell profile; defines `fj`
    ```
 
 2. **Write a minimal `~/.config/fleet/repos.yaml`:**
@@ -64,7 +67,7 @@ authoritative description of those files and conventions is [`docs/CONTRACT.md`]
    ```sh
    fleet-task new                        # prompts for ticket + description, pick repos/patches -> worktrees ready
    fleet-run start --ticket PROJ-1234    # pick which apps to bring up in tmux
-   fj                                    # pick a worktree and cd into it (the shell helper from step 1)
+   cd "$(fleet-task jump)"               # pick a worktree and cd into it
    fleet-run status                      # what's running, for which ticket
    fleet-run stop --all                  # stop the apps
    fleet-task rm PROJ-1234               # done: remove the worktrees and the ticket's state
@@ -79,8 +82,6 @@ authoritative description of those files and conventions is [`docs/CONTRACT.md`]
 - `git` 2.5+ (worktrees), `tmux`, `npm`.
 - WSL2 only if you need `runtime: windows` repos (apps and git that must run natively on
   Windows; the tools shell out to `powershell.exe`).
-
-Pickers (repo/patch/ticket selection) are built in; no `fzf` or other external picker is needed.
 
 ## Install
 
@@ -97,9 +98,8 @@ skill therefore matches the installed binaries rather than whatever the checkout
 `./install.sh --uninstall` removes the binaries, the skill copy and the link (only if it points at
 fleet's skill).
 
-A subprocess can't change its parent shell's directory, so `fleet-task jump` only prints a path.
-Source `fleet-task/contrib/fleet.sh` from your shell profile to get `fj`, which wraps it and does the
-`cd`.
+A subprocess can't change its parent shell's directory, so `fleet-task jump` only prints a path:
+use it as `cd "$(fleet-task jump)"`.
 
 ## The commands
 
@@ -110,7 +110,7 @@ Each tool's README has the full reference (flags, exit codes, behaviour).
     runs hooks; installs `node_modules` via `fleet-cache`)
   - `list` / `show <ticket>` — list tickets / show one ticket's repos, branches, paths, patches
   - `repos` / `patches [repo]` — configured repos and run targets / available patches with summaries
-  - `jump [ticket] [--repo <name>]` — print a worktree path (use via `fj`)
+  - `jump [ticket] [--repo <name>]` — print a worktree path (`cd "$(fleet-task jump)"`)
   - `edit [ticket]` — add or remove repos (pickers, or `--add`/`--remove`)
   - `mv [old] [new]` — rename a ticket, moving its worktrees
   - `rm [ticket]` — remove a ticket's worktrees and state (picker if no ticket given)
@@ -145,13 +145,3 @@ cd fleet-task && go build ./... && go vet ./... && go test ./...
 cd fleet-run   && go build ./... && go vet ./... && go test ./...
 cd fleet-cache && go build ./... && go vet ./... && go test ./...
 ```
-
-Shell glue test for `fj` (requires [bats-core](https://github.com/bats-core/bats-core)):
-
-```sh
-cd fleet-task/contrib && bats fleet.bats
-```
-
-## Disclaimer
-
-This repository's contents — code, tests, and documentation — are 100% LLM-produced.

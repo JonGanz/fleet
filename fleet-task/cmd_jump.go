@@ -93,7 +93,7 @@ func cmdJump(ticket, repo string) error {
 	}
 
 	// Print ONLY the worktree path, per contract, so it composes with:
-	//   fj() { local d; d=$(fleet-task jump) && cd "$d"; }
+	//   cd "$(fleet-task jump)"
 	fmt.Println(entry.WorktreePath)
 	return nil
 }
