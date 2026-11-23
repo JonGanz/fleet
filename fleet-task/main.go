@@ -1,5 +1,5 @@
 // Command fleet-task manages per-ticket git-worktree sets: creating a
-// worktree per selected repo for a Jira ticket, listing/jumping between
+// worktree per selected repo for a ticket, listing/jumping between
 // existing tasks' worktrees, and tearing them down. See
 // docs/CONTRACT.md in the fleet monorepo for the full shared contract.
 package main

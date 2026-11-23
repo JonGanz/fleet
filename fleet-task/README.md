@@ -1,6 +1,6 @@
 # fleet-task
 
-`fleet-task` creates and manages per-Jira-ticket sets of git worktrees (extra
+`fleet-task` creates and manages per-ticket sets of git worktrees (extra
 working directories sharing one git history), one
 per repo the ticket touches, so several tickets (and their AI-agent
 pipelines) can be worked in parallel without their working trees

@@ -1,6 +1,6 @@
 ---
 name: fleet
-description: Drive the fleet CLIs (fleet-task, fleet-run) to work a Jira ticket in isolated git worktrees and run its apps in tmux. Use when asked to start, set up, check out, switch to, run, test, inspect logs of, or tear down work for a ticket managed by fleet, or when a task mentions fleet-task / fleet-run / worktrees per ticket.
+description: Drive the fleet CLIs (fleet-task, fleet-run) to work a ticket or issue (e.g. a Jira key like PROJ-123, a GitHub issue like gh-123, or any task name) in isolated git worktrees and run its apps in tmux. fleet has no issue-tracker integration — it never reads or updates tickets. Use when asked to start, set up, check out, switch to, run, test, inspect logs of, or tear down work for a ticket managed by fleet, or when a task mentions fleet-task / fleet-run / worktrees per ticket.
 ---
 
 # fleet
@@ -29,6 +29,16 @@ ticket's apps, one tmux window per `repo:run-name` target. Both are on `PATH`.
   uncommitted changes in the worktree. Stage files explicitly; never
   `git add -A` / `git commit -a` in a fleet worktree.
 - Don't invent ticket ids, repo names or patch names: discover them.
+
+## Ticket ids
+
+The ticket id is any string without `/`, `\` or `.`/`..`; fleet never
+contacts an issue tracker. Use the tracker's own key when there is one —
+`PROJ-123` (Jira), `gh-123` (GitHub issue #123; avoid a bare `#`, which the
+shell treats as a comment), `ENG-42` (Linear) — or a short name. Reuse the
+exact id of an existing task (`fleet-task list --json`). Reading ticket
+details or changing status (in progress / in review) is done with that
+tracker's own tool (e.g. `gh issue view`, a Jira connector), never fleet.
 
 ## Discover
 

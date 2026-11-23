@@ -5,9 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `fleet` is three independent Go CLIs — `fleet-task`, `fleet-run`, `fleet-cache` — that let one
-person run several Jira tickets in parallel, each in its own set of git worktrees, each with its
+person run several tickets (from any issue tracker — Jira, GitHub issues, … — or none) in parallel, each in its own set of git worktrees, each with its
 own subset of running applications, without their working trees or running processes conflicting.
-The underlying problem: a programmer works Jira tickets that each touch some subset of a large
+There is no issue-tracker integration: a ticket id is an opaque string (validated only to be safe as
+a filename) — keep it that way.
+The underlying problem: a programmer works tickets that each touch some subset of a large
 repo suite (backend, database, several web UIs); moving a ticket to "in progress" means checking
 out branches across whichever repos it needs, testing with the apps running, then pushing up and
 moving it to "in review". Doing that with AI agents driving several tickets at once requires

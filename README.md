@@ -1,7 +1,11 @@
 # fleet
 
-Run several Jira tickets in parallel, each in its own set of git worktrees and its own set of
+Run several tickets in parallel, each in its own set of git worktrees and its own set of
 running apps, without their files or processes stepping on each other.
+
+A "ticket" is just an id you choose: a Jira key (`PROJ-123`), a GitHub issue (`gh-123`), a Linear
+or GitLab id, or a plain name (`fix-login`). fleet never talks to an issue tracker; the id only
+names the task's state file, worktree directory and (via `branch_template`) its branches.
 
 ## The problem
 
