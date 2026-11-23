@@ -1,0 +1,26 @@
+# Binaries `go build ./...` drops inside each module dir.
+/fleet-task/fleet-task
+/fleet-run/fleet-run
+/fleet-cache/fleet-cache
+
+# `make build` output.
+/dist/
+
+# Test and coverage output.
+*.test
+*.out
+*.cover
+*.coverprofile
+coverage.*
+
+# Editors.
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS noise.
+.DS_Store
+Thumbs.db
+desktop.ini
