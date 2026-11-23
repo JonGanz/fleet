@@ -60,6 +60,39 @@ func TestCheckSameDrive(t *testing.T) {
 	}
 }
 
+func TestCheckSameDriveRejectsPathWithoutDriveLetter(t *testing.T) {
+	// Run repeatedly: with map iteration, the old code passed or failed
+	// depending on which label it saw first.
+	for i := 0; i < 50; i++ {
+		err := checkSameDrive(map[string]string{
+			"cache entry": `C:\fleet\cache`,
+			"worktree":    `\\wsl.localhost\Ubuntu\home\jon\wt`,
+		})
+		if err == nil {
+			t.Fatal("UNC path without a drive letter: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "worktree") || !strings.Contains(err.Error(), "no drive letter") {
+			t.Fatalf("error should name the offending path clearly: %v", err)
+		}
+	}
+}
+
+func TestCheckSameDriveDeterministicMessage(t *testing.T) {
+	labeled := map[string]string{"b": `D:\x`, "a": `C:\x`, "c": `C:\y`}
+	first := checkSameDrive(labeled)
+	if first == nil {
+		t.Fatal("want cross-drive error")
+	}
+	for i := 0; i < 50; i++ {
+		if err := checkSameDrive(labeled); err == nil || err.Error() != first.Error() {
+			t.Fatalf("message changed between runs: %v vs %v", first, err)
+		}
+	}
+	if !strings.HasPrefix(first.Error(), "a (C:) and b (D:)") {
+		t.Errorf("labels should be compared in sorted order: %v", first)
+	}
+}
+
 func TestResolveWindowsCacheRootWithFlag(t *testing.T) {
 	got, err := resolveWindowsCacheRoot("/mnt/c/fleet/cache-windows")
 	if err != nil {

@@ -22,6 +22,7 @@ PowerShell/npm processes rather than WSL reaching into `/mnt/...`.
     ├── <sha256 of package-lock.json>/
     │   ├── package-lock.json   # copy of the lockfile that produced this entry
     │   ├── package.json        # copy of the manifest (`npm ci` needs both)
+    │   │                         # (.npmrc is staged too, but only while npm ci runs)
     │   ├── node_modules/       # populated once via `npm ci`, reused thereafter
     │   └── .fleet-cache-complete # written last; an entry without it is rebuilt
     └── <sha256>.tmp-<pid>/     # staging dir while an entry is being built
@@ -46,12 +47,20 @@ and rebuilt. `gc` reports leftover staging dirs older than a day (see below).
 - Flags may come before or after the positional `<dir>` (`ensure <dir>
   --force` and `ensure --force <dir>` are equivalent).
 - Progress/status messages, and npm's own output, go to **stderr**; stdout
-  carries only results (gc's report, `--json`), so output doesn't interleave
+  carries only results (gc's report, list, `--json`, version), so output doesn't interleave
   with `fleet-task new`'s.
-- Usage errors print the usage text and exit 1 (like fleet-task/fleet-run);
-  `--help`/`-h` print usage to stdout and exit 0.
-- `--cache-root` is accepted by all four commands and overrides the cache
-  root resolution above (for the Windows commands see below).
+- Exit codes (as in fleet-task/fleet-run): `0` ok, `1` operation failed
+  (including an interrupted `ensure`), `2` usage error (unknown command,
+  bad flag, wrong number of arguments; the usage text goes to stderr).
+  `--help`/`-h`/`help` print usage to stdout and exit 0.
+- `fleet-cache version` / `fleet-cache --version` print
+  `fleet-cache <version>`: the value set at build time with
+  `-ldflags "-X main.version=<version>"`, else the module version or VCS
+  revision Go recorded in the binary (`-dirty` if built from a modified
+  tree), else `dev`.
+- `--cache-root` is accepted by every command except `version` and
+  overrides the cache root resolution above (for the Windows commands see
+  below).
 
 ## Commands
 
@@ -80,9 +89,28 @@ and rebuilt. `gc` reports leftover staging dirs older than a day (see below).
    `link` call later on also produces a clear message.)
 4. If no cache entry exists for that hash yet: builds one in
    `<cache root>/node-cache/<hash>.tmp-<pid>/` — copies `package-lock.json`
-   *and* `package.json` in and runs `npm ci` there (npm's output goes to
-   stderr so you see its progress) — then atomically renames it to
-   `<cache root>/node-cache/<hash>/`.
+   *and* `package.json` in (plus `<dir>/.npmrc`, if present, with mode
+   `0600`, so a project-level registry/auth/`legacy-peer-deps` setting
+   applies) and runs `npm ci` there (npm's output goes to stderr so you see
+   its progress) — then atomically renames it to
+   `<cache root>/node-cache/<hash>/`. The staged `.npmrc` is deleted as soon
+   as `npm ci` finishes, successfully or not, so a registry token never
+   persists in the cache. Note the cache key is still only the lockfile
+   hash: two worktrees with the same lockfile but different `.npmrc` share
+   one entry, built with whichever `.npmrc` came first.
+
+   **Unsupported: npm workspaces.** If `package.json` declares a non-empty
+   `workspaces` field, `ensure` fails before running anything, since the
+   workspace packages aren't available to `npm ci` in the staging dir; run
+   `npm ci` in the worktree yourself instead. A `package.json` that isn't a
+   valid JSON object is likewise a clear error.
+
+   **Interrupts:** SIGINT/SIGTERM (e.g. Ctrl-C) while the entry is being
+   built sends `npm ci` SIGTERM (killed after 10s if still running),
+   removes the staging dir and exits 1. A second Ctrl-C kills fleet-cache
+   at once, skipping that cleanup (`gc` then reports the staging dir once
+   it is a day old). Interrupting the later hardlink step just leaves a
+   `node_modules` without the marker, which the next `ensure` rebuilds.
    Every regular file in the resulting `node_modules` is then chmod'd
    read-only (`0444`) — since permission bits belong to the shared inode,
    not the directory entry, this takes effect for every worktree the file
@@ -156,11 +184,17 @@ hash, nothing is touched (so `npm link`s survive reruns); `--force` rebuilds
 staging-dir-and-rename scheme as `ensure`, with `npm ci` run natively in the
 staging dir.
 
+Like `ensure`, it stages `<wsl-dir>/.npmrc` for `npm ci` and removes it
+afterwards, rejects `workspaces`, and cleans up its staging dir on
+SIGINT/SIGTERM (stopping the `powershell.exe` running `npm ci`; whether the
+Windows-side npm stops with it is up to WSL interop, so the cleanup's
+`Remove-Item` can fail on locked files, leaving the staging dir for `gc`).
+
 Only genuinely bulk filesystem work — `npm ci`, removing an old
 `node_modules` tree, and hardlink-populating the target `node_modules` —
 runs as native Windows processes (PowerShell/npm). Single-file operations
-(hashing the lockfile, copying `package.json`/`package-lock.json` into the
-cache entry, the skip marker) stay as ordinary Go file I/O against the `/mnt/...` path, since
+(hashing the lockfile, copying `package.json`/`package-lock.json`/`.npmrc`
+into the cache entry, the skip marker) stay as ordinary Go file I/O against the `/mnt/...` path, since
 those are negligible one-off costs, not the many-small-file operations that
 are slow across the WSL 9P boundary.
 
@@ -172,7 +206,9 @@ points). It is written to `<cache root>/hardlink.ps1`, and only rewritten
 when its content differs. Both the
 cache entry and the target worktree must be on the same NTFS drive —
 `ensure-windows` checks this up front and errors clearly if not, since
-`New-Item -ItemType HardLink` fails across volumes.
+`New-Item -ItemType HardLink` fails across volumes. A path that resolves to
+no drive letter at all (e.g. `\\wsl.localhost\...`, i.e. inside the WSL
+filesystem) is rejected with its own error.
 
 PowerShell failures propagate: the generated commands abort if `cd` fails
 and exit non-zero if a cmdlet such as `Remove-Item` fails (e.g. a locked
@@ -186,10 +222,32 @@ always report-only), scanning/deleting against the
 Windows-native cache root's `node-cache` dir via `Remove-Item -Recurse -Force`
 instead of `os.RemoveAll`.
 
+### `fleet-cache list [--json] [--cache-root <dir>]`
+
+Read-only listing of `<cache root>/node-cache`, sorted by name: every cache
+entry (`kind: entry`) with whether it is complete (has the
+`.fleet-cache-complete` marker; an incomplete one is rebuilt by the next
+`ensure`), and every `<hash>.tmp-<pid>` staging dir (`kind: staging`,
+`abandoned` once older than a day, i.e. what `gc` would remove). Each row
+has the directory's last-modified time and its on-disk size (allocated
+blocks, like `du`; the files are hardlinked into worktrees, so deleting an
+entry frees that space only once no worktree still links them).
+
+Text output is a table with a total row; `--json` prints
+`{"node_cache": ..., "entries": [{"name", "path", "kind": "entry"|"staging",
+"complete": bool, "abandoned": bool, "modified": RFC 3339 time,
+"size_bytes": int}]}`. A missing `node-cache` dir is an empty listing.
+
+There is no `list-windows`: pass the WSL-visible Windows cache root (e.g.
+`--cache-root /mnt/c/Users/<you>/AppData/Local/fleet`) to list that cache.
+Sizing walks every file, which is slow across the WSL 9P boundary for a
+large Windows cache.
+
 ## Development
 
 ```
 go build ./... && go vet ./... && go test ./... && gofmt -l .
+go build -ldflags "-X main.version=v1.2.3" .   # stamp a release version
 ```
 
 Tests avoid running real `npm ci` (no network calls in `go test`); the

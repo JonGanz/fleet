@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -27,7 +28,9 @@ func hardlinkTree(src, dst string) error {
 		return fmt.Errorf("source %s is not a directory", src)
 	}
 
-	return filepath.Walk(src, func(path string, walkInfo os.FileInfo, err error) error {
+	// WalkDir never follows symlinks (they are reported with ModeSymlink in
+	// d.Type()), matching the Lstat-based walk this replaced.
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -37,9 +40,9 @@ func hardlinkTree(src, dst string) error {
 		}
 		target := filepath.Join(dst, rel)
 
-		mode := walkInfo.Mode()
+		mode := d.Type()
 		switch {
-		case mode&os.ModeSymlink != 0:
+		case mode&fs.ModeSymlink != 0:
 			linkTarget, err := os.Readlink(path)
 			if err != nil {
 				return fmt.Errorf("readlink %s: %w", path, err)
@@ -56,7 +59,7 @@ func hardlinkTree(src, dst string) error {
 			if err := os.Symlink(linkTarget, target); err != nil {
 				return fmt.Errorf("symlink %s -> %s: %w", target, linkTarget, err)
 			}
-		case walkInfo.IsDir():
+		case d.IsDir():
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return fmt.Errorf("mkdir %s: %w", target, err)
 			}
@@ -107,14 +110,20 @@ func linkError(src, dst string, err error) error {
 // denied" once hardlinked into a worktree -- a real regression caught via
 // backend-api's env-cmd failing under `fleet-cache ensure`.
 func lockDownPermissions(root string) error {
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.Mode().IsRegular() {
-			mode := os.FileMode(0o444) | (info.Mode() & 0o111)
-			return os.Chmod(path, mode)
+		if !d.Type().IsRegular() {
+			return nil
 		}
-		return nil
+		// Only regular files need the full mode (for their exec bits), so
+		// the extra lstat is paid only where it matters.
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		mode := os.FileMode(0o444) | (info.Mode() & 0o111)
+		return os.Chmod(path, mode)
 	})
 }

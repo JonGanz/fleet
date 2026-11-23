@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,18 +48,19 @@ func walkLockfiles(dir string, visited, referenced map[string]bool) error {
 		return nil
 	}
 	visited[dir] = true
-	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil // vanished mid-scan
 			}
 			return fmt.Errorf("scanning %s: %w", path, err)
 		}
-		if info.IsDir() && info.Name() == "node_modules" {
+		if d.IsDir() && d.Name() == "node_modules" {
 			return filepath.SkipDir
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			if info.Name() == "node_modules" {
+		name, isDir := d.Name(), d.IsDir()
+		if d.Type()&fs.ModeSymlink != 0 {
+			if name == "node_modules" {
 				return nil
 			}
 			real, err := filepath.EvalSymlinks(path)
@@ -72,9 +74,10 @@ func walkLockfiles(dir string, visited, referenced map[string]bool) error {
 			if target.IsDir() {
 				return walkLockfiles(real, visited, referenced)
 			}
-			info = target
+			// A file symlink counts under its target's name, as before.
+			name, isDir = target.Name(), false
 		}
-		if !info.IsDir() && info.Name() == "package-lock.json" {
+		if !isDir && name == "package-lock.json" {
 			hash, err := hashFile(path)
 			if err != nil {
 				return fmt.Errorf("hashing %s: %w", path, err)

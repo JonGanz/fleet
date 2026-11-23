@@ -244,3 +244,31 @@ func TestPrintGCReportJSON(t *testing.T) {
 		t.Errorf("empty stale should be [] not null: %s", buf.String())
 	}
 }
+
+func TestReferencedHashesFileSymlinks(t *testing.T) {
+	real := t.TempDir()
+	lock := filepath.Join(real, "package-lock.json")
+	os.WriteFile(lock, []byte(`{"linked":1}`), 0o644)
+	want, _ := hashFile(lock)
+
+	root := t.TempDir()
+	// A symlink named package-lock.json pointing at a lockfile counts...
+	os.MkdirAll(filepath.Join(root, "wt"), 0o755)
+	os.Symlink(lock, filepath.Join(root, "wt", "package-lock.json"))
+	// ...and a symlink named node_modules is never followed.
+	nm := t.TempDir()
+	os.WriteFile(filepath.Join(nm, "package-lock.json"), []byte(`{"inside":1}`), 0o644)
+	ignored, _ := hashFile(filepath.Join(nm, "package-lock.json"))
+	os.Symlink(nm, filepath.Join(root, "wt", "node_modules"))
+
+	got, err := referencedHashes([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got[want] {
+		t.Error("symlinked package-lock.json should be referenced")
+	}
+	if got[ignored] {
+		t.Error("lockfile behind a node_modules symlink must be ignored")
+	}
+}

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -67,9 +69,11 @@ func windowsRemoveScript(winPath string) string {
 // powershell.exe from WSL. See fleet-task/winpath.go's identical helper for
 // the full rationale (PATH resolution happens inside the spawned
 // PowerShell's own environment; `exit $LASTEXITCODE` is required for
-// correct exit-code propagation). Output goes to stderr.
-func runWindowsCommand(winDir string, args ...string) error {
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", windowsCommandScript(winDir, args))
+// correct exit-code propagation). Output goes to stderr. Cancelling ctx
+// stops powershell.exe (see stopOnCancel).
+func runWindowsCommand(ctx context.Context, winDir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-Command", windowsCommandScript(winDir, args))
+	stopOnCancel(cmd)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -136,14 +140,28 @@ func driveLetter(winPath string) string {
 // checkSameDrive verifies every non-empty win32 path in labeled resolves to
 // the same drive letter, returning a clear error naming the mismatched pair
 // if not. NTFS hardlinks fail across volumes, so the Windows worktree and
-// Windows cache root must live on the same drive.
+// Windows cache root must live on the same drive. Labels are checked in
+// sorted order so the outcome (and message) never depends on map iteration.
+// A path without a drive letter (e.g. a \\wsl.localhost\... UNC path, i.e.
+// something living inside the WSL filesystem) is an error of its own: it is
+// not on an NTFS volume at all, so it can't take part in NTFS hardlinking.
 func checkSameDrive(labeled map[string]string) error {
+	labels := make([]string, 0, len(labeled))
+	for label := range labeled {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+
 	var firstLabel, firstDrive string
-	for label, winPath := range labeled {
+	for _, label := range labels {
+		winPath := labeled[label]
 		if winPath == "" {
 			continue
 		}
 		d := driveLetter(winPath)
+		if d == "" {
+			return fmt.Errorf("%s (%s) is not on a Windows drive (no drive letter); it must be on an NTFS drive such as C: for hardlinking to work", label, winPath)
+		}
 		if firstDrive == "" {
 			firstLabel, firstDrive = label, d
 			continue

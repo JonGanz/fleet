@@ -176,3 +176,22 @@ func TestSameDevice(t *testing.T) {
 		t.Error("nearestExisting returned empty")
 	}
 }
+
+func TestHardlinkTreeKeepsDirSymlinksAsSymlinks(t *testing.T) {
+	src := t.TempDir()
+	dst := filepath.Join(t.TempDir(), "node_modules")
+	os.MkdirAll(filepath.Join(src, "real", "inner"), 0o755)
+	os.WriteFile(filepath.Join(src, "real", "inner", "f"), []byte("x"), 0o644)
+	os.Symlink("real", filepath.Join(src, "linked"))
+
+	if err := hardlinkTree(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(filepath.Join(dst, "linked"))
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("dir symlink must be recreated as a symlink, not descended into: %v %v", fi, err)
+	}
+	if target, _ := os.Readlink(filepath.Join(dst, "linked")); target != "real" {
+		t.Errorf("symlink target = %q", target)
+	}
+}

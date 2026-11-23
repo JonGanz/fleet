@@ -6,7 +6,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
+)
+
+// version is set at build time via -ldflags "-X main.version=<version>";
+// see versionString for the fallback when it is left at "dev".
+var version = "dev"
+
+// Exit codes, shared with fleet-task and fleet-run.
+const (
+	exitOK     = 0
+	exitFailed = 1
+	exitUsage  = 2
 )
 
 const usage = `fleet-cache: node_modules hardlink cache keyed by package-lock.json hash
@@ -63,9 +75,24 @@ Usage:
       Windows-native counterpart of gc; same --roots/--force/--json rules,
       scanning/deleting against the Windows-native cache root instead.
 
+  fleet-cache list [--json] [--cache-root <dir>]
+      List cache entries (hash, complete or not, last modified, on-disk
+      size) and in-progress/abandoned <hash>.tmp-<pid> staging dirs.
+      Read-only. Pass a WSL-visible Windows cache root via --cache-root to
+      list the Windows-native cache.
+
+      --json         Print the listing as JSON on stdout.
+      --cache-root   Cache root; overrides $FLEET_CACHE_DIR.
+
+  fleet-cache version | --version
+      Print "fleet-cache <version>".
+
 Flags may appear before or after <dir>. Progress and status messages
 (including npm's output) go to stderr; stdout carries only results
-(gc's report, --json). Usage errors exit 1.
+(gc's report, list, --json, version).
+
+Exit codes: 0 ok, 1 operation failed (including an interrupted ensure),
+2 usage error.
 `
 
 // stringSliceFlag accumulates repeated --roots flags in addition to
@@ -95,7 +122,8 @@ type command struct {
 	posName string
 	// setup registers the command's flags on fs and returns the function
 	// that runs it once parsing succeeded (pos holds the positional args).
-	setup func(fs *flag.FlagSet) func(pos []string) error
+	// stdout is where the command's results go.
+	setup func(fs *flag.FlagSet, stdout io.Writer) func(pos []string) error
 }
 
 const (
@@ -103,15 +131,16 @@ const (
 	forceGCHelp     = "REALLY DELETE stale entries; without it (or without --roots) gc only reports what it would remove"
 	rootsHelp       = "directory (repeatable or comma-separated) to scan recursively for package-lock.json files; must exist"
 	jsonHelp        = "print the gc report as JSON on stdout"
+	listJSONHelp    = "print the listing as JSON on stdout"
 )
 
 var commands = []command{
-	{"ensure", "<dir>", func(fs *flag.FlagSet) func([]string) error {
+	{"ensure", "<dir>", func(fs *flag.FlagSet, _ io.Writer) func([]string) error {
 		force := fs.Bool("force", false, forceEnsureHelp)
 		root := fs.String("cache-root", "", "cache root; overrides $FLEET_CACHE_DIR")
 		return func(pos []string) error { return runEnsure(pos[0], *force, *root) }
 	}},
-	{"gc", "", func(fs *flag.FlagSet) func([]string) error {
+	{"gc", "", func(fs *flag.FlagSet, _ io.Writer) func([]string) error {
 		var roots stringSliceFlag
 		fs.Var(&roots, "roots", rootsHelp)
 		force := fs.Bool("force", false, forceGCHelp)
@@ -119,18 +148,23 @@ var commands = []command{
 		root := fs.String("cache-root", "", "cache root; overrides $FLEET_CACHE_DIR")
 		return func([]string) error { return runGC(roots.values, *force, *asJSON, *root) }
 	}},
-	{"ensure-windows", "<wsl-dir>", func(fs *flag.FlagSet) func([]string) error {
+	{"ensure-windows", "<wsl-dir>", func(fs *flag.FlagSet, _ io.Writer) func([]string) error {
 		force := fs.Bool("force", false, forceEnsureHelp)
 		root := fs.String("cache-root", "", "WSL-visible path to the Windows-native cache root (repos.yaml's windows_cache_root); auto-detected via %LOCALAPPDATA% if omitted")
 		return func(pos []string) error { return runEnsureWindows(pos[0], *force, *root) }
 	}},
-	{"gc-windows", "", func(fs *flag.FlagSet) func([]string) error {
+	{"gc-windows", "", func(fs *flag.FlagSet, _ io.Writer) func([]string) error {
 		var roots stringSliceFlag
 		fs.Var(&roots, "roots", rootsHelp)
 		force := fs.Bool("force", false, forceGCHelp)
 		asJSON := fs.Bool("json", false, jsonHelp)
 		root := fs.String("cache-root", "", "WSL-visible path to the Windows-native cache root; auto-detected via %LOCALAPPDATA% if omitted")
 		return func([]string) error { return runGCWindows(roots.values, *force, *asJSON, *root) }
+	}},
+	{"list", "", func(fs *flag.FlagSet, stdout io.Writer) func([]string) error {
+		asJSON := fs.Bool("json", false, listJSONHelp)
+		root := fs.String("cache-root", "", "cache root (any WSL-visible path, including a Windows cache root); overrides $FLEET_CACHE_DIR")
+		return func([]string) error { return runList(stdout, *asJSON, *root) }
 	}},
 }
 
@@ -161,18 +195,23 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 }
 
 // run executes fleet-cache with args (excluding the program name) and
-// returns the process exit code: 0 success, 1 any failure including usage
-// errors (consistent with fleet-task/fleet-run).
+// returns the process exit code: exitOK, exitFailed for an operation that
+// failed, exitUsage for a usage error (as fleet-task and fleet-run do).
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprint(stderr, usage)
-		return 1
+		return usageError(stderr, "fleet-cache: missing command")
 	}
 	name := args[0]
 	switch name {
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
-		return 0
+		return exitOK
+	case "--version", "version":
+		if len(args) > 1 {
+			return usageError(stderr, fmt.Sprintf("fleet-cache %s: unexpected argument %q", name, args[1]))
+		}
+		fmt.Fprintf(stdout, "fleet-cache %s\n", versionString())
+		return exitOK
 	}
 
 	for _, c := range commands {
@@ -181,19 +220,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		fs := flag.NewFlagSet(c.name, flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
-		runFn := c.setup(fs)
+		runFn := c.setup(fs, stdout)
 		pos, err := parseInterspersed(fs, args[1:])
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, usage)
 			fmt.Fprintf(stdout, "\nFlags of %s:\n", c.name)
 			fs.SetOutput(stdout)
 			fs.PrintDefaults()
-			return 0
+			return exitOK
 		}
 		if err != nil {
-			fmt.Fprintf(stderr, "fleet-cache %s: %v\n\n", c.name, err)
-			fmt.Fprint(stderr, usage)
-			return 1
+			return usageError(stderr, fmt.Sprintf("fleet-cache %s: %v", c.name, err))
 		}
 		want := 0
 		if c.posName != "" {
@@ -201,23 +238,67 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		if len(pos) != want {
 			if want == 1 {
-				fmt.Fprintf(stderr, "fleet-cache %s: expected exactly one %s argument\n\n", c.name, c.posName)
-			} else {
-				fmt.Fprintf(stderr, "fleet-cache %s: unexpected argument %q\n\n", c.name, pos[0])
+				return usageError(stderr, fmt.Sprintf("fleet-cache %s: expected exactly one %s argument", c.name, c.posName))
 			}
-			fmt.Fprint(stderr, usage)
-			return 1
+			return usageError(stderr, fmt.Sprintf("fleet-cache %s: unexpected argument %q", c.name, pos[0]))
 		}
 		if err := runFn(pos); err != nil {
 			fmt.Fprintf(stderr, "fleet-cache %s: %v\n", c.name, err)
-			return 1
+			return exitFailed
 		}
-		return 0
+		return exitOK
 	}
 
-	fmt.Fprintf(stderr, "fleet-cache: unknown command %q\n\n", name)
+	return usageError(stderr, fmt.Sprintf("fleet-cache: unknown command %q", name))
+}
+
+// usageError prints msg and the usage text to stderr and returns exitUsage.
+func usageError(stderr io.Writer, msg string) int {
+	fmt.Fprintf(stderr, "%s\n\n", msg)
 	fmt.Fprint(stderr, usage)
-	return 1
+	return exitUsage
+}
+
+// versionString returns the -ldflags version, else whatever the Go
+// toolchain recorded about the build (module version or VCS revision).
+func versionString() string {
+	info, ok := debug.ReadBuildInfo()
+	return resolveVersion(version, info, ok)
+}
+
+// resolveVersion picks the version to report: the -ldflags value when set,
+// else the module version (set by `go install module@vX`), else the VCS
+// revision (suffixed "-dirty" for a modified tree), else "dev".
+func resolveVersion(ldflagsVersion string, info *debug.BuildInfo, ok bool) string {
+	if ldflagsVersion != "" && ldflagsVersion != "dev" {
+		return ldflagsVersion
+	}
+	if !ok || info == nil {
+		return "dev"
+	}
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	var revision string
+	var modified bool
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			modified = s.Value == "true"
+		}
+	}
+	if revision == "" {
+		return "dev"
+	}
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	if modified {
+		revision += "-dirty"
+	}
+	return revision
 }
 
 func main() {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"fmt"
 	"os"
@@ -18,7 +19,7 @@ var hardlinkWindowsScript []byte
 // node_modules tree are populated entirely via native Windows processes
 // (PowerShell/npm), since hardlinks can't cross the WSL9P boundary and bulk
 // file operations across it are slow; only single-file operations here
-// (hashing, copying package.json/package-lock.json in, the skip marker)
+// (hashing, copying package.json/package-lock.json/.npmrc in, the skip marker)
 // stay as plain Go os.* calls, per the project's pragmatic scope decision.
 //
 // Like ensure, it skips (leaving node_modules -- and any `npm link`s --
@@ -65,19 +66,21 @@ func runEnsureWindows(wslWorktreeDir string, force bool, cacheRootFlag string) e
 		}
 		return runWindowsRemoveAll(winPath)
 	}
-	err = ensureCacheEntry(entryWSL, hash, lockPath, entryOps{
-		install: func(staging string) error {
+	ctx, stopInterrupts := interruptContext()
+	err = ensureCacheEntry(ctx, entryWSL, hash, lockPath, entryOps{
+		install: func(ctx context.Context, staging string) error {
 			stagingWin, err := wslToWindowsPath(staging)
 			if err != nil {
 				return err
 			}
-			if err := runWindowsCommand(stagingWin, "npm", "ci"); err != nil {
+			if err := runWindowsCommand(ctx, stagingWin, "npm", "ci"); err != nil {
 				return fmt.Errorf("npm ci failed in %s: %w", stagingWin, err)
 			}
 			return nil
 		},
 		remove: removeWin,
 	})
+	stopInterrupts()
 	if err != nil {
 		return err
 	}

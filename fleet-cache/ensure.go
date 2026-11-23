@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -94,9 +95,11 @@ func runEnsure(dir string, force bool, cacheRootFlag string) error {
 	}
 
 	entry := filepath.Join(nodeCacheDir(root), hash)
-	err = ensureCacheEntry(entry, hash, lockPath, entryOps{
-		install: func(staging string) error {
-			cmd := exec.Command("npm", "ci")
+	ctx, stopInterrupts := interruptContext()
+	err = ensureCacheEntry(ctx, entry, hash, lockPath, entryOps{
+		install: func(ctx context.Context, staging string) error {
+			cmd := exec.CommandContext(ctx, "npm", "ci")
+			stopOnCancel(cmd)
 			cmd.Dir = staging
 			// npm's output goes to stderr too: stdout is reserved for
 			// machine-readable output and must not interleave with callers'.
@@ -115,6 +118,7 @@ func runEnsure(dir string, force bool, cacheRootFlag string) error {
 		},
 		remove: os.RemoveAll,
 	})
+	stopInterrupts()
 	if err != nil {
 		return err
 	}

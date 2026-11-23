@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -43,7 +44,7 @@ func TestParseInterspersed(t *testing.T) {
 	}
 }
 
-func TestRunUsageErrorsExitOne(t *testing.T) {
+func TestRunUsageErrorsExitTwo(t *testing.T) {
 	for _, args := range [][]string{
 		nil,
 		{"bogus"},
@@ -51,10 +52,13 @@ func TestRunUsageErrorsExitOne(t *testing.T) {
 		{"ensure", "a", "b"},
 		{"ensure", "--nope", "a"},
 		{"gc", "extra"},
+		{"list", "extra"},
+		{"list", "--force"},
+		{"version", "extra"},
 	} {
 		var out, errb bytes.Buffer
-		if code := run(args, &out, &errb); code != 1 {
-			t.Errorf("%v: exit %d, want 1", args, code)
+		if code := run(args, &out, &errb); code != exitUsage {
+			t.Errorf("%v: exit %d, want %d", args, code, exitUsage)
 		}
 		if !strings.Contains(errb.String(), "Usage:") {
 			t.Errorf("%v: usage not printed to stderr: %q", args, errb.String())
@@ -66,13 +70,86 @@ func TestRunUsageErrorsExitOne(t *testing.T) {
 }
 
 func TestRunHelpExitsZero(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}} {
+		var out, errb bytes.Buffer
+		if code := run(args, &out, &errb); code != 0 || !strings.Contains(out.String(), "Usage:") || errb.Len() != 0 {
+			t.Errorf("%v: code %d out %q err %q", args, code, out.String(), errb.String())
+		}
+	}
+	for _, args := range [][]string{{"gc", "-h"}, {"list", "--help"}, {"ensure", "--help", "dir"}} {
+		var out, errb bytes.Buffer
+		if code := run(args, &out, &errb); code != 0 || !strings.Contains(out.String(), "Flags of "+args[0]) || errb.Len() != 0 {
+			t.Errorf("%v: code %d out %q err %q", args, code, out.String(), errb.String())
+		}
+	}
+}
+
+func TestRunOperationalFailureExitsOne(t *testing.T) {
 	var out, errb bytes.Buffer
-	if code := run([]string{"--help"}, &out, &errb); code != 0 || !strings.Contains(out.String(), "Usage:") {
-		t.Errorf("help: code %d out %q", code, out.String())
+	if code := run([]string{"ensure", t.TempDir()}, &out, &errb); code != exitFailed {
+		t.Errorf("missing lockfile: exit %d, want %d (%s)", code, exitFailed, errb.String())
+	}
+	if strings.Contains(errb.String(), "Usage:") {
+		t.Errorf("operational failure must not print usage: %q", errb.String())
+	}
+}
+
+func TestRunVersion(t *testing.T) {
+	for _, args := range [][]string{{"version"}, {"--version"}} {
+		var out, errb bytes.Buffer
+		if code := run(args, &out, &errb); code != 0 {
+			t.Fatalf("%v: exit %d: %s", args, code, errb.String())
+		}
+		if !strings.HasPrefix(out.String(), "fleet-cache ") || !strings.HasSuffix(out.String(), "\n") {
+			t.Errorf("%v: stdout = %q", args, out.String())
+		}
+	}
+}
+
+func TestResolveVersion(t *testing.T) {
+	vcs := func(rev, modified string) *debug.BuildInfo {
+		return &debug.BuildInfo{
+			Main:     debug.Module{Version: "(devel)"},
+			Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: rev}, {Key: "vcs.modified", Value: modified}},
+		}
+	}
+	cases := []struct {
+		name     string
+		ldflags  string
+		info     *debug.BuildInfo
+		ok       bool
+		expected string
+	}{
+		{"ldflags wins", "v1.2.3", vcs("0123456789abcdef", "false"), true, "v1.2.3"},
+		{"module version", "dev", &debug.BuildInfo{Main: debug.Module{Version: "v0.4.0"}}, true, "v0.4.0"},
+		{"vcs revision", "dev", vcs("0123456789abcdef", "false"), true, "0123456789ab"},
+		{"dirty tree", "dev", vcs("0123456789abcdef", "true"), true, "0123456789ab-dirty"},
+		{"short revision", "dev", vcs("abc", "false"), true, "abc"},
+		{"no vcs info", "dev", &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, true, "dev"},
+		{"no build info", "dev", nil, false, "dev"},
+		{"empty ldflags", "", nil, false, "dev"},
+	}
+	for _, c := range cases {
+		if got := resolveVersion(c.ldflags, c.info, c.ok); got != c.expected {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.expected)
+		}
+	}
+}
+
+func TestRunListEndToEnd(t *testing.T) {
+	cache := t.TempDir()
+	os.MkdirAll(filepath.Join(cache, "node-cache", "abc", "node_modules"), 0o755)
+
+	var out, errb bytes.Buffer
+	if code := run([]string{"list", "--json", "--cache-root", cache}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), `"name": "abc"`) {
+		t.Errorf("stdout = %q", out.String())
 	}
 	out.Reset()
-	if code := run([]string{"gc", "-h"}, &out, &errb); code != 0 || !strings.Contains(out.String(), "-force") {
-		t.Errorf("gc -h: code %d", code)
+	if code := run([]string{"list", "--cache-root", cache}, &out, &errb); code != 0 || !strings.Contains(out.String(), "abc") {
+		t.Errorf("text list: exit %d, stdout %q", code, out.String())
 	}
 }
 
