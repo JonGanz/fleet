@@ -25,8 +25,6 @@ decisions.
   skill point to it instead of a raw `rm`.
 - **Function order:** sort functions alphabetically within every file (methods grouped under their
   type), as a dedicated pass after the restructure; no CI enforcement.
-- **CI:** pin staticcheck to v0.8.2; govulncheck stays at `@latest` on purpose (its job is to
-  surface new vulnerabilities).
 
 ## Feature ideas (not started)
 - `fleet-task doctor` / `validate`: dependencies, config, orphans (worktree without state, state
@@ -64,7 +62,7 @@ decisions.
 - `fleet-run attach` and the interactive pickers (no tty in tests; only the pickers' state
   machines are unit tested).
 - The CI workflow and dependabot config: never run on GitHub, only parsed as YAML.
-- shellcheck and staticcheck were never run locally (not installed).
+- shellcheck was never run locally (not installed).
 
 ## Decisions kept as-is (revisit only if wanted)
 - `--force` means "rebuild" on `ensure`, "really delete" on `gc`, and "skip the
@@ -86,3 +84,5 @@ decisions.
 - No cross-binary version check: the three binaries are built and installed together from one
   module, so skew is unlikely; only the state file carries `schema_version`.
 - install.sh keeps the `FLEET_VERSION` override and the relative-`BIN_DIR` fix.
+- CI pins staticcheck (v0.8.2, bumped by hand); govulncheck stays at `@latest` on purpose, to
+  surface newly published vulnerabilities.

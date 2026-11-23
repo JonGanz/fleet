@@ -48,7 +48,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 
   govulncheck:
     runs-on: ubuntu-latest
