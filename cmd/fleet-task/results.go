@@ -11,14 +11,21 @@ type opResult struct {
 }
 
 // repoResult is one repo's outcome within an opResult. Action is one of
-// "created", "removed", "moved" or "skipped".
+// "created", "removed", "moved" or "skipped". Adopted marks a "created"
+// repo whose worktree already existed (Patches is then null: unknown).
+// BranchDeleted is set for every successful "removed" repo: whether its
+// local branch was deleted from the base, with BranchKeptReason saying why
+// not.
 type repoResult struct {
-	Repo         string   `json:"repo"`
-	Action       string   `json:"action"`
-	OK           bool     `json:"ok"`
-	Branch       string   `json:"branch,omitempty"`
-	WorktreePath string   `json:"worktree_path,omitempty"`
-	Patches      []string `json:"patches"`
-	PatchErrors  []string `json:"patch_errors,omitempty"`
-	Error        string   `json:"error,omitempty"`
+	Repo             string   `json:"repo"`
+	Action           string   `json:"action"`
+	OK               bool     `json:"ok"`
+	Branch           string   `json:"branch,omitempty"`
+	WorktreePath     string   `json:"worktree_path,omitempty"`
+	Patches          []string `json:"patches"`
+	PatchErrors      []string `json:"patch_errors,omitempty"`
+	Adopted          bool     `json:"adopted,omitempty"`
+	BranchDeleted    *bool    `json:"branch_deleted,omitempty"`
+	BranchKeptReason string   `json:"branch_kept_reason,omitempty"`
+	Error            string   `json:"error,omitempty"`
 }

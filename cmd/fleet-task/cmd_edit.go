@@ -37,7 +37,10 @@ type editOpts struct {
 	SkipPatches []string
 	NoPatches   bool
 	Force       bool // skip the uncommitted-changes guard on removals
-	JSON        bool
+	// BranchMode says what to do with removed repos' local branches
+	// (branchAuto, branchKeep or branchDelete).
+	BranchMode string
+	JSON       bool
 }
 
 // cmdEdit lets an already-created task's repo list grow or shrink: repos
@@ -112,6 +115,9 @@ func cmdEdit(o editOpts) error {
 		if err := checkRemovable(cfg, reposNamed(st.Repos, toRemove), o.Force); err != nil {
 			return err
 		}
+		if err := checkBranchDeletion(cfg, reposNamed(st.Repos, toRemove), o.BranchMode, o.Force); err != nil {
+			return err
+		}
 	}
 
 	// Decide every to-be-added repo's patches up front too, for the same
@@ -127,7 +133,7 @@ func cmdEdit(o editOpts) error {
 		patchesByRepo = selectPatchesFor(cfg, toAdd)
 	}
 
-	removeResults, err := editRemovePhase(cfg, ticket, tf, st, toRemove)
+	removeResults, err := editRemovePhase(cfg, ticket, tf, st, toRemove, o.BranchMode)
 	if err != nil {
 		return err
 	}
@@ -236,8 +242,9 @@ func selectEditRepos(cfg *config.ReposConfig, ticket string, st *taskstate.State
 // in place and persisting it before any additions start, so a failure
 // partway through additions doesn't lose already-successful removals. Repos
 // that fail to remove stay in the task (same partial-failure contract as
-// `rm`), so a rerun of `edit` retries them.
-func editRemovePhase(cfg *config.ReposConfig, ticket, tf string, st *taskstate.State, toRemove []string) (results []repoResult, err error) {
+// `rm`), so a rerun of `edit` retries them. branchMode is passed on to
+// removeRepoWorktree.
+func editRemovePhase(cfg *config.ReposConfig, ticket, tf string, st *taskstate.State, toRemove []string, branchMode string) (results []repoResult, err error) {
 	toRemoveSet := make(map[string]bool, len(toRemove))
 	for _, name := range toRemove {
 		toRemoveSet[name] = true
@@ -251,15 +258,16 @@ func editRemovePhase(cfg *config.ReposConfig, ticket, tf string, st *taskstate.S
 			continue
 		}
 		res := repoResult{Repo: r.Repo, Action: "removed", Branch: r.Branch, WorktreePath: r.WorktreePath, Patches: r.Patches}
-		if err := removeRepoWorktree(cfg, st, r); err != nil {
+		branch, err := removeRepoWorktree(cfg, st, r, branchMode)
+		if err != nil {
 			cli.Warnf("removing worktree %s: %v", r.WorktreePath, err)
 			kept = append(kept, r)
 			res.Error = err.Error()
 			results = append(results, res)
 			continue
 		}
-		fmt.Fprintf(out, "removed worktree %s (%s)\n", r.WorktreePath, r.Repo)
 		res.OK = true
+		res.setBranchOutcome(branch)
 		results = append(results, res)
 		removed++
 	}

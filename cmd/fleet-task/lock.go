@@ -73,13 +73,15 @@ func lockTicket(path string) (unlock func(), err error) {
 }
 
 // lockHeldError explains who holds a live lock and how to clear it if that
-// owner is actually gone (e.g. pid reuse).
+// owner is actually gone (e.g. pid reuse): `fleet-task unlock`, never a raw
+// rm, so the owner check happens again first.
 func lockHeldError(lockPath, contents string) error {
 	owner := "an unknown process"
 	if pid, ok := parseLockPid(contents); ok {
 		owner = fmt.Sprintf("pid %d", pid)
 	}
-	return fmt.Errorf("task is locked by another fleet-task (%s, lock file %s); wait for it to finish, or if no other fleet-task is running, remove the lock with `rm %s`", owner, lockPath, lockPath)
+	ticket := ticketOfLock(lockPath)
+	return fmt.Errorf("task is locked by another fleet-task (%s, lock file %s); wait for it to finish, or if no other fleet-task is running, run `fleet-task unlock %s`", owner, lockPath, ticket)
 }
 
 // lockIsStale decides whether a lock file can be taken over. A live owner
@@ -171,4 +173,10 @@ func takeOverStaleLock(lockPath string) error {
 		return fmt.Errorf("lock %s changed hands while taking it over (%v); retry", lockPath, err)
 	}
 	return lockHeldError(lockPath, contents)
+}
+
+// ticketOfLock returns the ticket id a lock file belongs to: its name is
+// <ticket>.json.lock (see lockTicket).
+func ticketOfLock(lockPath string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(filepath.Base(lockPath), ".lock"), ".json")
 }

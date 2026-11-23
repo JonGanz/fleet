@@ -416,6 +416,37 @@ func TestIntegrationRunHooks(t *testing.T) {
 	}
 }
 
+// TestIntegrationPreRunVeto: a pre-run hook that exits non-zero cancels its
+// window (reported failed, with the hook and exit status), the other window
+// still starts, and the command fails.
+func TestIntegrationPreRunVeto(t *testing.T) {
+	e := newITEnv(t)
+	script := "#!/bin/sh\n[ \"$FLEET_RUN_NAME\" = api ] && exit 9\nexit 0\n"
+	mustWrite(t, filepath.Join(e.cfgDir, "hooks", hooks.PreRun, "10-veto-api"), script, 0o755)
+	var rep StartReport
+	err := runJSON(t, &rep, "start", "--ticket", "A-1", "backend:api", "my.app:dev", "--json")
+	if err == nil {
+		t.Fatal("want a failure exit")
+	}
+	if rep.OK || len(rep.Results) != 2 {
+		t.Fatalf("report = %+v", rep)
+	}
+	api, dev := rep.Results[0], rep.Results[1]
+	if api.Status != startStatusFailed || !strings.Contains(api.Error, "10-veto-api failed: exit status 9") {
+		t.Errorf("api result = %+v", api)
+	}
+	if dev.Status != startStatusStarted {
+		t.Errorf("dev result = %+v", dev)
+	}
+	panes := itStatus(t).Panes
+	if _, ok := findPane(panes, "backend-api"); ok {
+		t.Error("vetoed window backend-api was created")
+	}
+	if _, ok := findPane(panes, "my.app-dev"); !ok {
+		t.Error("window my.app-dev missing")
+	}
+}
+
 func TestIntegrationStopWithNothingRunning(t *testing.T) {
 	newITEnv(t)
 	// No server at all: bare stop (no terminal) still succeeds.

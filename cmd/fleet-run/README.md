@@ -120,9 +120,17 @@ FLEET_RUN_NAME=<run name>
 ```
 
 Hook stdout and stderr both go to fleet-run's stderr (stdout is reserved for
-results such as `--json`). A failing hook only prints a warning; it never
-blocks the launch (same policy as fleet-task's hooks). There is no timeout,
-so a hook that hangs blocks `start`.
+results such as `--json`). Hooks get no stdin and run in their own process
+group; each is killed (with everything it started) after `hooks.timeout` in
+repos.yaml (a Go duration, default `5m`).
+
+A **`pre-run` hook that exits non-zero, times out or can't start cancels that
+window**: it is neither created nor respawned, it is reported `failed` (the
+`error` names the hook's path and exit status), the other targets are still
+attempted, and the command exits 1. The `pre-run` hooks after it don't run.
+When `start` switches tickets, the old ticket's windows are already stopped
+by then. A failing **`post-run`** hook only prints a warning (same policy as
+fleet-task's hooks).
 
 ## Commands
 
@@ -205,8 +213,9 @@ status `status` reports; `start` respawns it.
    - window exists, pane dead: `tmux respawn-pane -k -t @<id>` with the
      target's current directory and command (`respawned`).
 
-   `pre-run` hooks run before each create/respawn and `post-run` hooks after
-   a successful one (see [Hooks](#hooks)).
+   `pre-run` hooks run before each create/respawn (a failing one cancels
+   that target: `failed`) and `post-run` hooks after a successful one (see
+   [Hooks](#hooks)).
 7. Right after the first window is created or respawned (or immediately, if
    the session already had windows) sets
    `@fleet_task_ticket`/`@fleet_task_description`. If setting them fails,
@@ -377,8 +386,9 @@ interactive terminal is covered by unit tests (`go test ./...`):
   `repos.yaml`.
 - `stop_logic_test.go` — the `--ticket`-matches-active safety assertion,
   positional `repo:run-name` parsing, picker label/window-name mapping.
-- `hooks_test.go` — run-hook environment and running real hooks (ordering,
-  a failing hook not stopping the next).
+- `hooks_test.go` — run-hook environment and running real hooks (a failing
+  `pre-run` hook vetoing and stopping the hooks after it, a failing
+  `post-run` hook only warning).
 - `version_test.go` — the `-ldflags` version stamp.
 - `cmd_attach_test.go` — `$TMUX` same-server detection, terminal requirement.
 - `tmux_cmd_test.go` — the pure argv-building functions for every `tmux`

@@ -47,7 +47,9 @@ result's `patch_errors` and left out of the recorded `patches`.
    with git/hook/cache work.
 4. For each selected repo, in order:
    - Runs `pre-create` hooks. These run *first*, before the repo's base
-     clone is ensured, so they must not assume the base exists yet.
+     clone is ensured, so they must not assume the base exists yet. A hook
+     that exits non-zero (or times out) cancels this repo: nothing else is
+     done for it and it is reported as failed (see [Hooks](#hooks)).
    - Ensures the repo's shared bare clone (`base` in `repos.yaml`; a clone with
      history but no checked-out files) exists and is current: created on first
      use (`git init --bare` + `remote add origin` + `fetch`, so no local
@@ -61,8 +63,22 @@ result's `patch_errors` and left out of the recorded `patches`.
      clone/fetch (once per run) and warns (but doesn't block) if no identity
      looks loaded. Without a terminal, WSL-side git runs with
      `GIT_TERMINAL_PROMPT=0`, so an HTTPS credential prompt fails instead of
-     hanging.
-   - Creates a worktree at `<worktree_root>/<ticket>/<repo>` on a branch
+     hanging, and its fetch with `GIT_SSH_COMMAND="ssh -o BatchMode=yes"`
+     so an ssh passphrase or host-key prompt fails too — unless you set
+     `GIT_SSH_COMMAND` or `GIT_SSH` yourself or configured
+     `core.sshCommand` (never overridden). Windows `git.exe` is left alone:
+     its SSH setup is separate from WSL's, so set BatchMode there yourself if
+     you need it. The fetch is killed after `git.network_timeout` (repos.yaml,
+     default `10m`) and the repo reported as failed.
+   - If `<worktree_root>/<ticket>/<repo>` already is a worktree of this
+     repo's base on the expected branch — left by an interrupted `new` or
+     `edit --add` — it is **adopted**: no `worktree add`, no patches (they
+     may already be applied; `patches` is recorded as `null` = unknown, and
+     the output says so; `"adopted": true` in JSON); the steps below from
+     `post-create` on still run. Anything else at that path (a plain
+     directory, another repo's checkout, a worktree on another branch) is an
+     error naming what was found and is left untouched.
+   - Otherwise creates a worktree at `<worktree_root>/<ticket>/<repo>` on a branch
      computed from `branch_template` (repos.yaml, per-repo or fleet-wide
      default — see "Design notes" below; defaults to the plain ticket id if
      unset). In order: if a local branch of that name exists (a rerun, or a
@@ -81,7 +97,10 @@ result's `patch_errors` and left out of the recorded `patches`.
    - Writes `<state dir>/tasks/<ticket>.json` right after each repo succeeds,
      so an interrupted `new` (Ctrl-C during a long `npm ci`) still leaves a
      task listing every worktree created so far, which `edit --add` / `rm`
-     can then deal with.
+     can then deal with (`edit --add` of the repo it was working on adopts
+     that worktree; if no state file was written, rerun `new`). A killed
+     `new` also leaves the ticket's lock: the next command takes it over once
+     the pid is gone, or use `fleet-task unlock <ticket>`.
 5. If some repos failed, every repo is still attempted, the successful ones
    are recorded, and `new` exits 1 at the end; add the failed ones later
    with `fleet-task edit`. If none succeeded, no state file is written.
@@ -168,7 +187,7 @@ subprocess can't `cd` its parent shell). With a ticket argument, only that ticke
 are offered. If selection is cancelled (e.g. `Esc`/`q`),
 exits non-zero with no stdout output.
 
-### `fleet-task edit [ticket] [--add <repo>]... [--remove <repo>]... [--skip-patch <repo>:<name>]... [--no-patches] [--force] [--json]`
+### `fleet-task edit [ticket] [--add <repo>]... [--remove <repo>]... [--skip-patch <repo>:<name>]... [--no-patches] [--force] [--keep-branch | --delete-branch] [--json]`
 
 **Flag mode**: `--add`/`--remove` (repeatable or comma-separated) replace the
 pickers. Added repos must be configured and not yet attached, removed repos
@@ -203,7 +222,10 @@ down and recreating the whole task:
    empty-repos file behind — matching `rm`'s end state.
 
 Before removing anything, `edit` runs the same uncommitted-changes guard as
-`rm` (see below) over the repos being removed; `--force` skips it.
+`rm` (see below) over the repos being removed; `--force` skips it. A removed
+repo's local branch is handled exactly as by `rm` (`--keep-branch`,
+`--delete-branch`, the same confirmation). An added repo whose worktree
+already exists on the right branch is adopted, as in `new`.
 
 `edit` refuses to *remove* repos while the ticket is the one currently active
 in `fleet-run` (read from the `@fleet_task_ticket` tmux option), with a message
@@ -249,7 +271,7 @@ Branch names are **not** renamed — they come from `branch_template` and
 aren't necessarily derived from the ticket at all (see "Design notes"
 above), so `TaskRepo.Branch` is left as-is.
 
-### `fleet-task rm [ticket] [--force] [--json]`
+### `fleet-task rm [ticket] [--force] [--keep-branch | --delete-branch] [--json]`
 
 The ticket is optional: if omitted, a ticket picker is shown. Refuses if the
 ticket is currently active under `fleet-run`.
@@ -262,12 +284,30 @@ no: exit 1, nothing removed); without one (or with `FLEET_NO_INPUT=1`) it is
 a usage error (exit 2) naming `--force`, with nothing removed and, under
 `--json`, no JSON. A worktree whose directory is already gone has nothing to
 lose and doesn't trigger the guard. `--force` skips the check. Unpushed
-commits never block: the branch is kept.
+commits never block the removal itself (see the branch handling below).
 
-Then for each repo: runs `pre-remove` hooks, runs `git worktree remove
---force` (looking up the repo's `base` bare clone from `repos.yaml`; if the
-repo entry is gone, it best-effort falls back to a plain `worktree remove`
-and warns rather than aborting), then runs `post-remove` hooks. Two
+Then for each repo: runs `pre-remove` hooks (one that fails or times out
+cancels this repo's removal: worktree and branch stay, the repo stays in the
+task, `rm` exits 1), runs `git worktree remove --force` (looking up the
+repo's `base` bare clone from `repos.yaml`; if the repo entry is gone, it
+best-effort falls back to a plain `worktree remove` and warns rather than
+aborting), handles the local branch, then runs `post-remove` hooks.
+
+**Local branch.** By default the repo's branch is deleted from the base
+(`git branch -D`) only when every commit on it is on a remote-tracking ref
+(`git rev-list --count <branch> --not --remotes` is 0, as of the last fetch);
+otherwise it is kept and a warning says why and prints the `git branch -D`
+command. `--keep-branch` always keeps it. `--delete-branch` deletes it even
+with unpushed commits — but first, before anything is removed, the branches
+that would lose commits are listed and you must confirm `[y/N]` on a
+terminal; without one it is a usage error (exit 2, nothing removed) naming
+the flags, unless `--force` is given too (which skips that confirmation like
+it skips the changes guard). `--keep-branch` with `--delete-branch` is a
+usage error. The branch is always kept when the base is unknown (the
+fallback above); a branch that doesn't exist is fine; if git refuses
+(the branch is checked out in another worktree) that is reported and the
+branch kept — never a failed removal. `--json` gives each removed repo
+`branch_deleted` (true/false) and, when false, `branch_kept_reason`. Two
 self-healing cases: if git already deregistered the worktree but a leftover
 directory remains (a dev server raced the delete), the leftovers are swept;
 if the worktree directory was already deleted by hand, `rm` prunes git's stale
@@ -278,6 +318,19 @@ ticket's workspace directory **only if it is empty** — if it still holds
 files (notes, env files), it's left in place and `rm` prints what remains. A
 repo that fails to remove is kept in the state file (hooks still ran for it)
 so a rerun of `rm` retries just that repo, and `rm` exits 1.
+
+### `fleet-task unlock <ticket> [--force] [--json]`
+
+Removes the ticket's lock file (`<state dir>/tasks/<ticket>.json.lock`) left
+behind by a `fleet-task` that was killed. Only when the pid recorded in it is
+no longer running, or the lock has no readable pid and is older than a
+minute (the same rule commands use to take a stale lock over). If the owner
+is still running it refuses (exit 1, naming the pid) — that `fleet-task` is
+probably still working; `--force` removes it anyway, for a pid reused by an
+unrelated process. No lock: exit 0, saying so. A lock file with no state file
+(an interrupted `new`) can still be unlocked; a ticket with neither is "no
+task found" (exit 2). `--json` prints `{ticket, lock_file, had_lock, removed,
+owner_pid, owner_alive, error}`.
 
 ### Flags, help, and exit codes
 
@@ -296,8 +349,9 @@ trailing `.` or space (illegal in Windows filenames, which matter for
 `runtime: windows` worktrees). Letters, digits and `-_.+@` etc. are fine.
 
 `repos.yaml` is validated on load: repo names must be non-empty, unique, and
-plain (no `/` or `\`, not `.`/`..`), and `runtime` must be empty, `linux` or
-`windows`. `rm`/`mv` still work without a usable `repos.yaml` (warning if
+plain (no `/` or `\`, not `.`/`..`), `runtime` must be empty, `linux` or
+`windows`, and `hooks.timeout` / `git.network_timeout`, if set, must be Go
+durations (`90s`, `5m`) above 0 and at most `24h`. `rm`/`mv` still work without a usable `repos.yaml` (warning if
 it exists but is invalid).
 
 Exit status is 0 on success, 1 on any operation failure, including *partial*
@@ -306,7 +360,9 @@ some failed), and **2 for a usage error or missing input**: bad flags,
 unknown repo/patch names, an unknown ticket (`show`, `rm`, `edit`, `jump`,
 `mv`: "no task found for ticket X"), an existing ticket for `new` or as
 `mv`'s target, `mv` to the same name, an invalid ticket id or branch name,
-uncommitted changes blocking `rm`/`edit --remove` without a terminal, or a
+uncommitted changes blocking `rm`/`edit --remove` without a terminal,
+`--delete-branch` with unpushed commits without a terminal or `--force`,
+`--keep-branch` with `--delete-branch`, or a
 value that would need a prompt when prompting isn't allowed. Fatal errors print
 `fleet-task: error: ...` and non-fatal ones `fleet-task: warning: ...` on
 stderr.
@@ -317,7 +373,7 @@ pickers draw on `/dev/tty`, so without this an agent could open one on its
 user's terminal and hang. A missing value is an exit-2 error naming the flag
 or argument that supplies it.
 
-**`--json` on `new`, `edit`, `mv`, `rm`** prints one document on stdout
+**`--json` on `new`, `edit`, `mv`, `rm`** (and `unlock`, own shape above) prints one document on stdout
 (progress, hook and git output move to stderr), also when the command then
 exits 1:
 
@@ -331,7 +387,9 @@ exits 1:
 
 `action` is `created`, `removed`, `moved` or `skipped` (`mv` stops at the
 first failure; later repos are `skipped`). `renamed_from` appears only for
-`mv`, `patch_errors`/`error` only when non-empty. Usage errors (exit 2)
+`mv`, `patch_errors`/`error` only when non-empty, `adopted: true` only for an
+adopted worktree (its `patches` is `null`), `branch_deleted` /
+`branch_kept_reason` only for removed repos. Usage errors (exit 2)
 happen before any work and print no JSON.
 
 ### Hooks
@@ -340,8 +398,16 @@ Any executable file under `<config dir>/hooks/<phase>/*` runs (in
 filename-sorted order) at the matching point in `new`/`edit`/`rm`, with
 `FLEET_TICKET`, `FLEET_DESCRIPTION`, `FLEET_REPO`, `FLEET_BRANCH` and
 `FLEET_WORKTREE_DIR` set in its environment.
-Hook failures (non-zero exit) only print a warning to stderr — they never
-abort `new`/`edit`/`rm`. See `../../docs/CONTRACT.md` for the full contract.
+Hooks get no stdin and run in their own process group; each is killed (with
+everything it started) after `hooks.timeout` in repos.yaml (a Go duration,
+default `5m`). Ctrl-C while a hook runs stops it and fleet-task, as before.
+
+A **`pre-create` or `pre-remove` hook that exits non-zero, times out or can't
+start cancels that one repo**: nothing more is done for it, it is reported as
+failed (text, and `--json` `error` naming the hook's path and exit status),
+the other repos are still attempted, and the command exits 1. Later hooks in
+that phase don't run. **`post-*` hook failures only warn.** See
+`../../docs/CONTRACT.md` for the full contract.
 
 | Phase          | Runs around                                          |
 |----------------|-------------------------------------------------------|
@@ -392,8 +458,10 @@ authoritative table. Summary:
   unique name and re-checks it there, so two processes can't both "take
   over" and delete each other's fresh lock. `mv` locks the old and new
   ticket in sorted order. Per-ticket files make cross-ticket contention
-  impossible, so this only matters for the same ticket. (If a pid is reused
-  by an unrelated live process, the error says how to `rm` the lock.)
+  impossible, so this only matters for the same ticket. The "task is
+  locked" error points at `fleet-task unlock <ticket>`, which re-checks the
+  owner before removing anything (`--force` for a pid reused by an unrelated
+  live process).
 - **Selection UI**: `new` (repo/patch multiselect) and `jump` (worktree
   single-select) use an in-process [bubbletea](https://github.com/charmbracelet/bubbletea)
   picker (`internal/picker`, shared with fleet-run, single entry point
@@ -454,6 +522,15 @@ fixed author env; skipped if `git` is missing):
   upstream / typo'd default), branch-name validation.
 - `e2e_test.go` — `new` writing state after each repo (observed from a hook,
   which also checks the hook env), `mv` finishing an interrupted rename.
+- `lifecycle_test.go` — `pre-create`/`pre-remove` vetoes, adopting a leftover
+  worktree (and refusing other branches / plain directories), `rm`'s branch
+  cleanup (pushed, unpushed, `--keep-branch`, `--delete-branch` with and
+  without `--force`, git refusing a checked-out branch), the fetch timeout
+  (git's `ext::` transport as a hung remote), the BatchMode decision,
+  worktree-list parsing.
+- `cmd_unlock_test.go` — `unlock`'s decision and command (dead/live owner,
+  `--force`, pid-less locks, lock without a state file), and that a lock
+  changed meanwhile is put back.
 - `changes_test.go` — the uncommitted-changes check (patches excluded, edits
   inside/outside patched files, untracked, ignored, deleted or committed
   patch, unknown patches, missing worktree) and the `rm`/`edit --remove`
@@ -483,7 +560,8 @@ fixed author env; skipped if `git` is missing):
 Code shared with the other tools is tested in its `internal/` package:
 `config` (`repos.yaml` parsing against the contract's example, defaults,
 validation), `taskstate` (state file round-trip, listing, filename rule,
-`schema_version`, ticket-id validation), `hooks` (discovery, env, running),
+`schema_version`, ticket-id validation), `hooks` (discovery, env, running,
+pre-* veto, timeout), `proc` (timeout killing a whole process group),
 `picker` (the picker's state machine — vim navigation, toggling, filtering,
 preselection, cancel — driven with synthetic `tea.KeyMsg`s), `wsl` (PowerShell
 quoting/script builder, same-drive check), `cli` (exit codes, error prefixes,

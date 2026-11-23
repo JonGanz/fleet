@@ -19,11 +19,11 @@ binaries is unchanged.
 | Per-task state file | `<state dir>/tasks/<ticket>.json`                        | -                  |
 | Worktree root       | `<state dir>/worktrees/<ticket>/<repo>` (or `repos.yaml` `worktree_root`) | -   |
 | Cache dir           | `$XDG_CACHE_HOME/fleet` (default `~/.cache/fleet`)        | `FLEET_CACHE_DIR`  |
-| Node cache entries  | `<cache dir>/node-cache/<sha256 of package-lock.json>`   | -                  |
+| Node cache entries  | `<cache dir>/node-cache/<cache key: sha256 over package-lock.json + .npmrc, see fleet-cache README>` | - |
 | Windows base clone  | `repos.yaml` `windows_base` (or `defaults.windows_base_root`/<repo>) | -      |
 | Windows worktree root | `repos.yaml` top-level `windows_worktree_root` (required for `runtime: windows`) | - |
 | Windows cache root  | `repos.yaml` top-level `windows_cache_root`, else `%LOCALAPPDATA%\fleet` | -   |
-| Windows node cache entries | `<windows cache root>\node-cache\<sha256 of package-lock.json>` | -    |
+| Windows node cache entries | `<windows cache root>\node-cache\<cache key: sha256 over package-lock.json + .npmrc, see fleet-cache README>` | - |
 
 Resolution (`internal/xdg`): a non-empty `FLEET_*` override wins; it may be relative and is then
 made absolute against the working directory. Otherwise `$XDG_*_HOME/fleet` is used if the
@@ -44,6 +44,12 @@ before use.
 tmux:
   session_name: fleet             # fixed session name shared by ALL tickets; never renamed per-ticket
   config_file: ~/.config/fleet/tmux.conf   # optional; passed to `tmux -f` on session create
+
+hooks:
+  timeout: 5m                   # optional; every hook is killed after this long (default 5m)
+
+git:
+  network_timeout: 10m          # optional; fleet-task's network git (fetch) is killed after this long (default 10m)
 
 worktree_root: ~/.local/state/fleet/worktrees   # optional override of the default state-dir location
 windows_worktree_root: ~/dev/.fleet-worktrees-windows   # required if any repo is runtime: windows
@@ -117,6 +123,11 @@ Field notes:
   3. else → `git worktree add --no-track -b <branch> <worktree_path> origin/<default_branch>` (no
      upstream, so a plain `git push` can't target the default branch). A missing
      `origin/<default_branch>` is reported by name.
+- `hooks.timeout` / `git.network_timeout`: Go duration strings (`90s`, `5m`, `1h30m`). Validated on
+  load by both tools: must parse, be more than 0 and at most `24h` (`0` is not "no limit": a hung
+  hook or fetch blocking an agent forever is what the limit prevents; a bare number without a unit
+  is rejected). Unset means the default (5 minutes for hooks, 10 minutes for network git). When
+  `fleet-task rm` runs without a usable `repos.yaml`, the defaults apply.
 - Validation on load (`internal/config`, both tools): repo names must be non-empty, unique and
   plain (no `/` or `\`, not `.`/`..`) and `runtime` must be empty, `linux` or `windows`
   (`fleet-task rm`/`mv` still work without a usable `repos.yaml`, warning if it exists but is
@@ -161,13 +172,26 @@ Field notes:
     letter at all (e.g. a `\\wsl.localhost\...` UNC path) with its own error. On Linux/WSL,
     `fleet-cache ensure` likewise compares the filesystem device of the cache root and the target
     directory before running `npm ci`.
-- SSH remotes with passphrase-protected keys will hang in headless/non-interactive invocations.
+- SSH remotes with passphrase-protected keys would hang in headless/non-interactive invocations.
   `fleet-task` prechecks `ssh-add -l` (once per run, before the first clone or fetch) when `origin`
   looks like an SSH URL (`git@` or `ssh://`) and prints a warning (but doesn't block) if no identity
   is loaded. This check is WSL-side only and is skipped for `runtime: windows` repos, since Windows
   git.exe manages its own SSH credentials independently (Git for Windows / Windows OpenSSH), not
   WSL's `ssh-add`. Without a terminal (or with `FLEET_NO_INPUT=1`), WSL-side git runs with
-  `GIT_TERMINAL_PROMPT=0`, so an HTTPS credential prompt fails instead of hanging.
+  `GIT_TERMINAL_PROMPT=0`, so an HTTPS credential prompt fails instead of hanging, and, unless the
+  user has configured ssh for git themselves (`GIT_SSH_COMMAND` or `GIT_SSH` set in the environment
+  at all, or `core.sshCommand` set — `git config --get` in the base, which sees global config too;
+  a failing lookup also counts as set), its `fetch` runs with `GIT_SSH_COMMAND="ssh -o
+  BatchMode=yes"`, so a passphrase or host-key prompt fails at once. The user's own setting is never
+  overridden. Windows `git.exe` gets neither: its SSH setup (Git for Windows / Windows OpenSSH) is
+  independent of WSL's, so configure BatchMode there yourself if needed.
+- Network git (`fetch`, including the first fetch of a new base) is killed after
+  `git.network_timeout` (default 10 minutes); the repo is then reported as failed. Without a
+  terminal the git process runs in its own process group (unix) and the whole group is killed (its
+  ssh included); with a terminal it stays in fleet-task's group, so ssh/HTTPS prompts can still
+  read the terminal, and only git itself is killed. For `runtime: windows` repos the timeout applies
+  to the `powershell.exe` invocation; whether killing it also ends the Windows-side `git.exe` is up
+  to WSL interop.
 
 ## Patches
 
@@ -202,15 +226,40 @@ FLEET_WORKTREE_DIR=<absolute path>
 FLEET_RUN_NAME=<run name>          # pre-run/post-run only
 ```
 
-A failing hook (non-zero exit) only prints a warning to stderr; it never aborts or vetoes the
-operation, `pre-*` included. There is no timeout: a hook that hangs blocks the command.
+Hooks run with no stdin, in their own process group (unix), and are killed — the whole group, so
+their background children go too — once they have run for `hooks.timeout` (default 5 minutes).
+Because they are not in the terminal's foreground process group, a hook must not read from the
+terminal. While a hook runs, SIGINT/SIGTERM/SIGHUP sent to the fleet tool are passed on to the
+hook's group and then end the tool as before (Ctrl-C stops both).
+
+**`pre-*` hooks can veto.** A `pre-create`, `pre-remove` or `pre-run` hook that exits non-zero, is
+killed by the timeout or can't be started cancels that one repo (or window): nothing further is
+done for it, it is reported as failed — in the text output and in `--json` (`ok: false`, with an
+`error` naming the hook's path and its exit status or the timeout, e.g. `api not set up: pre-create
+hook /…/10-check failed: exit status 3`) — the remaining repos/windows are still attempted, and the
+command exits 1. The hooks after the failing one in that phase don't run. A failure to read the
+hooks directory cancels the same way. **`post-*` hooks only warn**: a failure prints a warning and
+the next hook still runs.
 
 `pre-create`/`post-create` run around `fleet-task new`'s per-repo worktree setup, and around
 `fleet-task edit <ticket>`'s per-repo setup for any repos it adds (same underlying per-repo
 function, `createRepoWorktree`). The per-repo order is: `pre-create` hooks → ensure the base bare
-clone exists (clone or fetch) → `git worktree add` → apply patches → `post-create` hooks → (if the
-worktree has a `package-lock.json`) `fleet-cache ensure`. Because `pre-create` runs first, those
-hooks must not assume the base clone exists yet.
+clone exists (clone or fetch) → `git worktree add` (or adopt a leftover worktree, below) → apply
+patches (not for an adopted worktree) → `post-create` hooks → (if the worktree has a
+`package-lock.json`) `fleet-cache ensure`. Because `pre-create` runs first, those hooks must not
+assume the base clone exists yet. A vetoing `pre-create` hook means no worktree for that repo.
+
+**Adopting a leftover worktree.** If the worktree path already exists and is a registered worktree
+of that repo's base (per `git worktree list --porcelain` in the base, matched by file identity;
+for `runtime: windows`, the real tree under `windows_worktree_root`, with the WSL-side path absent or
+a symlink to it) checked out on the expected branch, `new` / `edit --add` adopt it instead of
+failing — the case an interrupted `new` or `edit --add` leaves behind (worktree created, state not
+yet written). `git worktree add` and patch application are skipped (patches may already be
+applied, so the repo's `patches` is recorded as `null` = unknown, and the output says so); the
+post-create hooks and the `node_modules` step still run, and the repo is recorded in the state
+file. The JSON result marks it `"adopted": true`. Anything else at the path — a plain directory or
+file, a checkout of another repo, a worktree on another branch or with a detached HEAD, a symlink
+elsewhere — stays an error naming what was found, and is never touched.
 
 `pre-remove`/`post-remove` run around `fleet-task rm`'s per-repo teardown, and around `fleet-task
 edit <ticket>`'s per-repo teardown for any repos it removes (same underlying per-repo function,
@@ -218,10 +267,34 @@ edit <ticket>`'s per-repo teardown for any repos it removes (same underlying per
 was) removed; by the time `post-remove` runs, that path is generally gone from disk. Both commands
 first check every repo they're about to remove for uncommitted changes (see "Patches" below) and
 remove nothing — no hooks run — if one is dirty or can't be checked, unless `--force` is given or
-the user confirms on a terminal. A worktree directory that is already gone doesn't block.
+the user confirms on a terminal. A worktree directory that is already gone doesn't block. A vetoing
+`pre-remove` hook leaves that repo's worktree and branch in place and the repo in the task (same as
+a failed removal; rerun to retry).
+
+**Local branch after removal.** Once a repo's worktree is removed (before its `post-remove` hooks),
+its local branch in the base is handled:
+- default: deleted (`git branch -D`) only when every commit on it is reachable from a
+  remote-tracking ref (`git rev-list --count <branch> --not --remotes` is 0; no fetch is done, so
+  "on a remote" means as of the last fetch); otherwise kept, with a warning saying why and how to
+  delete it by hand;
+- `--keep-branch`: always kept;
+- `--delete-branch`: deleted even with unpushed commits — but first, before anything is removed,
+  every such branch (or one that can't be checked) is listed and the user must confirm `y/N` on a
+  terminal; without one it is a usage error (exit 2, nothing removed) unless `--force` is also
+  given, which skips the confirmation like it skips the changes check. Declining exits 1, nothing
+  removed. `--keep-branch` with `--delete-branch` is a usage error.
+
+The branch is always kept when the base is unknown (the repo is missing from `repos.yaml`, or it
+has no base, so removal fell back to running git in the worktree) or the recorded name is empty or
+starts with `-`. A branch that doesn't exist is fine (nothing to delete). git's refusal to delete a
+branch checked out in another worktree is reported and keeps the branch; it never fails the
+removal. `--json` reports each successfully removed repo's `branch_deleted` (true/false) and, when
+false, `branch_kept_reason`.
 
 `pre-run`/`post-run` are run by `fleet-run`: `pre-run` before each window is created or respawned
-(by `start` or `restart`), `post-run` after that succeeded. They don't run for a window left alone
+(by `start` or `restart`), `post-run` after that succeeded. A vetoing `pre-run` hook means that
+window is neither created nor respawned (status `failed`); a different-ticket switch has already
+stopped the old ticket's windows by then. They don't run for a window left alone
 because its app is already running. Hook stdout and stderr both go to `fleet-run`'s stderr.
 (`fleet-task`'s hook stdout goes to its stdout, or to stderr under `--json`.)
 
@@ -237,7 +310,13 @@ another fleet-task", naming the holder's pid and the lock file) rather than wait
 may legitimately run for minutes (`npm ci`). A lock whose pid is alive is never taken over, however
 old; a dead pid's lock is taken over automatically; a lock with no readable pid is taken over once
 older than a minute. Takeover renames the stale file aside and re-checks it, so two processes can't
-both take over. Writes themselves go via a temp file + rename. Everything else (`fleet-run`) only
+both take over. The "task is locked" error points at `fleet-task unlock <ticket>` (never a raw
+`rm`): it removes the lock only when the recorded owner pid is not running, or the lock has no
+readable pid and is older than a minute; while the owner is alive it refuses (exit 1, naming the
+pid) unless `--force` (for a pid reused by an unrelated process). No lock is success. A lock file
+without a state file (an interrupted `new`) can still be unlocked; a ticket with neither is "no
+task found" (exit 2). It also renames the lock aside before deleting it and puts it back if it
+changed meanwhile. Writes themselves go via a temp file + rename. Everything else (`fleet-run`) only
 reads these files.
 
 The filename is authoritative for the ticket id, in both tools: it's what every command looks up,
@@ -256,8 +335,11 @@ file. Bump the version only for an incompatible change to the shape below. `--js
 no `schema_version`, and the binaries don't check each other's versions.
 
 `fleet-task new` writes the state file right after each repo succeeds, so an interrupted `new`
-still leaves a task listing every worktree created so far (finish it with `edit --add`). If no repo
-succeeded, no state file is written.
+still leaves a task listing every worktree created so far (finish it with `edit --add`, or rerun
+`new` if no state file was written; the worktree being set up when it was killed is adopted — see
+"Hooks"). If no repo succeeded, no state file is written. A killed command also leaves the ticket's
+lock behind; the next command takes it over automatically once the owner pid is gone, or run
+`fleet-task unlock <ticket>`.
 
 ```json
 {
@@ -276,7 +358,8 @@ succeeded, no state file is written.
 not necessarily identical to `ticket`, and can differ per repo. `worktree_path` is always
 `<worktree_root>/<ticket>/<repo>` regardless of the branch name. `patches` lists the patch
 filenames successfully applied when the worktree was created; it is `null` (or absent) in state
-files written before the field existed, meaning "unknown", and `[]` when none were applied. Readers
+files written before the field existed, or for a worktree adopted from an interrupted run, meaning
+"unknown", and `[]` when none were applied. Readers
 must tolerate its absence (`fleet-run` ignores it).
 
 `repos` isn't fixed at `fleet-task new` time — `fleet-task edit <ticket>` can add or remove entries
@@ -401,15 +484,15 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
   retried manually). `fleet-cache`'s progress messages and npm's output go to **stderr**, so
   stdout stays clean for results. `ensure-windows` runs `npm ci`, the pre-install `node_modules` removal, and the
   hardlink population all as native Windows processes (PowerShell/npm) — only single-file
-  operations (hashing the lockfile, copying `package.json`/`package-lock.json`/`.npmrc` into the cache
+  operations (computing the cache key, copying `package.json`/`package-lock.json`/`.npmrc` into the cache
   entry) stay as plain Go file I/O against the `/mnt/...` path, since those are negligible one-off
   costs rather than the many-small-file operations that are slow across the WSL 9P boundary.
   `gc-windows` mirrors `gc`'s `--roots`/`--force`/`--json` semantics against the Windows-native
   cache root instead. For both `gc` commands, every `--roots` directory must exist (a typo is an
   error, not an empty root), and without both `--roots` and `--force` they only report.
-- Cache entries are built in a staging directory `<cache root>/node-cache/<hash>.tmp-<pid>` and
-  renamed to `<hash>` only once complete, so a `<hash>` directory is always a finished entry and
-  concurrent `ensure`s of one hash can't corrupt each other. A complete entry carries a
+- Cache entries are built in a staging directory `<cache root>/node-cache/<key>.tmp-<pid>` and
+  renamed to `<key>` only once complete, so a `<key>` directory is always a finished entry and
+  concurrent `ensure`s of one key can't corrupt each other. A complete entry carries a
   `.fleet-cache-complete` marker at its root (written just before the rename); an entry without
   it is treated as incomplete, deleted and rebuilt. Staging dirs left behind by a killed
   run are reported by `gc` (and removed with `--force --roots`) once they're older than a day.
@@ -419,21 +502,27 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
   (complete or not) and staging dirs (abandoned or not) read-only.
 - Besides `package.json` and `package-lock.json`, `ensure`/`ensure-windows` stage the worktree's
   `.npmrc` (if any, mode `0600`) into the staging dir for `npm ci` and delete it as soon as `npm ci`
-  finishes, so a registry token never persists in the cache. The cache key is still only the
-  lockfile hash: two worktrees with the same lockfile but different `.npmrc` share whichever entry
-  was built first. A `package.json` declaring a non-empty `workspaces` field is rejected before
+  finishes, so a registry token never persists in the cache. The cache key is
+  `sha256("fleet-cache-key-v2\nlock:<sha256 of package-lock.json>\nnpmrc:<sha256 of .npmrc, or none>\n")`
+  as 64 hex digits, computed by one function (`cacheKey`, `cmd/fleet-cache/hash.go`) for `ensure`,
+  `ensure-windows` and `gc`/`gc-windows` (which pairs each lockfile under `--roots` with the `.npmrc`
+  in the same directory). Only the project's own `<dir>/.npmrc` counts (not `~/.npmrc` or npm env
+  vars); a missing and an empty `.npmrc` are different keys. A token reaches the key only through a
+  hash, so rotating it creates a new entry and the old one goes stale for `gc`. Entries and markers
+  from the older lockfile-only key are not migrated: the next `ensure` relinks once and `gc`
+  reports the old entries as stale. A `package.json` declaring a non-empty `workspaces` field is rejected before
   anything runs (npm workspaces are unsupported).
 - `fleet-cache ensure` (Linux/WSL2 path only) is safe to call repeatedly against the same
   `<worktree_dir>`: it's a no-op if `<worktree_dir>/node_modules` is already linked from the current
-  `package-lock.json` hash (tracked via a `.fleet-cache-hash` marker inside `node_modules`), so
+  cache key (lockfile + `.npmrc`, tracked via a `.fleet-cache-hash` marker inside `node_modules`), so
   anything added to `node_modules` by hand since the last `ensure` — most notably an `npm link`
   package symlink — survives untouched. It only rebuilds `node_modules` (destroying manual changes,
-  same as before) when the lockfile hash actually changes, or when called with `--force`. Regular
+  same as before) when the key actually changes (lockfile or `.npmrc` edited), or when called with `--force`. Regular
   files in a cache entry are also chmod'd read-only (`0444`) once, at `npm ci` time — since
   permission bits live on the inode shared by every worktree's hardlink, this doesn't block
   `ensure`'s own rebuild or `npm link`'s symlink-swap (both only need write access to the containing
   directory), but does turn any future in-place edit to a hardlinked file into a loud permission
-  error instead of silently corrupting every other worktree sharing that lockfile hash. This does
+  error instead of silently corrupting every other worktree sharing that cache entry. This does
   not apply to `ensure-windows`: its hardlinks are made by PowerShell (`New-Item -ItemType
   HardLink`, via the embedded `hardlink_windows.ps1`) and the entry's file permissions are not
   locked down. `ensure-windows` has the same skip-marker and `--force` semantics as `ensure`.

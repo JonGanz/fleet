@@ -149,7 +149,7 @@ func TestRmRefusesDirtyWithoutTerminal(t *testing.T) {
 	writeFileT(t, filepath.Join(r.WorktreePath, "b.txt"), "unsaved work\n")
 	tf, _ := taskFile("T-1")
 
-	err := cmdRm("T-1", false, true)
+	err := cmdRm("T-1", false, branchAuto, true)
 	if err == nil || !cli.IsUsage(err) || !strings.Contains(err.Error(), "--force") {
 		t.Fatalf("want usage error naming --force, got %v", err)
 	}
@@ -166,7 +166,7 @@ func TestRmRefusesDirtyWithoutTerminal(t *testing.T) {
 		t.Errorf("edit --remove: want usage error, got %v", err)
 	}
 
-	if err := cmdRm("T-1", true, false); err != nil {
+	if err := cmdRm("T-1", true, branchAuto, false); err != nil {
 		t.Fatalf("rm --force: %v", err)
 	}
 	if _, err := os.Stat(r.WorktreePath); !os.IsNotExist(err) {
@@ -176,7 +176,7 @@ func TestRmRefusesDirtyWithoutTerminal(t *testing.T) {
 
 func TestRmCleanWorktreeNeedsNoForce(t *testing.T) {
 	r, _ := changesFixture(t)
-	if err := cmdRm("T-1", false, false); err != nil {
+	if err := cmdRm("T-1", false, branchAuto, false); err != nil {
 		t.Fatalf("rm of a clean (patched) worktree: %v", err)
 	}
 	if _, err := os.Stat(r.WorktreePath); !os.IsNotExist(err) {

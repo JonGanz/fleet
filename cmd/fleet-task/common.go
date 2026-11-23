@@ -8,6 +8,7 @@ import (
 
 	"github.com/JonGanz/fleet/internal/cli"
 	"github.com/JonGanz/fleet/internal/config"
+	"github.com/JonGanz/fleet/internal/hooks"
 	"github.com/JonGanz/fleet/internal/taskstate"
 	"github.com/JonGanz/fleet/internal/xdg"
 )
@@ -98,6 +99,17 @@ func lockAndReadTask(ticket string) (tf string, st *taskstate.State, unlock func
 // noTaskError is the usage error for a ticket with no state file.
 func noTaskError(ticket string) error {
 	return cli.Usagef("no task found for ticket %s (see `fleet-task list`)", ticket)
+}
+
+// preHookError wraps the error a pre-* hooks.Run returned for the repo or
+// operation it cancelled: what says what didn't happen ("api not set up").
+// A veto already names the hook; a failure to find the hooks gets the phase
+// added.
+func preHookError(what, phase string, err error) error {
+	if hooks.IsVeto(err) {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	return fmt.Errorf("%s: finding %s hooks: %w", what, phase, err)
 }
 
 // removeDirIfEmpty removes dir only if it has no entries, and otherwise

@@ -1,17 +1,23 @@
 // Package hooks discovers and runs the user's hook executables under
 // <config dir>/hooks/<phase>/ (see docs/CONTRACT.md). fleet-task runs the
-// create/remove phases, fleet-run the run phases. A failing hook only
-// warns: it never aborts or vetoes the operation.
+// create/remove phases, fleet-run the run phases. A failing pre-* hook
+// vetoes the one repo/window it ran for (Run returns an *Error); a failing
+// post-* hook only warns. Every hook is killed after a timeout.
 package hooks
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/JonGanz/fleet/internal/cli"
+	"github.com/JonGanz/fleet/internal/proc"
 	"github.com/JonGanz/fleet/internal/xdg"
 )
 
@@ -92,12 +98,44 @@ func (e Env) label() string {
 	return e.Repo
 }
 
+// Error is a pre-* hook that vetoed the operation: it exited non-zero, was
+// killed by the timeout, or could not be started.
+type Error struct {
+	Phase string
+	Path  string
+	Err   error
+}
+
+// Error names the phase, the hook and what went wrong, e.g. "pre-create
+// hook /x/10-check failed: exit status 3".
+func (e *Error) Error() string {
+	return fmt.Sprintf("%s hook %s failed: %v", e.Phase, e.Path, e.Err)
+}
+
+// Unwrap returns the underlying exec, start or timeout error.
+func (e *Error) Unwrap() error { return e.Err }
+
+// IsVeto reports whether err is (or wraps) a vetoing hook failure.
+func IsVeto(err error) bool {
+	var he *Error
+	return errors.As(err, &he)
+}
+
 // Run runs each hook in <config dir>/hooks/<phase>/ in filename-sorted
-// order, with env's variables added to the inherited environment. A hook's
-// stdout goes to stdout and its stderr to os.Stderr. A hook exiting
-// non-zero (or failing to start) prints a warning and the next hook still
-// runs. The returned error is only for failing to find the hooks.
-func Run(phase string, env Env, stdout io.Writer) error {
+// order, with env's variables added to the inherited environment and no
+// stdin. A hook's stdout goes to stdout and its stderr to os.Stderr. Each
+// hook runs in its own process group and is killed, group and all, once it
+// has run for timeout (0: no limit), so a hung hook can't block the command
+// forever and its children don't outlive it.
+//
+// For a pre-* phase (Vetoes) the first hook that exits non-zero, times out
+// or can't be started stops the phase: the hooks after it don't run, and Run
+// returns an *Error naming it, which the caller treats as "cancel this
+// repo/window". For a post-* phase a failure prints a warning and the next
+// hook still runs; Run then returns nil. A failure to find the hooks is
+// returned for every phase (a pre-* caller cancels on it too: it can't know
+// whether a hook would have vetoed).
+func Run(phase string, env Env, stdout io.Writer, timeout time.Duration) error {
 	dir, err := xdg.HooksDir(phase)
 	if err != nil {
 		return err
@@ -112,9 +150,20 @@ func Run(phase string, env Env, stdout io.Writer) error {
 		cmd.Env = environ
 		cmd.Stdout = stdout
 		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			cli.Warnf("%s hook %s failed for %s: %v", phase, path, env.label(), err)
+		err := proc.Run(cmd, proc.Options{Timeout: timeout, NewGroup: true})
+		if err == nil {
+			continue
 		}
+		if Vetoes(phase) {
+			return &Error{Phase: phase, Path: path, Err: err}
+		}
+		cli.Warnf("%s hook %s failed for %s: %v", phase, path, env.label(), err)
 	}
 	return nil
+}
+
+// Vetoes reports whether a failing hook of phase cancels the operation it
+// runs before: true for the pre-* phases.
+func Vetoes(phase string) bool {
+	return strings.HasPrefix(phase, "pre-")
 }

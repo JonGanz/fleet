@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/JonGanz/fleet/internal/cli"
 	"github.com/JonGanz/fleet/internal/config"
@@ -48,6 +50,42 @@ type gitRunner interface {
 	Changes(worktreePath string, patchFiles []string, exclude bool) changeReport
 	// UnpushedCommits counts commits on branch that are on no remote.
 	UnpushedCommits(worktreePath, branch string) (int, error)
+	// UnpushedInBase is UnpushedCommits run in base rather than in a
+	// worktree (which may already be gone): commits on the local branch
+	// reachable from no remote-tracking ref.
+	UnpushedInBase(base, branch string) (int, error)
+	// DeleteBranch force-deletes the local branch in base (`git branch -D`).
+	// Callers decide first whether that is safe; git itself still refuses a
+	// branch checked out in some worktree.
+	DeleteBranch(base, branch string) error
+	// InspectWorktreePath reports what is at worktreePath before a worktree
+	// is created there, and whether it is a registered worktree of base.
+	InspectWorktreePath(base, worktreePath string) (worktreeAtPath, error)
+	// AdoptWorktree finishes adopting the registered worktree at
+	// worktreePath (windows: recreates a missing WSL-side symlink).
+	AdoptWorktree(worktreePath string) error
+}
+
+// worktreeAtPath is what InspectWorktreePath found at a worktree path.
+type worktreeAtPath struct {
+	// Exists: something is there (for windows: the WSL-side link, or the
+	// real tree registered in base).
+	Exists bool
+	// Registered: it is a worktree registered in this repo's base.
+	Registered bool
+	// Ref is a registered worktree's checked-out ref (refs/heads/<x>), or
+	// "" for a detached HEAD.
+	Ref string
+	// Found describes what is there when it is not a registered worktree,
+	// for the error message.
+	Found string
+}
+
+// worktreeEntry is one record of `git worktree list --porcelain`.
+type worktreeEntry struct {
+	Path string
+	Ref  string // "branch" line (refs/heads/<x>); "" if detached or bare
+	Bare bool
 }
 
 // baseInfo describes what is at a repo's base path before setup.
@@ -126,6 +164,49 @@ func (p worktreeAddPlan) describe() string {
 	}
 }
 
+// decideAdoption decides what to do about what InspectWorktreePath found at
+// worktreePath before creating a worktree on branch there: nothing there
+// means create it (false, nil); a registered worktree of base on that very
+// branch -- left by an interrupted `new`/`edit --add` -- is adopted (true,
+// nil); anything else is an error naming what was found, never touched.
+func decideAdoption(at worktreeAtPath, worktreePath, base, branch string) (bool, error) {
+	switch {
+	case !at.Exists:
+		return false, nil
+	case at.Registered && at.Ref == "refs/heads/"+branch:
+		return true, nil
+	case at.Registered && at.Ref == "":
+		return false, fmt.Errorf("%s is already a worktree of %s, but with a detached HEAD instead of branch %s; check it out there (`git -C %s switch %s`) or remove it, then retry", worktreePath, base, branch, worktreePath, branch)
+	case at.Registered:
+		return false, fmt.Errorf("%s is already a worktree of %s, but on %s instead of branch %s; remove it or switch it to %s, then retry", worktreePath, base, strings.TrimPrefix(at.Ref, "refs/heads/"), branch, branch)
+	}
+	found := at.Found
+	if found == "" {
+		found = "something that is not a worktree of " + base
+	}
+	return false, fmt.Errorf("%s already exists and is %s; move it away, then retry", worktreePath, found)
+}
+
+// describeForeignPath says what is at path (which exists but is not a
+// registered worktree of base), for decideAdoption's error. It only looks;
+// it never runs git inside a directory it doesn't know.
+func describeForeignPath(path, base string) string {
+	fi, err := os.Lstat(path)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("something that can't be inspected (%v)", err)
+	case fi.Mode()&os.ModeSymlink != 0:
+		target, _ := os.Readlink(path)
+		return fmt.Sprintf("a symlink to %s, not a worktree of %s", target, base)
+	case !fi.IsDir():
+		return "a file, not a worktree of " + base
+	}
+	if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
+		return "a git checkout that is not a worktree of " + base + " (another repo, or a worktree of another base)"
+	}
+	return "a directory that is not a git worktree of " + base
+}
+
 // ensureBase makes base a usable repo with an origin remote and fetches it.
 // It is idempotent: a base left half-made by an interrupted first run (an
 // empty dir, or `init --bare` done but no remote yet) is completed rather
@@ -169,7 +250,7 @@ func gitFor(cfg *config.ReposConfig, repo *config.RepoConfig) (gitRunner, string
 		}
 		return windowsGit{cfg: cfg}, xdg.ExpandHome(repo.WindowsBase), nil
 	}
-	return linuxGit{}, xdg.ExpandHome(repo.Base), nil
+	return linuxGit{cfg: cfg}, xdg.ExpandHome(repo.Base), nil
 }
 
 // gitForExisting is gitFor for operating on an already-created worktree
@@ -178,21 +259,43 @@ func gitFor(cfg *config.ReposConfig, repo *config.RepoConfig) (gitRunner, string
 // any worktree checkout has a .git file pointing back at its base repo, so
 // `git -C <worktree> worktree remove|move` still works.
 func gitForExisting(cfg *config.ReposConfig, repoName, worktreePath, what string) (gitRunner, string, error) {
-	if repo := cfg.FindRepo(repoName); repo != nil {
-		r, base, err := gitFor(cfg, repo)
-		if err != nil {
-			return nil, "", err
-		}
-		if base != "" {
-			return r, base, nil
-		}
+	r, base, known, err := resolveExistingGit(cfg, repoName, worktreePath)
+	if err != nil {
+		return nil, "", err
 	}
-	cli.Warnf("repo %q not found in repos.yaml (or has no base), trying %s without a base", repoName, what)
-	return linuxGit{}, worktreePath, nil
+	if !known {
+		cli.Warnf("repo %q not found in repos.yaml (or has no base), trying %s without a base", repoName, what)
+	}
+	return r, base, nil
 }
 
 // parentDir is filepath.Dir, named for readability at call sites.
 func parentDir(p string) string { return filepath.Dir(p) }
+
+// parseWorktreeList parses `git worktree list --porcelain`: records
+// separated by blank lines, each starting with "worktree <path>", then
+// "HEAD <sha>", "branch <ref>", "detached", "bare", "locked", "prunable"
+// lines. \r is tolerated (git.exe output through PowerShell).
+func parseWorktreeList(out string) []worktreeEntry {
+	var entries []worktreeEntry
+	var cur *worktreeEntry
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		key, value, _ := strings.Cut(line, " ")
+		switch {
+		case key == "worktree":
+			entries = append(entries, worktreeEntry{Path: value})
+			cur = &entries[len(entries)-1]
+		case cur == nil:
+			continue
+		case key == "branch":
+			cur.Ref = value
+		case key == "bare":
+			cur.Bare = true
+		}
+	}
+	return entries
+}
 
 // planBaseSetup decides what ensureBase must do for what InspectBase found.
 // A non-empty directory that isn't a repo is never initialised over (it may
@@ -223,6 +326,22 @@ func planBaseSetup(info baseInfo, repoName, base, origin string) (baseSetup, err
 			base, info.OriginURL, origin, repoName, base, origin)}, nil
 	}
 	return baseSetup{}, nil
+}
+
+// resolveExistingGit is gitForExisting without the warning: known is false
+// when it fell back to running git in the worktree itself because repos.yaml
+// has no usable entry (no base) for repoName.
+func resolveExistingGit(cfg *config.ReposConfig, repoName, worktreePath string) (r gitRunner, base string, known bool, err error) {
+	if repo := cfg.FindRepo(repoName); repo != nil {
+		r, base, err := gitFor(cfg, repo)
+		if err != nil {
+			return nil, "", false, err
+		}
+		if base != "" {
+			return r, base, true, nil
+		}
+	}
+	return linuxGit{cfg: cfg}, worktreePath, false, nil
 }
 
 // planWorktreeAdd chooses how to create a ticket's worktree on branch:

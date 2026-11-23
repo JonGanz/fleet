@@ -26,7 +26,7 @@ stashing, switching and port clashes.
 - **`fleet-run`** starts that ticket's apps in tmux windows, and switches the whole running set to
   another ticket when you ask.
 - **`fleet-cache`** makes the worktrees ready to use immediately by sharing one `npm ci` result
-  across worktrees whose `package-lock.json` is identical (via hardlinks: several directory
+  across worktrees whose `package-lock.json` and `.npmrc` are identical (via hardlinks: several directory
   entries pointing at the same file on disk, so extra copies cost no space or install time).
 
 They are three Go programs that coordinate only through files on disk (a config you write, state
@@ -59,9 +59,9 @@ them is [`docs/CONTRACT.md`](docs/CONTRACT.md).
            cmd: "npm run start:dev"
    ```
 
-   This is the minimum. Other options (`defaults`, `branch_template`, `worktree_root`, the
-   `runtime: windows` settings, ...) are documented in [`docs/CONTRACT.md`](docs/CONTRACT.md),
-   which is the full reference for the config.
+   This is the minimum. Other options (`defaults`, `branch_template`, `worktree_root`,
+   `hooks.timeout`, `git.network_timeout`, the `runtime: windows` settings, ...) are documented
+   in [`docs/CONTRACT.md`](docs/CONTRACT.md), which is the full reference for the config.
 
 3. **Work a ticket:**
 
@@ -110,7 +110,8 @@ Each tool's README has the full reference (flags, exit codes, behaviour).
 
 - **`fleet-task`** — [`cmd/fleet-task/README.md`](cmd/fleet-task/README.md)
   - `new [ticket]` — create a ticket's worktrees (prompts, or `--repo`/`-d`/`--skip-patch` flags;
-    runs hooks; installs `node_modules` via `fleet-cache`)
+    runs hooks, a failing `pre-create` hook skips that repo; installs `node_modules` via
+    `fleet-cache`); a worktree left by an interrupted run on the right branch is adopted
   - `list [--status]` / `show <ticket>` — list tickets (`--status`: count repos with uncommitted
     changes) / show one ticket's repos, branches, paths, patches, uncommitted changes (not counting
     fleet's own patches) and unpushed commits
@@ -120,7 +121,11 @@ Each tool's README has the full reference (flags, exit codes, behaviour).
     uncommitted changes needs confirmation or `--force`
   - `mv [old] [new]` — rename a ticket, moving its worktrees
   - `rm [ticket]` — remove a ticket's worktrees and state (picker if no ticket given); refuses
-    worktrees with uncommitted changes (asks on a terminal) unless `--force`; branches are kept
+    worktrees with uncommitted changes (asks on a terminal) unless `--force`; deletes each local
+    branch whose commits are all on a remote and keeps the rest (`--keep-branch` /
+    `--delete-branch` override)
+  - `unlock <ticket>` — remove a ticket's lock left by a killed `fleet-task` (refuses while its
+    owner is still running)
 - **`fleet-run`** — [`cmd/fleet-run/README.md`](cmd/fleet-run/README.md)
   - `start [--ticket <id>] [--all] [repo:run-name ...]` — start a ticket's apps, one tmux window
     each, named `<repo>-<run-name>` (e.g. `backend-api`); switches tickets if another is active

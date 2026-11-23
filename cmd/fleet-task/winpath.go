@@ -7,7 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
+	"github.com/JonGanz/fleet/internal/cli"
+	"github.com/JonGanz/fleet/internal/proc"
 	"github.com/JonGanz/fleet/internal/wsl"
 )
 
@@ -19,6 +22,24 @@ func runWindowsCommand(winDir string, args ...string) error {
 	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("powershell (%v) in %s: %w", args, winDir, err)
+	}
+	return nil
+}
+
+// runWindowsCommandTimeout is runWindowsCommand for network operations: the
+// powershell.exe invocation is killed after timeout, with the same process
+// group rule as runGitNetwork. Whether killing the WSL-side powershell.exe
+// also ends the Windows-side git.exe is up to WSL interop.
+func runWindowsCommandTimeout(winDir string, timeout time.Duration, args ...string) error {
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", wsl.CommandScript(winDir, args...))
+	cmd.Stdout = out
+	cmd.Stderr = os.Stderr
+	err := proc.Run(cmd, proc.Options{Timeout: timeout, NewGroup: !cli.InteractiveAllowed()})
+	if proc.IsTimeout(err) {
+		return fmt.Errorf("powershell (%v) in %s: %w (set git.network_timeout in repos.yaml if the network is just slow)", args, winDir, err)
+	}
+	if err != nil {
 		return fmt.Errorf("powershell (%v) in %s: %w", args, winDir, err)
 	}
 	return nil
@@ -91,6 +112,13 @@ func windowsExitCode(err error) int {
 		return exitErr.ExitCode()
 	}
 	return -1
+}
+
+// windowsPathKey normalizes a win32 path for comparison: git.exe prints
+// worktree paths with forward slashes, wslpath -w with backslashes, and
+// NTFS paths are case-insensitive.
+func windowsPathKey(p string) string {
+	return strings.ToLower(strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(p), "/", `\`), `\`))
 }
 
 // windowsPathExists reports whether winDir exists, checked via PowerShell's

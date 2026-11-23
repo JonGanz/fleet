@@ -120,16 +120,17 @@ func (windowsGit) AddOrigin(base, origin string) error {
 	return runWindowsCommand(winBase, "git", "remote", "add", "origin", origin)
 }
 
-// Fetch: unlike the Linux path, deliberately skips checkSSHAgent() -- that
-// checks WSL's own ssh-add, which has no bearing on Windows git.exe's own
-// credential setup (Git for Windows / Windows OpenSSH manage that
-// independently).
-func (windowsGit) Fetch(base, origin string) error {
+// Fetch: unlike the Linux path, deliberately skips checkSSHAgent() and the
+// BatchMode GIT_SSH_COMMAND -- both concern WSL's own ssh, which has no
+// bearing on Windows git.exe's credential setup (Git for Windows / Windows
+// OpenSSH manage that independently). The network timeout still applies, to
+// the powershell.exe invocation.
+func (g windowsGit) Fetch(base, origin string) error {
 	winBase, err := wsl.WindowsPath(base)
 	if err != nil {
 		return fmt.Errorf("resolving windows_base %s: %w", base, err)
 	}
-	return runWindowsCommand(winBase, "git", "fetch", "--prune", "origin")
+	return runWindowsCommandTimeout(winBase, g.cfg.NetworkTimeout(), "git", "fetch", "--prune", "origin")
 }
 
 func (windowsGit) Prune(base string) error {
@@ -359,4 +360,91 @@ func (g windowsGit) UnpushedCommits(worktreePath, branch string) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(s)
+}
+
+// UnpushedInBase runs `git rev-list --count refs/heads/<branch> --not
+// --remotes` via git.exe in base.
+func (windowsGit) UnpushedInBase(base, branch string) (int, error) {
+	winBase, err := wsl.WindowsPath(base)
+	if err != nil {
+		return 0, fmt.Errorf("resolving windows_base %s: %w", base, err)
+	}
+	s, err := windowsCommandOutput(winBase, "git", "rev-list", "--count", "refs/heads/"+branch, "--not", "--remotes")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(s)
+}
+
+// DeleteBranch runs `git branch -D <branch>` via git.exe in base, stderr
+// captured into the error.
+func (windowsGit) DeleteBranch(base, branch string) error {
+	winBase, err := wsl.WindowsPath(base)
+	if err != nil {
+		return fmt.Errorf("resolving windows_base %s: %w", base, err)
+	}
+	return runWindowsCommandCapture(winBase, "git", "branch", "-D", branch)
+}
+
+// InspectWorktreePath checks the WSL-side link and the real tree under
+// windows_worktree_root. The link must be absent or a symlink to the real
+// tree; anything else there is reported, never replaced. The real tree
+// counts as found when git.exe lists it (`git worktree list --porcelain`
+// in base, paths compared case-insensitively); a link to an unregistered
+// tree is reported too. With no link and no registration nothing is there,
+// and a stray real directory is left to `git worktree add` to refuse.
+func (g windowsGit) InspectWorktreePath(base, worktreePath string) (worktreeAtPath, error) {
+	real, err := g.realPath(worktreePath)
+	if err != nil {
+		return worktreeAtPath{}, err
+	}
+	linked := false
+	fi, err := os.Lstat(worktreePath)
+	switch {
+	case err == nil && fi.Mode()&os.ModeSymlink == 0:
+		return worktreeAtPath{Exists: true, Found: describeForeignPath(worktreePath, base) + " (a runtime: windows worktree path must be a symlink)"}, nil
+	case err == nil:
+		target, rerr := os.Readlink(worktreePath)
+		if rerr != nil {
+			return worktreeAtPath{}, rerr
+		}
+		if filepath.Clean(target) != filepath.Clean(real) {
+			return worktreeAtPath{Exists: true, Found: fmt.Sprintf("a symlink to %s instead of %s", target, real)}, nil
+		}
+		linked = true
+	case !os.IsNotExist(err):
+		return worktreeAtPath{}, err
+	}
+
+	winBase, err := wsl.WindowsPath(base)
+	if err != nil {
+		return worktreeAtPath{}, fmt.Errorf("resolving windows_base %s: %w", base, err)
+	}
+	winReal, err := wsl.WindowsPath(real)
+	if err != nil {
+		return worktreeAtPath{}, fmt.Errorf("resolving windows worktree %s: %w", real, err)
+	}
+	list, err := windowsCommandOutputRaw(winBase, "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		return worktreeAtPath{}, err
+	}
+	for _, e := range parseWorktreeList(list) {
+		if !e.Bare && windowsPathKey(e.Path) == windowsPathKey(winReal) {
+			return worktreeAtPath{Exists: true, Registered: true, Ref: e.Ref}, nil
+		}
+	}
+	if linked {
+		return worktreeAtPath{Exists: true, Found: fmt.Sprintf("a symlink to %s, which is not a registered worktree of %s", real, base)}, nil
+	}
+	return worktreeAtPath{}, nil
+}
+
+// AdoptWorktree (re)creates the WSL-side symlink to the real tree: an
+// interrupted WorktreeAdd may have registered the tree but not linked it yet.
+func (g windowsGit) AdoptWorktree(worktreePath string) error {
+	real, err := g.realPath(worktreePath)
+	if err != nil {
+		return err
+	}
+	return replaceSymlink(worktreePath, real)
 }

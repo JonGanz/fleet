@@ -10,9 +10,74 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/JonGanz/fleet/internal/cli"
+	"github.com/JonGanz/fleet/internal/config"
+	"github.com/JonGanz/fleet/internal/proc"
 )
+
+// batchModeSSH is the GIT_SSH_COMMAND fleet-task sets for WSL-side git when
+// no prompt may be shown and the user hasn't configured ssh for git: an ssh
+// that would ask for a passphrase or host-key confirmation fails at once
+// instead of hanging until the network timeout.
+const batchModeSSH = "ssh -o BatchMode=yes"
+
+// batchModeSSHEnv returns the extra environment for a WSL-side network git
+// command: GIT_SSH_COMMAND=batchModeSSH when prompts aren't allowed and the
+// user has set none of GIT_SSH_COMMAND, GIT_SSH (which GIT_SSH_COMMAND would
+// silently override) or core.sshCommand; nil otherwise. A variable that is
+// set at all, even empty, counts as the user's choice, and so does a
+// core.sshCommand lookup that fails: never override what might be theirs.
+// lookupEnv and coreSSHCommandSet are injected for testing.
+func batchModeSSHEnv(interactive bool, lookupEnv func(string) (string, bool), coreSSHCommandSet func() (bool, error)) []string {
+	if interactive {
+		return nil
+	}
+	for _, name := range []string{"GIT_SSH_COMMAND", "GIT_SSH"} {
+		if _, set := lookupEnv(name); set {
+			return nil
+		}
+	}
+	if set, err := coreSSHCommandSet(); err != nil || set {
+		return nil
+	}
+	return []string{"GIT_SSH_COMMAND=" + batchModeSSH}
+}
+
+// coreSSHCommandSet reports whether core.sshCommand is configured for base
+// (`git config --get` also sees the global and system config).
+func coreSSHCommandSet(base string) (bool, error) {
+	v, err := gitOutput(nil, "-C", base, "config", "--get", "core.sshCommand")
+	if err != nil {
+		if gitExitCode(err) == 1 { // 1: key not set
+			return false, nil
+		}
+		return false, err
+	}
+	return v != "", nil
+}
+
+// runGitNetwork runs a git command that talks to a remote (stdout/stderr
+// inherited like runGit) and kills it after timeout. Without a terminal the
+// command gets its own process group, so the kill takes its ssh (or
+// credential helper) along; with a terminal it stays in ours, so ssh and
+// HTTPS prompts can still read the terminal and Ctrl-C reaches it directly.
+// env adds KEY=value entries to gitEnv's.
+func runGitNetwork(timeout time.Duration, env []string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Env = gitEnv(env...)
+	cmd.Stdout = out
+	cmd.Stderr = os.Stderr
+	err := proc.Run(cmd, proc.Options{Timeout: timeout, NewGroup: !cli.InteractiveAllowed()})
+	if proc.IsTimeout(err) {
+		return fmt.Errorf("git %s: %w (set git.network_timeout in repos.yaml if the network is just slow)", strings.Join(args, " "), err)
+	}
+	if err != nil {
+		return fmt.Errorf("git %v: %w", args, err)
+	}
+	return nil
+}
 
 // gitEnv is the environment for WSL-side git. When prompting isn't allowed
 // (no terminal, or FLEET_NO_INPUT=1) GIT_TERMINAL_PROMPT=0 makes an HTTPS
@@ -91,8 +156,11 @@ func stderrSuffix(stderr string) string {
 }
 
 // linuxGit is the gitRunner for runtime: linux repos: plain WSL/Linux-native
-// `git` against WSL-side paths.
-type linuxGit struct{}
+// `git` against WSL-side paths. cfg supplies the network timeout; nil (no
+// usable repos.yaml) means the default.
+type linuxGit struct {
+	cfg *config.ReposConfig
+}
 
 func (linuxGit) Preflight(base, worktreePath string) error { return nil }
 
@@ -159,13 +227,18 @@ func (linuxGit) AddOrigin(base, origin string) error {
 
 // Fetch runs `git -C <base> fetch --prune origin` (prune drops
 // origin/<branch> refs deleted upstream, so a stale one can't be picked up
-// by planWorktreeAdd). For an SSH origin it first warns, once per process,
-// if no ssh-agent identity is loaded.
-func (linuxGit) Fetch(base, origin string) error {
+// by planWorktreeAdd), killed after git.network_timeout. For an SSH origin it
+// first warns, once per process, if no ssh-agent identity is loaded. Without
+// a terminal ssh runs in BatchMode unless the user configured ssh for git
+// (batchModeSSHEnv).
+func (g linuxGit) Fetch(base, origin string) error {
 	if isSSHURL(origin) {
 		sshAgentCheck.Do(checkSSHAgent)
 	}
-	return runGit("-C", base, "fetch", "--prune", "origin")
+	env := batchModeSSHEnv(cli.InteractiveAllowed(), os.LookupEnv, func() (bool, error) {
+		return coreSSHCommandSet(base)
+	})
+	return runGitNetwork(g.cfg.NetworkTimeout(), env, "-C", base, "fetch", "--prune", "origin")
 }
 
 // RefExists runs `git show-ref --verify --quiet <ref>`: exit 1 means absent.
@@ -309,6 +382,60 @@ func (linuxGit) UnpushedCommits(worktreePath, branch string) (int, error) {
 	}
 	return strconv.Atoi(s)
 }
+
+// UnpushedInBase runs `git rev-list --count refs/heads/<branch> --not
+// --remotes` in base.
+func (linuxGit) UnpushedInBase(base, branch string) (int, error) {
+	s, err := gitOutput(nil, "-C", base, "rev-list", "--count", "refs/heads/"+branch, "--not", "--remotes")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(s)
+}
+
+// DeleteBranch runs `git -C <base> branch -D <branch>`, stderr captured
+// into the error (git's "checked out at ..." refusal is what gets reported).
+func (linuxGit) DeleteBranch(base, branch string) error {
+	return runGitCapture("-C", base, "branch", "-D", branch)
+}
+
+// InspectWorktreePath checks worktreePath against `git worktree list
+// --porcelain` in base. Paths are matched by file identity (os.SameFile),
+// so symlinks or a differently spelled path to the same directory still
+// match.
+func (linuxGit) InspectWorktreePath(base, worktreePath string) (worktreeAtPath, error) {
+	fi, err := os.Stat(worktreePath)
+	if os.IsNotExist(err) {
+		if _, lerr := os.Lstat(worktreePath); lerr == nil {
+			// A dangling symlink: something is there, but no worktree.
+			return worktreeAtPath{Exists: true, Found: describeForeignPath(worktreePath, base)}, nil
+		}
+		return worktreeAtPath{}, nil
+	}
+	if err != nil {
+		return worktreeAtPath{}, err
+	}
+	at := worktreeAtPath{Exists: true}
+	list, err := gitOutput(nil, "-C", base, "worktree", "list", "--porcelain")
+	if err != nil {
+		return worktreeAtPath{}, err
+	}
+	for _, e := range parseWorktreeList(list) {
+		if e.Bare {
+			continue
+		}
+		if efi, err := os.Stat(e.Path); err == nil && os.SameFile(fi, efi) {
+			at.Registered, at.Ref = true, e.Ref
+			return at, nil
+		}
+	}
+	at.Found = describeForeignPath(worktreePath, base)
+	return at, nil
+}
+
+// AdoptWorktree needs nothing more for a linux worktree: it is a plain
+// directory, already where it belongs.
+func (linuxGit) AdoptWorktree(string) error { return nil }
 
 // treeWithPatches builds HEAD + patchFiles in a throwaway index and returns
 // the tree id. The error names the patch that no longer applies.

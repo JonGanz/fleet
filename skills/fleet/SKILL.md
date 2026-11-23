@@ -30,8 +30,10 @@ ticket's apps, one tmux window per `repo:run-name` target. Both are on `PATH`.
   refuses; run `fleet-run stop --all` first, and only if the user is done
   with those apps.
 - **Never pass `--force` to `rm` / `edit --remove` on your own.** It skips
-  the uncommitted-changes check and deletes that work. Use it only after
-  the user saw what would be lost and agreed to discard it.
+  the uncommitted-changes check (and `--delete-branch`'s confirmation) and
+  deletes that work. Use it only after the user saw what would be lost and
+  agreed to discard it. The same goes for `--delete-branch` and for
+  `fleet-task unlock --force`.
 - **Patches are local dev tweaks, never commit them.** They show up as
   uncommitted changes in the worktree. Stage files explicitly; never
   `git add -A` / `git commit -a` in a fleet worktree.
@@ -67,8 +69,8 @@ patches_excluded, approximate, reason?}`. `state` is `clean`, `dirty` or
 `patches_excluded` is false (patch list unknown, patch gone or no longer
 applying), patch edits count as changes too — `reason` says why.
 `approximate` (runtime: windows) means edits inside patched files aren't
-seen. `unpushed_commits` (or `null`) is informational: `rm` keeps the
-branch.
+seen. `unpushed_commits` (or `null`): `rm` keeps a branch with unpushed
+commits (it deletes only branches whose commits are all on a remote).
 
 In `fleet-run targets --json` use `target` (`repo:run-name`); `label` is the
 same value, deprecated.
@@ -88,11 +90,16 @@ same value, deprecated.
    - Exit 2 "already exists" → the task exists: use `show`, or `edit --add`.
      This is also how to finish an interrupted `new` (killed mid-run): the
      state file lists every repo created so far, so `show` it and
-     `edit --add` the missing repos. If that fails because the repo's
-     worktree directory already exists, tell the user rather than deleting
-     it.
+     `edit --add` the missing repos (if there is no state file, rerun
+     `new`). A worktree the killed run had already created on the right
+     branch is adopted (`"adopted": true`, `patches: null` — its patches
+     were not re-applied, so check with `show` and tell the user). If the
+     path holds something else, the error says what; tell the user rather
+     than deleting it.
    - Per repo, check `ok`, `error`, and `patch_errors` (a patch that failed
-     to apply is not fatal; tell the user).
+     to apply is not fatal; tell the user). An `error` naming a
+     `pre-create hook` means the user's hook refused that repo: report the
+     hook and its exit status; don't work around it.
    - The description feeds branch templates; keep it short.
 4. Work in each repo's `worktree_path` (from the result or `show`). Get one
    path with `fleet-task jump <TICKET> --repo <repo>`.
@@ -146,6 +153,14 @@ or `unknown` worktree: without a terminal they exit 2 naming `--force`,
 nothing removed. Then either the user commits/discards the changes, or —
 only if they explicitly agree to lose them — rerun with `--force`.
 
+After removing a worktree, `rm` deletes its local branch only if every commit
+on it is on a remote; otherwise it keeps it (`branch_deleted: false`,
+`branch_kept_reason` in the JSON) — tell the user which branches were kept
+and why. `--keep-branch` always keeps it. `--delete-branch` deletes even
+unpushed work: only with the user's explicit agreement (without a terminal
+it exits 2 unless `--force` is also given). A `pre-remove` hook can refuse a
+repo (`error` names it; the repo stays in the task).
+
 ## Failure handling
 
 - Exit 2: read the message, it names the missing/invalid flag; fix and retry.
@@ -153,11 +168,21 @@ only if they explicitly agree to lose them — rerun with `--force`.
   check `fleet-task list`), an invalid ticket id or branch name, and
   uncommitted changes blocking `rm`/`edit --remove` (see above).
 - Exit 1 with JSON: retry only the failed repos (`edit --add <repo>` for a
-  failed create; rerun `rm`/`mv` — both resume).
+  failed create; rerun `rm`/`mv` — both resume). A `pre-*` hook failure or a
+  timeout ("killed after the … timeout": a hung hook, or a fetch exceeding
+  `git.network_timeout`) is in `error`; retrying the same thing won't help —
+  tell the user.
 - "task is locked by another fleet-task" (exit 1): another fleet-task
   command is working on the same ticket (it may take minutes, e.g. npm).
-  Wait and retry; never delete the `.lock` file yourself — ask the user if
-  it persists.
+  Wait and retry. If it persists, run `fleet-task unlock <TICKET> --json`: it
+  removes the lock only if its owner process is gone, and refuses (exit 1,
+  naming the pid) while it is still running. Never pass `--force` to
+  `unlock` unless the user agreed, and never delete the `.lock` file
+  yourself.
+- A fetch failing with ssh's `Permission denied` or `Host key verification
+  failed`: without a terminal fleet runs ssh in BatchMode, so it can't ask
+  for a passphrase or confirm a host key. Tell the user (e.g. load the key
+  into ssh-agent); don't change their ssh config.
 - "currently active in fleet-run": stop the apps (with the user's OK) first.
 - "has schema_version N, but this fleet only understands up to M": the state
   file was written by a newer fleet. Don't edit or delete it; tell the user to

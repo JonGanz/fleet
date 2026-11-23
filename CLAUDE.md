@@ -61,7 +61,9 @@ than one of them needs lives in `internal/`, one package per concern:
 - `internal/wsl` — `wslpath` wrappers, PowerShell quoting and command scripts, the same-drive
   check.
 - `internal/picker` — the bubbletea list picker.
-- `internal/hooks` — hook discovery, env and running.
+- `internal/hooks` — hook discovery, env and running (pre-* veto, timeout).
+- `internal/proc` — running a child with a timeout, optionally in its own process group (killed as
+  a group; SIGINT/SIGTERM/SIGHUP forwarded, then re-raised), for hooks and network git.
 - `internal/tmuxsock` — the `FLEET_TMUX_SOCKET` `-L` argument.
 
 Sharing code does not change how the binaries coordinate at runtime; they still talk only through:
@@ -122,7 +124,7 @@ shellcheck on `install.sh`; dependabot updates the Go module and actions weekly.
 `repos.yaml` marks each repo `runtime: linux` or `runtime: windows`. This field changes how all
 three tools execute, not just what they run:
 - `linux` repos: git and commands run directly in WSL/Linux; `fleet-cache ensure` hardlinks
-  `node_modules` from its cache (`<cache dir>/node-cache/<hash>`).
+  `node_modules` from its cache (`<cache dir>/node-cache/<key>`).
 - `windows` repos: the bare clone and worktree live on an NTFS volume (`windows_base`,
   `windows_worktree_root`) and are driven by Windows-native `git.exe` via `powershell.exe`; the
   normal WSL-side worktree path is a **symlink** to the real tree. `fleet-run` resolves that symlink
@@ -149,7 +151,11 @@ interrupted first run, refuses a non-empty non-repo directory, and only warns (n
 the base's `origin` URL differs from `repos.yaml`. `planWorktreeAdd` then picks the branch: local
 branch exists → attach it; else `origin/<branch>` exists → create a local branch tracking it; else
 create from `origin/<default_branch>` with `--no-track` (so a plain `git push` can't target the
-default branch).
+default branch). Network git (`fetch`) is killed after `git.network_timeout` (default 10m,
+`internal/proc`; own process group only without a terminal, so ssh/HTTPS prompts keep working on
+one), and without a terminal WSL-side fetch gets `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` unless
+`GIT_SSH_COMMAND`/`GIT_SSH`/`core.sshCommand` is set (`batchModeSSHEnv`; never for Windows
+`git.exe`).
 
 How git is driven is behind the `gitRunner` interface (`gitrunner.go`; `linuxGit` in `git.go`,
 `windowsGit` in `gitwin.go`, PowerShell runners in `winpath.go`, built on `internal/wsl`). `new`/`edit`/`rm`/`mv` go through
@@ -160,18 +166,27 @@ validate the ticket id and **refuse if `tasks/<ticket>.json` already exists** �
 (bubbletea multiselect, or `--repo` flags, which also switch patches to
 `--skip-patch`/`--no-patches`, default all) → per repo, pick patches (`<config dir>/patches/<repo>/*.patch`, all
 prompts up front, skipped if none) → then per repo, in `createRepoWorktree`: run `pre-create`
-hooks → `Preflight` + `ensureBase` → `addWorktree` (attach / track / create, above) → apply
-patches with `git apply` (not `git am` — see fleet-task README) → run `post-create` hooks → if
-`package-lock.json` exists, shell out to `fleet-cache ensure[-windows]` (non-fatal on failure) →
-write `tasks/<ticket>.json` (after *each* successful repo, so an interrupted `new` leaves a task
-that `edit --add` can finish). Every repo's branch name is validated (`validateBranchNames`) before
+hooks (a failing one vetoes the repo) → `Preflight` + `ensureBase` → `InspectWorktreePath` +
+`decideAdoption`: a leftover worktree of the base on the expected branch is adopted (no
+`worktree add`, no patches, `patches: null`), anything else at the path is an error → else
+`addWorktree` (attach / track / create, above) → apply patches with `git apply` (not `git am` —
+see fleet-task README) → run `post-create` hooks → if `package-lock.json` exists, shell out to
+`fleet-cache ensure[-windows]` (non-fatal on failure) → write `tasks/<ticket>.json` (after *each*
+successful repo, so an interrupted `new` leaves a task that `edit --add` can finish, adopting the
+repo it was working on). Every repo's branch name is validated (`validateBranchNames`) before
 any work. `edit` reuses `createRepoWorktree` for added repos and the same teardown as `rm` for
 removed ones. Every repo is attempted even after a failure; commands exit 1 if any failed.
 `rm`/`mv`/`edit`-removal refuse a ticket that `fleet-run` currently has active (`tmux_check.go`
 reads `@fleet_task_ticket`, honouring `FLEET_TMUX_SOCKET`). `rm` and `edit --remove` also refuse a
 worktree with uncommitted changes beyond fleet's own applied patches, or one that can't be
 checked (`changes.go`: `checkRemovable`), unless `--force` — a `[y/N]` prompt on a terminal,
-exit 2 without one; `show` and `list --status` report the same check.
+exit 2 without one; `show` and `list --status` report the same check. A failing `pre-remove` hook
+vetoes that repo's removal. After a worktree is removed, `cleanupBranch` (`cmd_rm.go`) deletes its
+local branch from the base only if `rev-list --count <branch> --not --remotes` is 0 (else keeps it
+and says why; `branch_deleted`/`branch_kept_reason` in JSON); `--keep-branch` keeps it,
+`--delete-branch` deletes regardless after `checkBranchDeletion`'s up-front `y/N` (exit 2 without
+a terminal unless `--force`). Hooks (`internal/hooks`) are killed after `hooks.timeout` (default
+5m), as a process group; pre-* failures veto the one repo/window, post-* failures warn.
 
 Subcommand flag parsing is per-subcommand `flag.FlagSet`s in `args.go` (flags and positionals may
 interleave; `--help` per command). fleet-task-wide helpers (`requireNotActive`, config loading,
@@ -186,14 +201,16 @@ order. It's a `<file>.lock` sibling created with `O_EXCL` containing the owner p
 construction; the lock only guards the rare same-ticket race. It fails fast (exit 1, "locked by
 another fleet-task") instead of waiting. A live pid's lock is never taken over; a dead pid's is; one
 with no readable pid is once older than a minute. Takeover renames the stale file aside first, so
-two processes can't both take over.
+two processes can't both take over. `fleet-task unlock <ticket>` (`cmd_unlock.go`) removes a lock
+by the same rule (refusing a live owner unless `--force`); the "locked" error points at it.
 
 Unit-tested (in `cmd/fleet-task` or the `internal/` package that owns the code): config parsing,
 state round-trip, locking, hook discovery/ordering/env, SSH URL detection, arg parsing, branch
 templates, picker state machines, PowerShell script builders.
 Tested against real temp git repos (skipped without `git`): base setup and worktree-add modes
 (`git_test.go`), the changes check and removal guard (`changes_test.go`), `new`/`mv` flows
-(`e2e_test.go`). Deliberately left to manual testing: the Windows runner (`gitwin.go`),
+(`e2e_test.go`), hook vetoes, adoption, branch cleanup and the fetch timeout
+(`lifecycle_test.go`), `unlock` (`cmd_unlock_test.go`). Deliberately left to manual testing: the Windows runner (`gitwin.go`),
 `ssh-add`, the `fleet-cache` shell-out (`cache.go`) and the picker's terminal wiring.
 
 ### `fleet-run`: one fixed tmux session, only one ticket live at a time
@@ -216,7 +233,7 @@ crashed app is a dead pane that `status` reports, `logs` reads (`capture-pane`) 
 respawns; `restart` respawns live panes too. Existing windows are always targeted by tmux window
 id (`@N`), never by name, so dots in repo/run names work; `config.go` rejects `.`/`:` in
 `tmux.session_name`. `pre-run`/`post-run` hooks (`hooks.go`, on `internal/hooks`) run around each
-window created or respawned. `FLEET_TMUX_SOCKET` makes every tmux call use `-L <value>`. `fleet-run start [--ticket <id>]` resolves the ticket: `--ticket`, else the only file under
+window created or respawned; a failing `pre-run` hook cancels that window (reported `failed`). `FLEET_TMUX_SOCKET` makes every tmux call use `-L <value>`. `fleet-run start [--ticket <id>]` resolves the ticket: `--ticket`, else the only file under
 `tasks/*.json`, else a picker when there are several (zero is an error; there's no "plain
 checkout, no ticket" mode). "Which ticket is active" is tracked via two tmux user options set with
 `-g` (global, `activeticket.go`; not per-session, because `set-option -t =<session>` can't resolve
@@ -240,19 +257,21 @@ wrapper. `integration_test.go` drives the real commands against a private tmux s
 
 ### `fleet-cache`: content-addressed hardlink cache
 
-Cache key is the sha256 of a repo's `package-lock.json`. `fleet-cache ensure <dir>` populates
-`<cache root>/node-cache/<hash>/` once per hash (copies both `package-lock.json` *and*
+Cache key is a sha256 over a versioned encoding of the sha256 of `package-lock.json` and of the
+sibling `.npmrc` (or `none`) — `cacheKey` in `hash.go`, the one function ensure, ensure-windows and
+gc all use. `fleet-cache ensure <dir>` populates
+`<cache root>/node-cache/<key>/` once per key (copies both `package-lock.json` *and*
 `package.json` in before running `npm ci` — `npm ci` needs both present, copying only the lockfile
 fails with an ENOENT on `package.json`; another bug caught during end-to-end testing), then
 hardlinks that cached `node_modules` tree into the target directory (regular files via `os.Link`;
 symlinks, e.g. npm bin shims, recreated as symlinks, via `hardlink.go`'s `hardlinkTree`). Entries
-are built in `<hash>.tmp-<pid>` staging dirs and renamed into place (`entry.go`), so a killed
+are built in `<key>.tmp-<pid>` staging dirs and renamed into place (`entry.go`), so a killed
 `npm ci` never leaves a reusable half-built entry and concurrent ensures don't corrupt each other.
-`<dir>/node_modules/.fleet-cache-hash` records the linked hash, making repeat `ensure` a no-op
-(preserves hand-made `npm link`s) unless the lockfile changed or `--force` is given. On Linux,
+`<dir>/node_modules/.fleet-cache-hash` records the linked key, making repeat `ensure` a no-op
+(preserves hand-made `npm link`s) unless the lockfile or `.npmrc` changed or `--force` is given. On Linux,
 `samedev_unix.go` fails early if cache and target are on different devices. The worktree's
-`.npmrc` is staged (`0600`) for `npm ci` and deleted right after; the cache key stays the lockfile
-hash alone. A `package.json` with `workspaces` is rejected up front. SIGINT/SIGTERM during a build
+`.npmrc` is staged (`0600`) for `npm ci` and deleted right after; it is part of the key only as a
+hash, so no token is stored. A `package.json` with `workspaces` is rejected up front. SIGINT/SIGTERM during a build
 stops npm and removes the staging dir (`interrupt.go`), exiting 1.
 
 `fleet-cache gc` only ever deletes when given both `--roots` (directories to scan for
@@ -272,7 +291,7 @@ Defined authoritatively in `docs/CONTRACT.md`; summarized here as a reminder of 
   absolute paths). This is also how tests and the E2E flow sandbox a fake environment without
   touching `~/.config` or `~/.local/state`. `FLEET_TMUX_SOCKET` (tmux `-L`) is read by both `fleet-run` and
   `fleet-task`'s active-ticket check, and sandboxes tmux the same way.
-- `repos.yaml` shape (`tmux`, `worktree_root`, `windows_*`, `defaults`, and per-repo `origin`/
+- `repos.yaml` shape (`tmux`, `hooks.timeout`, `git.network_timeout`, `worktree_root`, `windows_*`, `defaults`, and per-repo `origin`/
   `base`/`default_branch`/`branch_template`/`runtime`/`run`) — parsed and validated once, by
   `internal/config`, for both `fleet-task` and `fleet-run` (`fleet-run` ignores `branch_template`
   and adds its own window-name checks).
@@ -284,4 +303,5 @@ Defined authoritatively in `docs/CONTRACT.md`; summarized here as a reminder of 
 - Hook env vars (`FLEET_TICKET`, `FLEET_DESCRIPTION`, `FLEET_REPO`, `FLEET_BRANCH`,
   `FLEET_WORKTREE_DIR`, plus `FLEET_RUN_NAME` for run hooks) passed to executables under
   `<config dir>/hooks/{pre-create,post-create,pre-remove,post-remove,pre-run,post-run}/*`;
-  fleet-task runs the create/remove phases, fleet-run the run phases.
+  fleet-task runs the create/remove phases, fleet-run the run phases. A failing pre-* hook vetoes
+  its repo/window; every hook is killed after `hooks.timeout`.

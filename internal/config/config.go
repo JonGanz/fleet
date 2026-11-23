@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -57,9 +58,34 @@ type DefaultsConfig struct {
 	WindowsBaseRoot string `yaml:"windows_base_root"`
 }
 
+// Defaults for the timeouts repos.yaml may override, and the largest value
+// accepted for either: a limit beyond a day is a typo, not a wish.
+const (
+	DefaultHookTimeout    = 5 * time.Minute
+	DefaultNetworkTimeout = 10 * time.Minute
+	MaxTimeout            = 24 * time.Hour
+)
+
+// HooksConfig is the hooks section of repos.yaml.
+type HooksConfig struct {
+	// Timeout is a Go duration string ("90s", "5m"); every hook is killed
+	// once it has run this long. Empty means DefaultHookTimeout.
+	Timeout string `yaml:"timeout"`
+}
+
+// GitConfig is the git section of repos.yaml (used by fleet-task).
+type GitConfig struct {
+	// NetworkTimeout is a Go duration string; a network git operation
+	// (fetch) is killed once it has run this long. Empty means
+	// DefaultNetworkTimeout.
+	NetworkTimeout string `yaml:"network_timeout"`
+}
+
 // ReposConfig is the top-level shape of repos.yaml.
 type ReposConfig struct {
 	Tmux                TmuxConfig     `yaml:"tmux"`
+	Hooks               HooksConfig    `yaml:"hooks"`
+	Git                 GitConfig      `yaml:"git"`
 	WorktreeRoot        string         `yaml:"worktree_root"`
 	WindowsWorktreeRoot string         `yaml:"windows_worktree_root"`
 	WindowsCacheRoot    string         `yaml:"windows_cache_root"`
@@ -146,6 +172,25 @@ func (c *ReposConfig) FindRepo(name string) *RepoConfig {
 	return nil
 }
 
+// HookTimeout returns how long a hook may run: hooks.timeout, or
+// DefaultHookTimeout when it is unset or c is nil (rm without a usable
+// repos.yaml). Load has already rejected an invalid value.
+func (c *ReposConfig) HookTimeout() time.Duration {
+	if c == nil {
+		return DefaultHookTimeout
+	}
+	return timeoutOrDefault(c.Hooks.Timeout, DefaultHookTimeout)
+}
+
+// NetworkTimeout returns how long a network git operation may run:
+// git.network_timeout, or DefaultNetworkTimeout when it is unset or c is nil.
+func (c *ReposConfig) NetworkTimeout() time.Duration {
+	if c == nil {
+		return DefaultNetworkTimeout
+	}
+	return timeoutOrDefault(c.Git.NetworkTimeout, DefaultNetworkTimeout)
+}
+
 // RepoNames returns the names of all repos in the config, in file order.
 func (c *ReposConfig) RepoNames() []string {
 	names := make([]string, 0, len(c.Repos))
@@ -155,12 +200,49 @@ func (c *ReposConfig) RepoNames() []string {
 	return names
 }
 
+// parseTimeout parses a repos.yaml timeout: a Go duration string, positive
+// and at most MaxTimeout. "0" is rejected rather than read as "no limit": a
+// hung hook or fetch blocking an agent forever is what the limit is for.
+func parseTimeout(field, value string) (time.Duration, error) {
+	d, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("%s %q is not a duration (use a Go duration such as 90s, 5m or 1h30m)", field, value)
+	}
+	if d <= 0 || d > MaxTimeout {
+		return 0, fmt.Errorf("%s %q must be more than 0 and at most %s", field, value, MaxTimeout)
+	}
+	return d, nil
+}
+
+// timeoutOrDefault is the parsed value, or def when it is empty (or, which
+// Load prevents, invalid).
+func timeoutOrDefault(value string, def time.Duration) time.Duration {
+	if value == "" {
+		return def
+	}
+	d, err := parseTimeout("", value)
+	if err != nil {
+		return def
+	}
+	return d
+}
+
 // validate rejects repo entries no fleet tool can use safely: a repo name
 // becomes a directory component (<worktree_root>/<ticket>/<repo>, the
 // patches dir, base_root/<repo>) and a lookup key, so it must be non-empty,
 // unique and a single plain path component; runtime picks how git and run
 // commands are executed, so a typo must not silently fall through to linux.
 func (c *ReposConfig) validate() error {
+	if c.Hooks.Timeout != "" {
+		if _, err := parseTimeout("hooks.timeout", c.Hooks.Timeout); err != nil {
+			return err
+		}
+	}
+	if c.Git.NetworkTimeout != "" {
+		if _, err := parseTimeout("git.network_timeout", c.Git.NetworkTimeout); err != nil {
+			return err
+		}
+	}
 	seen := make(map[string]bool, len(c.Repos))
 	for i, r := range c.Repos {
 		switch {

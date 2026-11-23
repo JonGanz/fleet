@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const fixtureYAML = `
@@ -276,5 +277,43 @@ func TestParseAppliesDefaultsAndValidates(t *testing.T) {
 	var nilCfg *ReposConfig
 	if nilCfg.FindRepo("x") != nil {
 		t.Error("FindRepo on a nil config must return nil")
+	}
+}
+
+func TestTimeouts(t *testing.T) {
+	cfg, err := Parse([]byte("repos: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HookTimeout() != DefaultHookTimeout || cfg.NetworkTimeout() != DefaultNetworkTimeout {
+		t.Errorf("defaults: hook %s, network %s", cfg.HookTimeout(), cfg.NetworkTimeout())
+	}
+	var nilCfg *ReposConfig
+	if nilCfg.HookTimeout() != DefaultHookTimeout || nilCfg.NetworkTimeout() != DefaultNetworkTimeout {
+		t.Error("nil config must give the defaults")
+	}
+
+	cfg, err = Parse([]byte("hooks:\n  timeout: 90s\ngit:\n  network_timeout: 1h30m\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HookTimeout() != 90*time.Second || cfg.NetworkTimeout() != 90*time.Minute {
+		t.Errorf("configured: hook %s, network %s", cfg.HookTimeout(), cfg.NetworkTimeout())
+	}
+
+	bad := map[string]string{
+		"hooks:\n  timeout: 0\n":                "must be more than 0",
+		"hooks:\n  timeout: 0s\n":               "must be more than 0",
+		"hooks:\n  timeout: -5s\n":              "must be more than 0",
+		"hooks:\n  timeout: 90\n":               "is not a duration",
+		"hooks:\n  timeout: soon\n":             "is not a duration",
+		"git:\n  network_timeout: 25h\n":        "at most 24h0m0s",
+		"git:\n  network_timeout: \"0\"\n":      "git.network_timeout",
+		"git:\n  network_timeout: 10 minutes\n": "is not a duration",
+	}
+	for body, want := range bad {
+		if _, err := Parse([]byte(body)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: err = %v, want it to mention %q", body, err, want)
+		}
 	}
 }

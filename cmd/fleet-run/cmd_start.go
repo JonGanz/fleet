@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/JonGanz/fleet/internal/cli"
 	"github.com/JonGanz/fleet/internal/config"
@@ -185,7 +186,7 @@ func startFlow(cfg *config.ReposConfig, ts *taskstate.State, opts startOpts) err
 	}
 
 	for _, pair := range selected {
-		res := startOne(session, cfg.Tmux.ConfigFile, ts, pair, panes, opts.restart)
+		res := startOne(session, cfg.Tmux.ConfigFile, ts, pair, panes, opts.restart, cfg.HookTimeout())
 		if res.launched() {
 			if err := record(); err != nil {
 				res.Status, res.Error = startStatusFailed, err.Error()
@@ -245,8 +246,10 @@ func selectStartTargets(pairs []RunPair, opts startOpts) ([]RunPair, error) {
 
 // startOne creates pair's window, respawns it if its pane is dead (or alive
 // and restart is set), or leaves a live one alone. pre-run/post-run hooks run
-// around every create or respawn, never for a window left alone.
-func startOne(session, configFile string, ts *taskstate.State, pair RunPair, panes []PaneInfo, restart bool) StartResult {
+// around every create or respawn (each killed after hookTimeout), never for a
+// window left alone. A failing pre-run hook cancels this window: it is
+// reported as failed and neither created nor respawned.
+func startOne(session, configFile string, ts *taskstate.State, pair RunPair, panes []PaneInfo, restart bool, hookTimeout time.Duration) StartResult {
 	res := StartResult{Target: pair.Label(), Window: pair.WindowName(), Status: startStatusStarted}
 	pane, exists := findPane(panes, res.Window)
 	if exists {
@@ -256,7 +259,10 @@ func startOne(session, configFile string, ts *taskstate.State, pair RunPair, pan
 		}
 	}
 
-	runRunHooks(hooks.PreRun, ts, pair)
+	if err := runRunHooks(hooks.PreRun, ts, pair, hookTimeout); err != nil {
+		res.Status, res.Error = startStatusFailed, fmt.Sprintf("not started: %v", err)
+		return res
+	}
 	var err error
 	if exists {
 		err = respawnWindow(pane.WindowID, pair)
@@ -267,6 +273,6 @@ func startOne(session, configFile string, ts *taskstate.State, pair RunPair, pan
 		res.Status, res.Error = startStatusFailed, err.Error()
 		return res
 	}
-	runRunHooks(hooks.PostRun, ts, pair)
+	_ = runRunHooks(hooks.PostRun, ts, pair, hookTimeout) // post-run failures only warn
 	return res
 }

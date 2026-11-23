@@ -4,31 +4,12 @@ Decisions in progress, feature ideas not started, paths never exercised end to e
 decisions.
 
 ## Decided, in progress
-- **Cache key:** sha256 of `package-lock.json` plus the `.npmrc` contents (no Node version/arch).
-  Contract change; existing entries become unreferenced and are rebuilt once, `gc` removes the old
-  ones.
-- **Hooks:** a non-zero exit from a `pre-create`, `pre-remove` or `pre-run` hook cancels that
-  repo/window (reported as failed, the rest still attempted); `post-*` hooks still only warn. Every
-  hook is killed after a timeout, default 5 minutes, configurable in `repos.yaml`.
-- **Hangs:** network git operations (fetch, the first fetch of a new base) get a timeout, default
-  10 minutes, configurable. When no terminal is available and neither `GIT_SSH_COMMAND` nor
-  `core.sshCommand` is set, fleet sets `GIT_SSH_COMMAND="ssh -o BatchMode=yes"`; the user's own SSH
-  setting is never overridden.
-- **Branch cleanup:** `rm` deletes the local ticket branch only when every commit on it is on a
-  remote, otherwise keeps it and says so; `--keep-branch` always keeps it; `--delete-branch` forces
-  deletion behind the same confirmation as `--force`.
-- **Interrupted `new`:** when `new` / `edit --add` finds the target path is already a worktree of
-  that repo's base on the expected branch, adopt it (run the remaining steps: hooks and
-  `node_modules`) instead of failing; anything else at the path stays an error.
-- **Lock:** add `fleet-task unlock <ticket>`, removing a ticket's lock only when the owning process
-  is gone (refuse while it is alive; `--force` overrides). The "task is locked" error and the agent
-  skill point to it instead of a raw `rm`.
 - **Function order:** sort functions alphabetically within every file (methods grouped under their
   type), as a dedicated pass after the restructure; no CI enforcement.
 
 ## Feature ideas (not started)
 - `fleet-task doctor` / `validate`: dependencies, config, orphans (worktree without state, state
-  without worktree — e.g. the repo a killed `new` was working on when interrupted).
+  without worktree).
 - `fleet-task sync` (fetch + rebase onto the default branch) and `new --base <ref>`.
 - `fleet-task init` (scaffold `repos.yaml`) and `config` (print resolved paths).
 - `fleet-run logs --follow`, and persistent logs via `pipe-pane` (logs are capped by tmux
@@ -41,10 +22,14 @@ decisions.
 - Stamp the version into the installed skill.
 - `fleet-task rm --dry-run` (and `edit --remove --dry-run`): show what would be removed, including
   the uncommitted-changes check, without removing anything.
-- Signal handling in fleet-task and fleet-run: only fleet-cache handles SIGINT/SIGTERM today. A
-  Ctrl-C during `new`/`edit`/`rm`/`mv` or a hook stops the process mid-step; state is persisted per
-  repo, and the adoption decision above covers the leftover worktree, but child processes (git,
-  npm via fleet-cache, hooks) are not stopped cleanly and the lock is left for pid-based takeover.
+- Signal handling in fleet-task and fleet-run: only fleet-cache handles SIGINT/SIGTERM fully
+  today. A Ctrl-C during `new`/`edit`/`rm`/`mv` stops the process mid-step; state is persisted per
+  repo, a leftover worktree is adopted by the next `new`/`edit --add`, and the lock is left for
+  pid-based takeover or `fleet-task unlock`. Hooks and headless network git run in their own
+  process group: SIGINT/SIGTERM/SIGHUP received meanwhile are forwarded to that group and then
+  end fleet as before, but a SIGKILL of fleet leaves that group running until it finishes (or
+  forever, with no timeout left to kill it). Other children (local git, npm via fleet-cache) stay in
+  fleet's own group and get a terminal's Ctrl-C directly, with no cleanup.
 - Lint configuration file (`staticcheck.conf` or a golangci config) so `make lint` and CI use the
   same, explicit checks.
 - Release tooling, deferred until the tool has other users: GoReleaser (linux amd64/arm64 +
@@ -52,7 +37,9 @@ decisions.
   conventional commits (git-cliff or release-please).
 
 ## Untested paths (never run end to end)
-- Everything `runtime: windows`: `windowsGit` and symlinked worktrees, `fleet-cache
+- Everything `runtime: windows`: `windowsGit` and symlinked worktrees (including adoption via
+  `git.exe worktree list`, `branch -D` after `rm`, and the fetch timeout killing `powershell.exe` —
+  whether that also ends the Windows-side `git.exe` is unknown), `fleet-cache
   ensure-windows` / `gc-windows` (only helpers and generated PowerShell scripts were exercised),
   the approximate changes check, PowerShell quoting, interrupt behaviour of Windows-side npm, and
   the staging-to-entry rename (a plain `os.Rename` over `/mnt/c`) under antivirus/indexer
@@ -75,6 +62,13 @@ decisions.
 - An interrupted `fleet-cache ensure` exits 1 (not 130/143).
 - `fleet-task list` reports change status only with `--status`, for speed.
 - `fleet-run stop` kills every window with a matching name.
+- A missing and an empty `.npmrc` produce different cache keys (at most one extra entry; keeps the
+  encoding simple).
+- Hooks and headless network git run in their own process group so a timeout kills their children
+  too; such a hook can't read the terminal. With a terminal, network git stays in fleet's group so
+  ssh/HTTPS prompts still work, and a timeout kills only git itself.
+- `rm`'s branch check doesn't fetch: "on a remote" means reachable from a remote-tracking ref as of
+  the last fetch.
 - The cache key leaves out Node version and arch: after switching Node versions, native addons in a
   shared entry can be stale; run `fleet-cache ensure --force <dir>` to rebuild.
 - fleet-cache builds an entry in a staging dir holding only `package.json`, `package-lock.json`

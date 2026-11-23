@@ -112,7 +112,7 @@ func TestLockTicketLiveOwnerFailsFast(t *testing.T) {
 	if time.Since(start) > time.Second {
 		t.Error("should fail fast, not wait")
 	}
-	if !strings.Contains(err.Error(), lockPath) || !strings.Contains(err.Error(), "rm ") {
+	if !strings.Contains(err.Error(), lockPath) || !strings.Contains(err.Error(), "`fleet-task unlock T-1`") {
 		t.Errorf("error should name the lock file and how to clear it: %v", err)
 	}
 	if _, err := os.Stat(lockPath); err != nil {

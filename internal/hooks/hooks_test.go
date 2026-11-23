@@ -2,13 +2,16 @@ package hooks
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JonGanz/fleet/internal/cli"
+	"github.com/JonGanz/fleet/internal/proc"
 )
 
 func TestDiscoverHooks(t *testing.T) {
@@ -102,37 +105,91 @@ func TestEnvVars(t *testing.T) {
 	}
 }
 
-// TestRun runs real hook scripts: sorted order, env, output routing, and a
-// failing hook warning without stopping the next one.
-func TestRun(t *testing.T) {
+// writeHooks creates the phase's hook dir under a sandboxed config dir and
+// writes each script into it, executable.
+func writeHooks(t *testing.T, phase string, scripts map[string]string) string {
+	t.Helper()
 	cfgDir := t.TempDir()
 	t.Setenv("FLEET_CONFIG_DIR", cfgDir)
-	dir := filepath.Join(cfgDir, "hooks", PreCreate)
+	dir := filepath.Join(cfgDir, "hooks", phase)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
-	}
-	scripts := map[string]string{
-		"10-fail": "#!/bin/sh\nexit 3\n",
-		"20-log":  "#!/bin/sh\necho \"$FLEET_TICKET $FLEET_REPO $FLEET_BRANCH\"\n",
 	}
 	for name, body := range scripts {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+	return dir
+}
+
+// TestRunPostPhaseWarns runs real hook scripts: sorted order, env, output
+// routing, and a failing post-* hook warning without stopping the next one.
+func TestRunPostPhaseWarns(t *testing.T) {
+	dir := writeHooks(t, PostCreate, map[string]string{
+		"10-fail": "#!/bin/sh\nexit 3\n",
+		"20-log":  "#!/bin/sh\necho \"$FLEET_TICKET $FLEET_REPO $FLEET_BRANCH\"\n",
+	})
 	var stdout, stderr bytes.Buffer
 	defer cli.SetStderr(&stderr)()
-	if err := Run(PreCreate, Env{Ticket: "T-1", Repo: "web", Branch: "b"}, &stdout); err != nil {
+	if err := Run(PostCreate, Env{Ticket: "T-1", Repo: "web", Branch: "b"}, &stdout, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "T-1 web b" {
 		t.Errorf("hook after a failing one saw/printed %q", got)
 	}
-	if !strings.Contains(stderr.String(), "warning: pre-create hook "+filepath.Join(dir, "10-fail")+" failed for web: exit status 3") {
+	if !strings.Contains(stderr.String(), "warning: post-create hook "+filepath.Join(dir, "10-fail")+" failed for web: exit status 3") {
 		t.Errorf("failure warning = %q", stderr.String())
 	}
 	// No hooks dir for the phase: nothing happens.
-	if err := Run(PostCreate, Env{}, &stdout); err != nil {
+	if err := Run(PreRemove, Env{}, &stdout, time.Minute); err != nil {
 		t.Errorf("missing phase dir: %v", err)
+	}
+}
+
+// TestRunPrePhaseVetoes: the first failing pre-* hook stops the phase and
+// is returned, naming the hook and its exit status.
+func TestRunPrePhaseVetoes(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	dir := writeHooks(t, PreCreate, map[string]string{
+		"10-ok":   "#!/bin/sh\nexit 0\n",
+		"20-fail": "#!/bin/sh\nexit 4\n",
+		"30-next": "#!/bin/sh\ntouch " + marker + "\n",
+	})
+	err := Run(PreCreate, Env{Repo: "web"}, io.Discard, time.Minute)
+	if !IsVeto(err) {
+		t.Fatalf("want a veto, got %v", err)
+	}
+	want := "pre-create hook " + filepath.Join(dir, "20-fail") + " failed: exit status 4"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
+	}
+	if _, serr := os.Stat(marker); !os.IsNotExist(serr) {
+		t.Error("a hook after the vetoing one ran")
+	}
+}
+
+// TestRunTimeout: a hung hook is killed after the timeout; in a pre-* phase
+// that is a veto.
+func TestRunTimeout(t *testing.T) {
+	writeHooks(t, PreRun, map[string]string{"10-hang": "#!/bin/sh\nsleep 60\n"})
+	start := time.Now()
+	err := Run(PreRun, Env{Repo: "web", RunName: "dev"}, io.Discard, 200*time.Millisecond)
+	if !IsVeto(err) || !proc.IsTimeout(err) {
+		t.Fatalf("want a timeout veto, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "killed after the 200ms timeout") {
+		t.Errorf("error = %q", err)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Errorf("Run took %s", time.Since(start))
+	}
+}
+
+func TestVetoes(t *testing.T) {
+	for phase, want := range map[string]bool{PreCreate: true, PreRemove: true, PreRun: true, PostCreate: false, PostRemove: false, PostRun: false} {
+		if Vetoes(phase) != want {
+			t.Errorf("Vetoes(%s) = %v", phase, !want)
+		}
 	}
 }

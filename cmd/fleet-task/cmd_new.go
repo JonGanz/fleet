@@ -226,7 +226,7 @@ func addRepos(cfg *config.ReposConfig, st *taskstate.State, tf, wtRoot string, r
 			failed++
 			continue
 		}
-		tr, patchErrors, err := createRepoWorktree(cfg, repo, st.Ticket, st.Description, wtRoot, patchesByRepo[repoName])
+		tr, patchErrors, adopted, err := createRepoWorktree(cfg, repo, st.Ticket, st.Description, wtRoot, patchesByRepo[repoName])
 		if err != nil {
 			cli.Errorf("%v", err)
 			results = append(results, repoResult{Repo: repoName, Action: "created", Error: err.Error()})
@@ -246,6 +246,7 @@ func addRepos(cfg *config.ReposConfig, st *taskstate.State, tf, wtRoot string, r
 			WorktreePath: tr.WorktreePath,
 			Patches:      tr.Patches,
 			PatchErrors:  patchErrors,
+			Adopted:      adopted,
 		})
 	}
 	return results, failed, nil
@@ -254,42 +255,53 @@ func addRepos(cfg *config.ReposConfig, st *taskstate.State, tf, wtRoot string, r
 // createRepoWorktree performs the full per-repo worktree setup, shared
 // between `new` (every repo for a brand new task) and `edit`'s add-repo
 // path (a subset of repos added to an already-existing task): pre-create
-// hook, then base clone/fetch and worktree creation/branch checkout, patch
-// application, post-create hook, and node_modules cache priming. Note the
-// order: pre-create hooks run *before* the base clone is ensured, so they
-// can't assume the base exists. Hook and patch failures are non-fatal
-// (warned to stderr); a failure setting up the worktree itself is returned
-// as an error so the caller can skip this repo and keep going with the rest.
-// Applied patch names are recorded on the returned taskstate.Repo; patches that
-// failed to apply are returned as patchErrors.
-func createRepoWorktree(cfg *config.ReposConfig, repo *config.RepoConfig, ticket, description, wtRoot string, patches []string) (tr taskstate.Repo, patchErrors []string, err error) {
+// hooks, then base clone/fetch and worktree creation/branch checkout (or
+// adoption of a worktree an interrupted run left behind), patch application,
+// post-create hooks, and node_modules cache priming. Note the order:
+// pre-create hooks run *before* the base clone is ensured, so they can't
+// assume the base exists.
+//
+// A failing pre-create hook cancels this repo: nothing else is done for it
+// and the error is returned, like a failure setting up the worktree itself,
+// so the caller can report it and keep going with the rest. Post-create hook
+// and patch failures are only warned about. Applied patch names are recorded
+// on the returned taskstate.Repo; patches that failed to apply are returned
+// as patchErrors. An adopted worktree gets no patches applied (they may
+// already be there), so its Patches is nil: unknown.
+func createRepoWorktree(cfg *config.ReposConfig, repo *config.RepoConfig, ticket, description, wtRoot string, patches []string) (tr taskstate.Repo, patchErrors []string, adopted bool, err error) {
 	worktreePath := filepath.Join(wtRoot, ticket, repo.Name)
 	branch := branchName(repo.BranchTemplate, ticket, description)
 
 	hook := hooks.Env{Ticket: ticket, Description: description, Repo: repo.Name, Branch: branch, WorktreeDir: worktreePath}
-	if err := hooks.Run(hooks.PreCreate, hook, out); err != nil {
-		cli.Warnf("pre-create hooks for %s: %v", repo.Name, err)
+	if err := hooks.Run(hooks.PreCreate, hook, out, cfg.HookTimeout()); err != nil {
+		return taskstate.Repo{}, nil, false, preHookError(repo.Name+" not set up", hooks.PreCreate, err)
 	}
 
 	runner, base, err := gitFor(cfg, repo)
 	if err != nil {
-		return taskstate.Repo{}, nil, fmt.Errorf("setting up worktree for %s: %w", repo.Name, err)
+		return taskstate.Repo{}, nil, false, fmt.Errorf("setting up worktree for %s: %w", repo.Name, err)
 	}
-	if err := setupWorktree(runner, repo, base, branch, worktreePath); err != nil {
-		return taskstate.Repo{}, nil, fmt.Errorf("setting up worktree for %s: %w", repo.Name, err)
+	adopted, err = setupWorktree(runner, repo, base, branch, worktreePath)
+	if err != nil {
+		return taskstate.Repo{}, nil, false, fmt.Errorf("setting up worktree for %s: %w", repo.Name, err)
 	}
 
-	applied := []string{}
-	for _, p := range patches {
-		if err := runner.ApplyPatch(worktreePath, p); err != nil {
-			cli.Warnf("applying patch %s to %s: %v", p, repo.Name, err)
-			patchErrors = append(patchErrors, fmt.Sprintf("%s: %v", filepath.Base(p), err))
-			continue
+	var applied []string
+	if adopted {
+		fmt.Fprintf(out, "adopted existing worktree %s (%s, branch %s); patches were not applied again and are recorded as unknown\n", worktreePath, repo.Name, branch)
+	} else {
+		applied = []string{}
+		for _, p := range patches {
+			if err := runner.ApplyPatch(worktreePath, p); err != nil {
+				cli.Warnf("applying patch %s to %s: %v", p, repo.Name, err)
+				patchErrors = append(patchErrors, fmt.Sprintf("%s: %v", filepath.Base(p), err))
+				continue
+			}
+			applied = append(applied, filepath.Base(p))
 		}
-		applied = append(applied, filepath.Base(p))
 	}
 
-	if err := hooks.Run(hooks.PostCreate, hook, out); err != nil {
+	if err := hooks.Run(hooks.PostCreate, hook, out, cfg.HookTimeout()); err != nil {
 		cli.Warnf("post-create hooks for %s: %v", repo.Name, err)
 	}
 
@@ -302,7 +314,7 @@ func createRepoWorktree(cfg *config.ReposConfig, repo *config.RepoConfig, ticket
 		Branch:       branch,
 		WorktreePath: worktreePath,
 		Patches:      applied,
-	}, patchErrors, nil
+	}, patchErrors, adopted, nil
 }
 
 // selectPatches globs <config dir>/patches/<repo>/*.patch and, if any
@@ -358,23 +370,40 @@ func requireNoTask(ticket, tf string) error {
 
 // setupWorktree ensures the repo's base clone exists and is fetched
 // (ensureBase, which also completes a base left half-made by an interrupted
-// run) and creates the worktree at worktreePath on branch (addWorktree).
-// Runtime differences (WSL git vs Windows-native git.exe plus a WSL-side
-// symlink) live behind runner; base is the bare clone's WSL-visible path.
-func setupWorktree(runner gitRunner, repo *config.RepoConfig, base, branch, worktreePath string) error {
+// run) and creates the worktree at worktreePath on branch (addWorktree) --
+// unless worktreePath already is a worktree of base on branch, left by an
+// interrupted `new`/`edit --add`: that one is adopted instead (adopted is
+// true; see decideAdoption). Anything else already at worktreePath is an
+// error. Runtime differences (WSL git vs Windows-native git.exe plus a
+// WSL-side symlink) live behind runner; base is the bare clone's
+// WSL-visible path.
+func setupWorktree(runner gitRunner, repo *config.RepoConfig, base, branch, worktreePath string) (adopted bool, err error) {
 	if base == "" {
-		return fmt.Errorf("repo %s has no base (set `base` directly or via defaults.base_root)", repo.Name)
+		return false, fmt.Errorf("repo %s has no base (set `base` directly or via defaults.base_root)", repo.Name)
 	}
 	if err := runner.Preflight(base, worktreePath); err != nil {
-		return err
+		return false, err
 	}
 	if err := ensureBase(runner, repo.Name, repo.Origin, base); err != nil {
-		return err
+		return false, err
 	}
+	// Prune first, so a registration whose directory is gone doesn't look
+	// like something to adopt.
 	if err := runner.Prune(base); err != nil {
 		cli.Warnf("worktree prune for %s: %v", base, err)
 	}
-	return addWorktree(runner, base, worktreePath, branch, repo.DefaultBranch)
+	at, err := runner.InspectWorktreePath(base, worktreePath)
+	if err != nil {
+		return false, fmt.Errorf("checking what is at %s: %w", worktreePath, err)
+	}
+	adopt, err := decideAdoption(at, worktreePath, base, branch)
+	if err != nil {
+		return false, err
+	}
+	if adopt {
+		return true, runner.AdoptWorktree(worktreePath)
+	}
+	return false, addWorktree(runner, base, worktreePath, branch, repo.DefaultBranch)
 }
 
 // validateBranchNames computes every named repo's branch (branchName) and
