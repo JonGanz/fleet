@@ -15,16 +15,18 @@ import (
 // see cli.Version for the fallback when it is left at "dev".
 var version = "dev"
 
-const usage = `fleet-cache: node_modules hardlink cache keyed by package-lock.json hash
+const usage = `fleet-cache: node_modules hardlink cache keyed by package-lock.json + .npmrc
 
 Usage:
   fleet-cache ensure <dir> [--force] [--cache-root <dir>]
       Ensure <dir>/node_modules is populated by hardlinking from the cache,
-      running "npm ci" once per unique package-lock.json hash and reusing it
-      across every worktree sharing that lockfile.
+      running "npm ci" once per cache key and reusing it across every
+      worktree sharing it. The key is a sha256 over the package-lock.json
+      hash and the hash of <dir>/.npmrc (or its absence), so worktrees with
+      the same lockfile but different npm config get separate entries.
 
-      If <dir>/node_modules was already linked from this exact lockfile
-      hash (tracked via a <dir>/node_modules/.fleet-cache-hash marker), this
+      If <dir>/node_modules was already linked from this exact cache key
+      (tracked via a <dir>/node_modules/.fleet-cache-hash marker), this
       is a no-op that leaves node_modules untouched -- including anything
       added since, like an ` + "`npm link`" + ` package symlink.
 
@@ -34,10 +36,10 @@ Usage:
       --cache-root   Cache root; overrides $FLEET_CACHE_DIR.
 
   fleet-cache gc [--roots <dir>[,<dir>...]] [--force] [--json] [--cache-root <dir>]
-      Scan the cache for entries whose package-lock.json hash is no longer
-      referenced by any package-lock.json under --roots (searched
+      Scan the cache for entries whose key is no longer referenced by any
+      package-lock.json (plus the .npmrc beside it) under --roots (searched
       recursively, may be repeated or comma-separated), plus abandoned
-      <hash>.tmp-<pid> staging dirs (older than a day).
+      <key>.tmp-<pid> staging dirs (older than a day).
 
       Every --roots directory must exist and be readable, or gc errors out
       without deleting anything.
@@ -50,7 +52,7 @@ Usage:
 
       Cache root: --cache-root, else $FLEET_CACHE_DIR, else
       $XDG_CACHE_HOME/fleet, else ~/.cache/fleet. Entries live at
-      <cache root>/node-cache/<sha256>.
+      <cache root>/node-cache/<key>.
 
   fleet-cache ensure-windows <wsl-dir> [--force] [--cache-root <wsl-path>]
       Windows-native counterpart of ensure, for runtime: windows repos
@@ -63,15 +65,15 @@ Usage:
       --cache-root   WSL-visible Windows cache root (repos.yaml's
                      windows_cache_root), else auto-detected as
                      %LOCALAPPDATA%\fleet. Entries live at
-                     <cache root>\node-cache\<sha256>.
+                     <cache root>\node-cache\<key>.
 
   fleet-cache gc-windows [--roots <dir>[,<dir>...]] [--force] [--json] [--cache-root <wsl-path>]
       Windows-native counterpart of gc; same --roots/--force/--json rules,
       scanning/deleting against the Windows-native cache root instead.
 
   fleet-cache list [--json] [--cache-root <dir>]
-      List cache entries (hash, complete or not, last modified, on-disk
-      size) and in-progress/abandoned <hash>.tmp-<pid> staging dirs.
+      List cache entries (key, complete or not, last modified, on-disk
+      size) and in-progress/abandoned <key>.tmp-<pid> staging dirs.
       Read-only. Pass a WSL-visible Windows cache root via --cache-root to
       list the Windows-native cache.
 
@@ -121,7 +123,7 @@ type command struct {
 }
 
 const (
-	forceEnsureHelp = "REBUILD: discard node_modules and re-link it from the cache even if its marker already matches the current lockfile hash (manual changes like npm link are lost)"
+	forceEnsureHelp = "REBUILD: discard node_modules and re-link it from the cache even if its marker already matches the current cache key (manual changes like npm link are lost)"
 	forceGCHelp     = "REALLY DELETE stale entries; without it (or without --roots) gc only reports what it would remove"
 	rootsHelp       = "directory (repeatable or comma-separated) to scan recursively for package-lock.json files; must exist"
 	jsonHelp        = "print the gc report as JSON on stdout"

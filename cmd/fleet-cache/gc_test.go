@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestReferencedHashesAndUnreferencedEntries(t *testing.T) {
+func TestReferencedKeysAndUnreferencedEntries(t *testing.T) {
 	// Fake cache root with three entries: two that will be "referenced" by
 	// lockfiles under a fake worktree root, and one stale entry.
 	cacheRootDir := t.TempDir()
@@ -25,15 +25,15 @@ func TestReferencedHashesAndUnreferencedEntries(t *testing.T) {
 	lockB := []byte(`{"name":"b"}`)
 	lockStale := []byte(`{"name":"stale"}`)
 
-	hashA, err := writeAndHash(t, lockA)
+	hashA, err := writeAndKey(t, lockA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hashB, err := writeAndHash(t, lockB)
+	hashB, err := writeAndKey(t, lockB)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hashStale, err := writeAndHash(t, lockStale)
+	hashStale, err := writeAndKey(t, lockStale)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestReferencedHashesAndUnreferencedEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	referenced, err := referencedHashes([]string{worktrees})
+	referenced, err := referencedKeys([]string{worktrees})
 	if err != nil {
 		t.Fatalf("referencedHashes: %v", err)
 	}
@@ -102,40 +102,39 @@ func TestUnreferencedEntriesEmptyCache(t *testing.T) {
 	}
 }
 
-func writeAndHash(t *testing.T, content []byte) (string, error) {
+// writeAndKey writes content as the package-lock.json of a fresh dir with
+// no .npmrc and returns that dir's cache key.
+func writeAndKey(t *testing.T, content []byte) (string, error) {
 	t.Helper()
-	f, err := os.CreateTemp(t.TempDir(), "lock-*.json")
-	if err != nil {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), content, 0o644); err != nil {
 		return "", err
 	}
-	defer f.Close()
-	if _, err := f.Write(content); err != nil {
-		return "", err
-	}
-	return hashFile(f.Name())
+	_, key, err := cacheKey(dir)
+	return key, err
 }
 
-func TestReferencedHashesMissingRootErrors(t *testing.T) {
-	if _, err := referencedHashes([]string{filepath.Join(t.TempDir(), "typo")}); err == nil {
+func TestReferencedKeysMissingRootErrors(t *testing.T) {
+	if _, err := referencedKeys([]string{filepath.Join(t.TempDir(), "typo")}); err == nil {
 		t.Fatal("missing root should error")
 	}
 	f := filepath.Join(t.TempDir(), "file")
 	os.WriteFile(f, nil, 0o644)
-	if _, err := referencedHashes([]string{f}); err == nil {
+	if _, err := referencedKeys([]string{f}); err == nil {
 		t.Fatal("non-directory root should error")
 	}
 }
 
-func TestReferencedHashesFollowsSymlinks(t *testing.T) {
+func TestReferencedKeysFollowsSymlinks(t *testing.T) {
 	real := t.TempDir()
 	os.MkdirAll(filepath.Join(real, "wt"), 0o755)
 	os.WriteFile(filepath.Join(real, "wt", "package-lock.json"), []byte("{}"), 0o644)
-	want, _ := hashFile(filepath.Join(real, "wt", "package-lock.json"))
+	_, want, _ := cacheKey(filepath.Join(real, "wt"))
 
 	// symlinked root
 	link := filepath.Join(t.TempDir(), "root")
 	os.Symlink(real, link)
-	got, err := referencedHashes([]string{link})
+	got, err := referencedKeys([]string{link})
 	if err != nil || !got[want] {
 		t.Fatalf("symlinked root: %v %v", got, err)
 	}
@@ -144,7 +143,7 @@ func TestReferencedHashesFollowsSymlinks(t *testing.T) {
 	root := t.TempDir()
 	os.Symlink(filepath.Join(real, "wt"), filepath.Join(root, "ticket"))
 	os.Symlink(root, filepath.Join(root, "loop"))
-	got, err = referencedHashes([]string{root})
+	got, err = referencedKeys([]string{root})
 	if err != nil || !got[want] {
 		t.Fatalf("symlinked subdir: %v %v", got, err)
 	}
@@ -245,11 +244,11 @@ func TestPrintGCReportJSON(t *testing.T) {
 	}
 }
 
-func TestReferencedHashesFileSymlinks(t *testing.T) {
+func TestReferencedKeysFileSymlinks(t *testing.T) {
 	real := t.TempDir()
 	lock := filepath.Join(real, "package-lock.json")
 	os.WriteFile(lock, []byte(`{"linked":1}`), 0o644)
-	want, _ := hashFile(lock)
+	_, want, _ := cacheKey(real)
 
 	root := t.TempDir()
 	// A symlink named package-lock.json pointing at a lockfile counts...
@@ -258,10 +257,10 @@ func TestReferencedHashesFileSymlinks(t *testing.T) {
 	// ...and a symlink named node_modules is never followed.
 	nm := t.TempDir()
 	os.WriteFile(filepath.Join(nm, "package-lock.json"), []byte(`{"inside":1}`), 0o644)
-	ignored, _ := hashFile(filepath.Join(nm, "package-lock.json"))
+	_, ignored, _ := cacheKey(nm)
 	os.Symlink(nm, filepath.Join(root, "wt", "node_modules"))
 
-	got, err := referencedHashes([]string{root})
+	got, err := referencedKeys([]string{root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,5 +269,83 @@ func TestReferencedHashesFileSymlinks(t *testing.T) {
 	}
 	if got[ignored] {
 		t.Error("lockfile behind a node_modules symlink must be ignored")
+	}
+}
+
+func TestGCAndEnsureAgreeOnKeys(t *testing.T) {
+	root := t.TempDir()
+	withNpmrc := filepath.Join(root, "T-1", "web")
+	without := filepath.Join(root, "T-2", "web")
+	for _, dir := range []string{withNpmrc, without} {
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{"same":"lockfile"}`), 0o644)
+	}
+	os.WriteFile(filepath.Join(withNpmrc, ".npmrc"), []byte("legacy-peer-deps=true\n"), 0o600)
+
+	// What ensure / ensure-windows would name each entry and marker.
+	_, keyWith, err := cacheKey(withNpmrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, keyWithout, err := cacheKey(without)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyWith == keyWithout {
+		t.Fatal("same lockfile with and without .npmrc must not share a key")
+	}
+
+	referenced, err := referencedKeys([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(referenced, map[string]bool{keyWith: true, keyWithout: true}) {
+		t.Fatalf("referencedKeys = %v, want exactly ensure's keys %s and %s", referenced, keyWith, keyWithout)
+	}
+}
+
+func TestGCReportsOldStyleEntriesStale(t *testing.T) {
+	root := t.TempDir()
+	wt := filepath.Join(root, "T-1", "web")
+	os.MkdirAll(wt, 0o755)
+	os.WriteFile(filepath.Join(wt, "package-lock.json"), []byte(`{"lock":1}`), 0o644)
+	_, key, err := cacheKey(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// v1 entries were named by the bare lockfile hash.
+	oldKey, err := hashFile(filepath.Join(wt, "package-lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nc := filepath.Join(t.TempDir(), "node-cache")
+	for _, name := range []string{key, oldKey} {
+		os.MkdirAll(filepath.Join(nc, name, "node_modules"), 0o755)
+	}
+	r, err := gcStale(nc, []string{root}, false, time.Now(), os.RemoveAll, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Stale) != 1 || r.Stale[0].Name != oldKey || r.Stale[0].Kind != "entry" {
+		t.Fatalf("stale = %+v, want only the old-style entry %s", r.Stale, oldKey)
+	}
+}
+
+func TestReferencedKeysOtherNamedFileSymlink(t *testing.T) {
+	real := t.TempDir()
+	os.WriteFile(filepath.Join(real, "package-lock.json"), []byte(`{"x":1}`), 0o644)
+	os.WriteFile(filepath.Join(real, ".npmrc"), []byte("legacy-peer-deps=true\n"), 0o600)
+	_, want, err := cacheKey(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A symlink with another name has no lockfile beside it: it is keyed
+	// in its target's directory (with the target's .npmrc), not an error.
+	root := t.TempDir()
+	os.Symlink(filepath.Join(real, "package-lock.json"), filepath.Join(root, "lock-link"))
+	got, err := referencedKeys([]string{root})
+	if err != nil || !reflect.DeepEqual(got, map[string]bool{want: true}) {
+		t.Fatalf("referencedKeys = %v, %v; want {%s}", got, err, want)
 	}
 }

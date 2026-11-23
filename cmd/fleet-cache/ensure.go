@@ -13,25 +13,26 @@ import (
 )
 
 // markerPath returns the path of the marker file `ensure` writes into a
-// target node_modules recording which cache hash last populated it.
+// target node_modules recording which cache key last populated it. (The
+// file name predates keys covering more than the lockfile hash.)
 func markerPath(targetNodeModules string) string {
 	return filepath.Join(targetNodeModules, ".fleet-cache-hash")
 }
 
-// alreadyLinked reports whether targetNodeModules's marker matches hash --
+// alreadyLinked reports whether targetNodeModules's marker matches key --
 // i.e. a previous `ensure` call already populated it from this exact cache
 // entry, so it's safe to skip re-linking and leave whatever the user has
 // since added (e.g. an `npm link` symlink) untouched.
-func alreadyLinked(targetNodeModules, hash string) bool {
+func alreadyLinked(targetNodeModules, key string) bool {
 	data, err := os.ReadFile(markerPath(targetNodeModules))
-	return err == nil && strings.TrimSpace(string(data)) == hash
+	return err == nil && strings.TrimSpace(string(data)) == key
 }
 
-// writeMarker records hash as the cache entry that populated
+// writeMarker records key as the cache entry that populated
 // targetNodeModules, so a future `ensure` call can detect nothing's changed
 // and skip the destructive rebuild.
-func writeMarker(targetNodeModules, hash string) error {
-	return os.WriteFile(markerPath(targetNodeModules), []byte(hash), 0o644)
+func writeMarker(targetNodeModules, key string) error {
+	return os.WriteFile(markerPath(targetNodeModules), []byte(key), 0o644)
 }
 
 // nearestExisting returns path or its closest existing ancestor.
@@ -73,19 +74,19 @@ func checkSameDevice(root, dir string) error {
 // `ensure-windows` command (ensure_win.go) instead, since hardlinks
 // can't cross the WSL9P boundary.
 func runEnsure(dir string, force bool, cacheRootFlag string) error {
-	lockPath, hash, err := lockfileHash(dir)
+	lockPath, key, err := cacheKey(dir)
 	if err != nil {
 		return err
 	}
 	targetNodeModules := filepath.Join(dir, "node_modules")
 
-	// If this exact cache hash already populated the target, skip the
+	// If this exact cache key already populated the target, skip the
 	// destructive rebuild entirely -- node_modules is otherwise treated as a
 	// disposable derived artifact and blown away/relinked on every call,
 	// which silently destroys anything the user has since added by hand
 	// (most notably `npm link`'s package symlinks).
-	if !force && alreadyLinked(targetNodeModules, hash) {
-		logf("node_modules already linked to cache %s, nothing to do", shortHash(hash))
+	if !force && alreadyLinked(targetNodeModules, key) {
+		logf("node_modules already linked to cache %s, nothing to do", shortHash(key))
 		return nil
 	}
 
@@ -97,9 +98,9 @@ func runEnsure(dir string, force bool, cacheRootFlag string) error {
 		return err
 	}
 
-	entry := filepath.Join(nodeCacheDir(root), hash)
+	entry := filepath.Join(nodeCacheDir(root), key)
 	ctx, stopInterrupts := interruptContext()
-	err = ensureCacheEntry(ctx, entry, hash, lockPath, entryOps{
+	err = ensureCacheEntry(ctx, entry, key, lockPath, entryOps{
 		install: func(ctx context.Context, staging string) error {
 			cmd := exec.CommandContext(ctx, "npm", "ci")
 			stopOnCancel(cmd)
@@ -136,10 +137,10 @@ func runEnsure(dir string, force bool, cacheRootFlag string) error {
 		return fmt.Errorf("hardlinking node_modules into %s: %w", dir, err)
 	}
 
-	if err := writeMarker(targetNodeModules, hash); err != nil {
+	if err := writeMarker(targetNodeModules, key); err != nil {
 		cli.Warnf("writing cache marker: %v", err)
 	}
 
-	logf("linked node_modules from cache %s", shortHash(hash))
+	logf("linked node_modules from cache %s", shortHash(key))
 	return nil
 }

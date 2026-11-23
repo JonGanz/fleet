@@ -14,7 +14,7 @@ func fakeProject(t *testing.T) (dir, lockPath, hash string) {
 	dir = t.TempDir()
 	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"x"}`), 0o644)
 	os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{"lock":1}`), 0o644)
-	lockPath, hash, err := lockfileHash(dir)
+	lockPath, hash, err := cacheKey(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,12 +32,6 @@ func noStaging(t *testing.T, nodeCache string) {
 		if isStagingName(it.Name()) {
 			t.Errorf("staging dir left behind: %s", it.Name())
 		}
-	}
-}
-
-func TestLockfileHashMissing(t *testing.T) {
-	if _, _, err := lockfileHash(t.TempDir()); err == nil {
-		t.Fatal("expected error for missing lockfile")
 	}
 }
 
@@ -156,6 +150,16 @@ func TestStageEntryInputsDetectsLockfileChange(t *testing.T) {
 	}
 }
 
+func TestStageEntryInputsDetectsNpmrcChange(t *testing.T) {
+	dir, lock, key := fakeProject(t)
+	// .npmrc appears after the key was computed (without one)
+	os.WriteFile(filepath.Join(dir, ".npmrc"), []byte("registry=https://other.example/\n"), 0o600)
+	err := stageEntryInputs(filepath.Join(t.TempDir(), "s"), lock, key)
+	if err == nil || !strings.Contains(err.Error(), ".npmrc") {
+		t.Fatalf("err = %v, want a changed-while-staging error", err)
+	}
+}
+
 func TestEnsureCacheEntryReplacesLegacyEntryWithoutMarker(t *testing.T) {
 	_, lock, hash := fakeProject(t)
 	nc := filepath.Join(t.TempDir(), "node-cache")
@@ -230,15 +234,19 @@ func TestEnsureCacheEntryMalformedPackageJSON(t *testing.T) {
 
 func TestEnsureCacheEntryNpmrcOnlyDuringInstall(t *testing.T) {
 	for _, installFails := range []bool{false, true} {
-		dir, lock, hash := fakeProject(t)
+		dir, lock, _ := fakeProject(t)
 		os.WriteFile(filepath.Join(dir, ".npmrc"), []byte("//registry/:_authToken=secret\n"), 0o644)
+		_, hash, err := cacheKey(dir) // the .npmrc is part of the key
+		if err != nil {
+			t.Fatal(err)
+		}
 		nc := filepath.Join(t.TempDir(), "node-cache")
 		entry := filepath.Join(nc, hash)
 
 		var sawMode os.FileMode
 		var sawContent string
 		boom := errors.New("npm exploded")
-		err := ensureCacheEntry(context.Background(), entry, hash, lock, entryOps{
+		err = ensureCacheEntry(context.Background(), entry, hash, lock, entryOps{
 			install: func(ctx context.Context, staging string) error {
 				p := filepath.Join(staging, ".npmrc")
 				if fi, err := os.Stat(p); err == nil {

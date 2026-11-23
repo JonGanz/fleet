@@ -135,7 +135,7 @@ func TestRunListEndToEnd(t *testing.T) {
 func TestEnsureFlagAfterPositionalAndCacheRoot(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte("{}"), 0o644)
-	hash, _ := hashFile(filepath.Join(dir, "package-lock.json"))
+	_, hash, _ := cacheKey(dir)
 	os.MkdirAll(filepath.Join(dir, "node_modules"), 0o755)
 	writeMarker(filepath.Join(dir, "node_modules"), hash)
 
@@ -179,5 +179,43 @@ func TestGCJSONGoesToStdout(t *testing.T) {
 	}
 	if !strings.HasPrefix(strings.TrimSpace(string(got)), "{") || !strings.Contains(string(got), `"abc"`) {
 		t.Errorf("stdout = %q", got)
+	}
+}
+
+func TestEnsureRelinksOldStyleMarker(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"x"}`), 0o644)
+	os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{"lock":1}`), 0o644)
+	_, key, err := cacheKey(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A complete cache entry under the new key, so ensure needs no npm ci.
+	cache := t.TempDir()
+	entry := filepath.Join(cache, "node-cache", key)
+	os.MkdirAll(filepath.Join(entry, "node_modules", "pkg"), 0o755)
+	os.WriteFile(filepath.Join(entry, "node_modules", "pkg", "index.js"), []byte("1"), 0o644)
+	os.WriteFile(filepath.Join(entry, entryCompleteMarker), []byte(key+"\n"), 0o644)
+
+	// node_modules linked by an older fleet-cache: marker = bare lockfile hash.
+	nm := filepath.Join(dir, "node_modules")
+	os.MkdirAll(nm, 0o755)
+	os.WriteFile(filepath.Join(nm, "handmade"), nil, 0o644)
+	oldKey, _ := hashFile(filepath.Join(dir, "package-lock.json"))
+	writeMarker(nm, oldKey)
+
+	var out, errb bytes.Buffer
+	if code := run([]string{"ensure", dir, "--cache-root", cache}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(nm, "handmade")); err == nil {
+		t.Error("an old-style marker must not count as linked; node_modules should be rebuilt")
+	}
+	if _, err := os.Stat(filepath.Join(nm, "pkg", "index.js")); err != nil {
+		t.Errorf("node_modules not relinked from the cache: %v", err)
+	}
+	if !alreadyLinked(nm, key) {
+		t.Error("marker should now record the new key")
 	}
 }

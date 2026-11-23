@@ -22,21 +22,21 @@ var hardlinkWindowsScript []byte
 // node_modules tree are populated entirely via native Windows processes
 // (PowerShell/npm), since hardlinks can't cross the WSL9P boundary and bulk
 // file operations across it are slow; only single-file operations here
-// (hashing, copying package.json/package-lock.json/.npmrc in, the skip marker)
+// (keying, copying package.json/package-lock.json/.npmrc in, the skip marker)
 // stay as plain Go os.* calls, per the project's pragmatic scope decision.
 //
 // Like ensure, it skips (leaving node_modules -- and any `npm link`s --
 // untouched) when the target's .fleet-cache-hash marker already matches
-// the lockfile hash, unless force is set.
+// the cache key (lockfile + .npmrc), unless force is set.
 func runEnsureWindows(wslWorktreeDir string, force bool, cacheRootFlag string) error {
-	lockPath, hash, err := lockfileHash(wslWorktreeDir)
+	lockPath, key, err := cacheKey(wslWorktreeDir)
 	if err != nil {
 		return err
 	}
 
 	targetNodeModulesWSL := filepath.Join(wslWorktreeDir, "node_modules")
-	if !force && alreadyLinked(targetNodeModulesWSL, hash) {
-		logf("node_modules already linked to windows cache %s, nothing to do", shortHash(hash))
+	if !force && alreadyLinked(targetNodeModulesWSL, key) {
+		logf("node_modules already linked to windows cache %s, nothing to do", shortHash(key))
 		return nil
 	}
 
@@ -49,7 +49,7 @@ func runEnsureWindows(wslWorktreeDir string, force bool, cacheRootFlag string) e
 	if err != nil {
 		return fmt.Errorf("resolving worktree path: %w", err)
 	}
-	entryWSL := filepath.Join(nodeCacheDir(cacheRootWSL), hash)
+	entryWSL := filepath.Join(nodeCacheDir(cacheRootWSL), key)
 	entryWin, err := wsl.WindowsPath(entryWSL)
 	if err != nil {
 		return fmt.Errorf("resolving cache entry dir: %w", err)
@@ -70,7 +70,7 @@ func runEnsureWindows(wslWorktreeDir string, force bool, cacheRootFlag string) e
 		return runWindowsRemoveAll(winPath)
 	}
 	ctx, stopInterrupts := interruptContext()
-	err = ensureCacheEntry(ctx, entryWSL, hash, lockPath, entryOps{
+	err = ensureCacheEntry(ctx, entryWSL, key, lockPath, entryOps{
 		install: func(ctx context.Context, staging string) error {
 			stagingWin, err := wsl.WindowsPath(staging)
 			if err != nil {
@@ -112,11 +112,11 @@ func runEnsureWindows(wslWorktreeDir string, force bool, cacheRootFlag string) e
 		return fmt.Errorf("hardlinking node_modules into %s: %w", targetWin, err)
 	}
 
-	if err := writeMarker(targetNodeModulesWSL, hash); err != nil {
+	if err := writeMarker(targetNodeModulesWSL, key); err != nil {
 		cli.Warnf("writing cache marker: %v", err)
 	}
 
-	logf("linked node_modules from windows cache %s", shortHash(hash))
+	logf("linked node_modules from windows cache %s", shortHash(key))
 	return nil
 }
 

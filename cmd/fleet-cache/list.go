@@ -18,7 +18,7 @@ import (
 type listItem struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
-	// Kind is "entry" (<hash>) or "staging" (<hash>.tmp-<pid>).
+	// Kind is "entry" (<key>) or "staging" (<key>.tmp-<pid>).
 	Kind string `json:"kind"`
 	// Complete is true for an entry carrying entryCompleteMarker; an entry
 	// without it is rebuilt by the next ensure. Always false for staging.

@@ -13,9 +13,11 @@ import (
 	"github.com/JonGanz/fleet/internal/xdg"
 )
 
-// referencedHashes walks each root directory recursively looking for
-// package-lock.json files, hashes each one found, and returns the set of
-// hashes still "referenced" by something on disk.
+// referencedKeys walks each root directory recursively looking for
+// package-lock.json files, computes the cache key of each directory holding
+// one (cacheKey: the lockfile plus that directory's .npmrc, exactly as
+// ensure keys it), and returns the set of keys still "referenced" by
+// something on disk.
 //
 // Every root must exist and be a readable directory, and any unreadable
 // path under it is an error: silently skipping them would leave lockfiles
@@ -23,7 +25,7 @@ import (
 // use (e.g. a typo'd root deleting the whole cache). Symlinked directories
 // (including a symlinked root, and the WSL-side symlinks fleet-task creates
 // for windows-runtime worktrees) are followed once each.
-func referencedHashes(roots []string) (map[string]bool, error) {
+func referencedKeys(roots []string) (map[string]bool, error) {
 	referenced := make(map[string]bool)
 	visited := make(map[string]bool)
 	for _, root := range roots {
@@ -60,7 +62,10 @@ func walkLockfiles(dir string, visited, referenced map[string]bool) error {
 		if d.IsDir() && d.Name() == "node_modules" {
 			return filepath.SkipDir
 		}
-		name, isDir := d.Name(), d.IsDir()
+		// keyDir is the directory whose cacheKey a lockfile here references:
+		// normally the lockfile's own directory, which is what ensure is run
+		// on (its .npmrc sits beside it).
+		name, isDir, keyDir := d.Name(), d.IsDir(), filepath.Dir(path)
 		if d.Type()&fs.ModeSymlink != 0 {
 			if name == "node_modules" {
 				return nil
@@ -76,23 +81,29 @@ func walkLockfiles(dir string, visited, referenced map[string]bool) error {
 			if target.IsDir() {
 				return walkLockfiles(real, visited, referenced)
 			}
-			// A file symlink counts under its target's name, as before.
+			// A file symlink counts under its target's name, as before. One
+			// named package-lock.json is keyed where it sits, like any
+			// lockfile; one named otherwise has no package-lock.json beside
+			// it, so it is keyed in its target's directory.
 			name, isDir = target.Name(), false
-		}
-		if !isDir && name == "package-lock.json" {
-			hash, err := hashFile(path)
-			if err != nil {
-				return fmt.Errorf("hashing %s: %w", path, err)
+			if d.Name() != lockfileName {
+				keyDir = filepath.Dir(real)
 			}
-			referenced[hash] = true
+		}
+		if !isDir && name == lockfileName {
+			_, key, err := cacheKey(keyDir)
+			if err != nil {
+				return fmt.Errorf("computing cache key: %w", err)
+			}
+			referenced[key] = true
 		}
 		return nil
 	})
 }
 
-// unreferencedEntries lists the cache entry hashes present under
+// unreferencedEntries lists the cache entry keys present under
 // <node-cache dir> that are not in the referenced set. Staging dirs
-// (<hash>.tmp-<pid>) are not entries and are handled by staleStagingDirs.
+// (<key>.tmp-<pid>) are not entries and are handled by staleStagingDirs.
 func unreferencedEntries(nodeCache string, referenced map[string]bool) ([]string, error) {
 	items, err := os.ReadDir(nodeCache)
 	if err != nil {
@@ -166,7 +177,7 @@ type gcReport struct {
 func gcStale(nodeCache string, roots []string, force bool, now time.Time,
 	remove func(path string) error, display func(path string) (string, error)) (*gcReport, error) {
 
-	referenced, err := referencedHashes(roots)
+	referenced, err := referencedKeys(roots)
 	if err != nil {
 		return nil, err
 	}

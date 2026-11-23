@@ -7,7 +7,7 @@ import (
 )
 
 // runGCWindows is the runtime: windows counterpart of runGC: it shares
-// gcStale (which only walks WSL-visible roots and hashes lockfiles via Go,
+// gcStale (which only walks WSL-visible roots and keys lockfiles via Go,
 // fine under the pragmatic scope decision), but scans/deletes against the
 // Windows-native cache root's node-cache dir, and deletes via a native
 // Windows Remove-Item rather than os.RemoveAll, since a stale hardlink-cache
