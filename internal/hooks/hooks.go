@@ -31,6 +31,26 @@ const (
 	PostRun    = "post-run"
 )
 
+// Env is what a hook is told about the repo (and, for run hooks, the run
+// target) it runs for, exported to it as FLEET_* environment variables.
+type Env struct {
+	Ticket      string
+	Description string
+	Repo        string
+	Branch      string
+	WorktreeDir string
+	// RunName is set for pre-run/post-run hooks only.
+	RunName string
+}
+
+// Error is a pre-* hook that vetoed the operation: it exited non-zero, was
+// killed by the timeout, or could not be started.
+type Error struct {
+	Phase string
+	Path  string
+	Err   error
+}
+
 // Discover returns the executable regular files directly in dir, in
 // filename-sorted order. Non-executable files and directories are skipped;
 // symlinks are followed, so a linked script counts. A missing dir means no
@@ -62,16 +82,12 @@ func Discover(dir string) ([]string, error) {
 	return hooks, nil
 }
 
-// Env is what a hook is told about the repo (and, for run hooks, the run
-// target) it runs for, exported to it as FLEET_* environment variables.
-type Env struct {
-	Ticket      string
-	Description string
-	Repo        string
-	Branch      string
-	WorktreeDir string
-	// RunName is set for pre-run/post-run hooks only.
-	RunName string
+// label names what the hook ran for in warnings: "repo" or "repo:run".
+func (e Env) label() string {
+	if e.RunName != "" {
+		return e.Repo + ":" + e.RunName
+	}
+	return e.Repo
 }
 
 // Vars returns the FLEET_* variables for e. FLEET_RUN_NAME is included only
@@ -88,22 +104,6 @@ func (e Env) Vars() []string {
 		vars = append(vars, "FLEET_RUN_NAME="+e.RunName)
 	}
 	return vars
-}
-
-// label names what the hook ran for in warnings: "repo" or "repo:run".
-func (e Env) label() string {
-	if e.RunName != "" {
-		return e.Repo + ":" + e.RunName
-	}
-	return e.Repo
-}
-
-// Error is a pre-* hook that vetoed the operation: it exited non-zero, was
-// killed by the timeout, or could not be started.
-type Error struct {
-	Phase string
-	Path  string
-	Err   error
 }
 
 // Error names the phase, the hook and what went wrong, e.g. "pre-create

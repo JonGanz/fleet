@@ -65,6 +65,23 @@ func TestConfigAndStatePrecedence(t *testing.T) {
 	}
 }
 
+func TestExpandHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cases := map[string]string{
+		"~":       home,
+		"~/a/b":   filepath.Join(home, "a/b"),
+		"/abs":    "/abs",
+		"rel":     "rel",
+		"~other/": "~other/",
+	}
+	for in, want := range cases {
+		if got := ExpandHome(in); got != want {
+			t.Errorf("ExpandHome(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestRelativeOverridesBecomeAbsolute(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -117,23 +134,6 @@ func TestRelativeXDGIgnoredWithOneWarning(t *testing.T) {
 	for _, l := range lines {
 		if !strings.Contains(l, ": warning: ignoring XDG_") {
 			t.Errorf("unexpected line %q", l)
-		}
-	}
-}
-
-func TestExpandHome(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	cases := map[string]string{
-		"~":       home,
-		"~/a/b":   filepath.Join(home, "a/b"),
-		"/abs":    "/abs",
-		"rel":     "rel",
-		"~other/": "~other/",
-	}
-	for in, want := range cases {
-		if got := ExpandHome(in); got != want {
-			t.Errorf("ExpandHome(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

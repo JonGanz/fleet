@@ -11,6 +11,97 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+type formField struct {
+	label  string
+	value  []rune
+	cursor int
+}
+
+type formModel struct {
+	fields []formField
+	focus  int
+
+	cancelled bool
+	done      bool
+}
+
+var (
+	formFocusedBorder = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("212")).
+				Padding(0, 1)
+	formBlurredBorder = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("240")).
+				Padding(0, 1)
+)
+
+func (m formModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m formModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	keyMsg, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+
+	switch keyMsg.Type {
+	case tea.KeyCtrlC, tea.KeyEsc:
+		m.cancelled = true
+		m.done = true
+	case tea.KeyTab, tea.KeyDown:
+		m.focus = (m.focus + 1) % len(m.fields)
+	case tea.KeyShiftTab, tea.KeyUp:
+		m.focus = (m.focus - 1 + len(m.fields)) % len(m.fields)
+	case tea.KeyEnter:
+		if m.focus == len(m.fields)-1 {
+			m.done = true
+		} else {
+			m.focus++
+		}
+	default:
+		m.fields[m.focus] = updateField(m.fields[m.focus], keyMsg)
+	}
+
+	if m.done {
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m formModel) View() string {
+	if m.done {
+		return ""
+	}
+
+	boxes := make([]string, 0, len(m.fields)+1)
+	for i, f := range m.fields {
+		style := formBlurredBorder
+		if i == m.focus {
+			style = formFocusedBorder
+		}
+		boxes = append(boxes, style.Render(f.label+"\n"+renderFieldValue(f, i == m.focus)))
+	}
+
+	help := "tab/shift+tab or up/down move field  enter next/submit  esc/ctrl-c cancel"
+	boxes = append(boxes, picker.DimStyle.Render(help))
+	return lipgloss.JoinVertical(lipgloss.Left, boxes...)
+}
+
+func insertRunes(value []rune, at int, runes []rune) []rune {
+	rest := append([]rune{}, value[at:]...)
+	return append(append(value[:at:at], runes...), rest...)
+}
+
+func newFormModel(labels []string) formModel {
+	fields := make([]formField, len(labels))
+	for i, l := range labels {
+		fields[i] = formField{label: l}
+	}
+	return formModel{fields: fields}
+}
+
 // promptForm shows every field in labels at once, each in its own bordered
 // box, and lets the user move between them in any order (tab/shift+tab or
 // up/down) instead of answering one bufio.Reader prompt at a time. Within
@@ -51,60 +142,26 @@ func promptForm(labels []string) ([]string, error) {
 	return values, nil
 }
 
-type formField struct {
-	label  string
-	value  []rune
-	cursor int
-}
-
-type formModel struct {
-	fields []formField
-	focus  int
-
-	cancelled bool
-	done      bool
-}
-
-func newFormModel(labels []string) formModel {
-	fields := make([]formField, len(labels))
-	for i, l := range labels {
-		fields[i] = formField{label: l}
-	}
-	return formModel{fields: fields}
-}
-
-func (m formModel) Init() tea.Cmd {
-	return nil
-}
-
-func (m formModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return m, nil
-	}
-
-	switch keyMsg.Type {
-	case tea.KeyCtrlC, tea.KeyEsc:
-		m.cancelled = true
-		m.done = true
-	case tea.KeyTab, tea.KeyDown:
-		m.focus = (m.focus + 1) % len(m.fields)
-	case tea.KeyShiftTab, tea.KeyUp:
-		m.focus = (m.focus - 1 + len(m.fields)) % len(m.fields)
-	case tea.KeyEnter:
-		if m.focus == len(m.fields)-1 {
-			m.done = true
-		} else {
-			m.focus++
+func renderFieldValue(f formField, focused bool) string {
+	if !focused {
+		if len(f.value) == 0 {
+			return " "
 		}
-	default:
-		m.fields[m.focus] = updateField(m.fields[m.focus], keyMsg)
+		return string(f.value)
 	}
 
-	if m.done {
-		return m, tea.Quit
+	var b strings.Builder
+	for i, r := range f.value {
+		if i == f.cursor {
+			b.WriteString(picker.CursorStyle.Render(string(r)))
+		} else {
+			b.WriteRune(r)
+		}
 	}
-	return m, nil
+	if f.cursor == len(f.value) {
+		b.WriteString(picker.CursorStyle.Render(" "))
+	}
+	return b.String()
 }
 
 // updateField applies a single-field edit key to f. Space arrives as its
@@ -144,61 +201,4 @@ func updateField(f formField, keyMsg tea.KeyMsg) formField {
 		f.cursor += len(keyMsg.Runes)
 	}
 	return f
-}
-
-func insertRunes(value []rune, at int, runes []rune) []rune {
-	rest := append([]rune{}, value[at:]...)
-	return append(append(value[:at:at], runes...), rest...)
-}
-
-var (
-	formFocusedBorder = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("212")).
-				Padding(0, 1)
-	formBlurredBorder = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("240")).
-				Padding(0, 1)
-)
-
-func (m formModel) View() string {
-	if m.done {
-		return ""
-	}
-
-	boxes := make([]string, 0, len(m.fields)+1)
-	for i, f := range m.fields {
-		style := formBlurredBorder
-		if i == m.focus {
-			style = formFocusedBorder
-		}
-		boxes = append(boxes, style.Render(f.label+"\n"+renderFieldValue(f, i == m.focus)))
-	}
-
-	help := "tab/shift+tab or up/down move field  enter next/submit  esc/ctrl-c cancel"
-	boxes = append(boxes, picker.DimStyle.Render(help))
-	return lipgloss.JoinVertical(lipgloss.Left, boxes...)
-}
-
-func renderFieldValue(f formField, focused bool) string {
-	if !focused {
-		if len(f.value) == 0 {
-			return " "
-		}
-		return string(f.value)
-	}
-
-	var b strings.Builder
-	for i, r := range f.value {
-		if i == f.cursor {
-			b.WriteString(picker.CursorStyle.Render(string(r)))
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	if f.cursor == len(f.value) {
-		b.WriteString(picker.CursorStyle.Render(" "))
-	}
-	return b.String()
 }

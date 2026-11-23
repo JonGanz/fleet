@@ -28,21 +28,6 @@ func TestAvailableRepoNames(t *testing.T) {
 	}
 }
 
-func TestAvailableRepoNamesNoneAttached(t *testing.T) {
-	cfg := &config.ReposConfig{
-		Repos: []config.RepoConfig{
-			{Name: "backend"},
-			{Name: "admin-ui"},
-		},
-	}
-
-	got := availableRepoNames(cfg, nil)
-	want := []string{"backend", "admin-ui"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("availableRepoNames() = %v, want %v", got, want)
-	}
-}
-
 func TestAvailableRepoNamesAllAttached(t *testing.T) {
 	cfg := &config.ReposConfig{
 		Repos: []config.RepoConfig{
@@ -58,6 +43,33 @@ func TestAvailableRepoNamesAllAttached(t *testing.T) {
 	got := availableRepoNames(cfg, attached)
 	if len(got) != 0 {
 		t.Errorf("availableRepoNames() = %v, want empty", got)
+	}
+}
+
+func TestAvailableRepoNamesNoneAttached(t *testing.T) {
+	cfg := &config.ReposConfig{
+		Repos: []config.RepoConfig{
+			{Name: "backend"},
+			{Name: "admin-ui"},
+		},
+	}
+
+	got := availableRepoNames(cfg, nil)
+	want := []string{"backend", "admin-ui"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("availableRepoNames() = %v, want %v", got, want)
+	}
+}
+
+func TestCountEditResults(t *testing.T) {
+	added, removed, failures := countEditResults([]repoResult{
+		{Action: "created", OK: true},
+		{Action: "created"},
+		{Action: "removed", OK: true},
+		{Action: "removed", OK: true},
+	})
+	if added != 1 || removed != 2 || failures != 1 {
+		t.Errorf("got added=%d removed=%d failures=%d", added, removed, failures)
 	}
 }
 
@@ -83,17 +95,5 @@ func TestValidateEditFlags(t *testing.T) {
 		if _, _, err := validateEditFlags(cfg, st, b.add, b.remove); !cli.IsUsage(err) {
 			t.Errorf("add=%v remove=%v: err = %v, want usage error", b.add, b.remove, err)
 		}
-	}
-}
-
-func TestCountEditResults(t *testing.T) {
-	added, removed, failures := countEditResults([]repoResult{
-		{Action: "created", OK: true},
-		{Action: "created"},
-		{Action: "removed", OK: true},
-		{Action: "removed", OK: true},
-	})
-	if added != 1 || removed != 2 || failures != 1 {
-		t.Errorf("got added=%d removed=%d failures=%d", added, removed, failures)
 	}
 }

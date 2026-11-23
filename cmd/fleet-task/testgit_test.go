@@ -8,22 +8,6 @@ import (
 	"testing"
 )
 
-// requireGit skips the test without a git binary and isolates git from the
-// user's config, giving commits a fixed identity.
-func requireGit(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not installed")
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	t.Setenv("GIT_AUTHOR_NAME", "Test")
-	t.Setenv("GIT_AUTHOR_EMAIL", "test@example.com")
-	t.Setenv("GIT_COMMITTER_NAME", "Test")
-	t.Setenv("GIT_COMMITTER_EMAIL", "test@example.com")
-	t.Setenv("FLEET_NO_INPUT", "1")
-}
-
 // gitT runs git in dir and returns trimmed stdout, failing the test on error.
 func gitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
@@ -45,6 +29,22 @@ func makeOrigin(t *testing.T) string {
 	gitT(t, dir, "add", "README")
 	gitT(t, dir, "commit", "-q", "-m", "init")
 	return dir
+}
+
+// requireGit skips the test without a git binary and isolates git from the
+// user's config, giving commits a fixed identity.
+func requireGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_AUTHOR_NAME", "Test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "test@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "Test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "test@example.com")
+	t.Setenv("FLEET_NO_INPUT", "1")
 }
 
 // writeFileT writes content to path (creating parent dirs), failing the

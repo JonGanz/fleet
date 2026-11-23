@@ -14,55 +14,15 @@ import (
 	"github.com/JonGanz/fleet/internal/cli"
 )
 
-func TestStateRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "tasks", "PROJ-1234.json")
-
-	want := &State{
-		Ticket:      "PROJ-1234",
-		Description: "Add retry logic to payment webhook",
-		CreatedAt:   time.Date(2026, 8, 2, 22, 58, 0, 0, time.UTC),
-		Repos: []Repo{
-			{Repo: "backend", Branch: "PROJ-1234", WorktreePath: "/home/jon/.local/state/fleet/worktrees/PROJ-1234/backend", Patches: []string{"local-env.patch"}},
-			{Repo: "admin-ui", Branch: "PROJ-1234", WorktreePath: "/home/jon/.local/state/fleet/worktrees/PROJ-1234/admin-ui", Patches: []string{}},
-			{Repo: "legacy", Branch: "PROJ-1234", WorktreePath: "/home/jon/.local/state/fleet/worktrees/PROJ-1234/legacy"},
-		},
-	}
-
-	if err := Write(path, want); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-
-	got, err := Read(path)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-
-	if got.Ticket != want.Ticket {
-		t.Errorf("Ticket = %q, want %q", got.Ticket, want.Ticket)
-	}
-	if got.Description != want.Description {
-		t.Errorf("Description = %q, want %q", got.Description, want.Description)
-	}
-	if !got.CreatedAt.Equal(want.CreatedAt) {
-		t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, want.CreatedAt)
-	}
-	if len(got.Repos) != len(want.Repos) {
-		t.Fatalf("len(Repos) = %d, want %d", len(got.Repos), len(want.Repos))
-	}
-	for i := range want.Repos {
-		// reflect.DeepEqual distinguishes nil Patches (unknown, legacy) from
-		// an empty list (none applied); both must survive the round trip.
-		if !reflect.DeepEqual(got.Repos[i], want.Repos[i]) {
-			t.Errorf("Repos[%d] = %+v, want %+v", i, got.Repos[i], want.Repos[i])
-		}
-	}
-
-	// Writing should not leave the sibling lockfile behind.
-	if _, err := Read(path + ".lock"); err == nil {
-		t.Errorf("lockfile %s.lock should not persist after write", path)
-	}
-}
+const stateFixture = `{
+  "ticket": "PROJ-1234",
+  "description": "Add retry logic to payment webhook",
+  "created_at": "2026-08-02T22:58:00Z",
+  "repos": [
+    { "repo": "backend", "branch": "PROJ-1234", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/backend" },
+    { "repo": "admin-ui", "branch": "PROJ-1234", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/admin-ui" }
+  ]
+}`
 
 func TestListTasks(t *testing.T) {
 	dir := t.TempDir()
@@ -103,16 +63,6 @@ func TestListTasks(t *testing.T) {
 	}
 }
 
-const stateFixture = `{
-  "ticket": "PROJ-1234",
-  "description": "Add retry logic to payment webhook",
-  "created_at": "2026-08-02T22:58:00Z",
-  "repos": [
-    { "repo": "backend", "branch": "PROJ-1234", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/backend" },
-    { "repo": "admin-ui", "branch": "PROJ-1234", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/admin-ui" }
-  ]
-}`
-
 func TestParse(t *testing.T) {
 	ts, err := Parse([]byte(stateFixture))
 	if err != nil {
@@ -143,6 +93,38 @@ func TestParseCreatedAt(t *testing.T) {
 	// Write stores time.Time with fractional seconds / offsets.
 	if _, err := Parse([]byte(`{"ticket":"A","created_at":"2026-08-02T15:58:00.123456789-07:00","repos":[]}`)); err != nil {
 		t.Errorf("RFC3339Nano with offset: %v", err)
+	}
+}
+
+func TestPathValidatesTicket(t *testing.T) {
+	for _, bad := range []string{"", "..", ".", "a/b", `a\b`, "../x"} {
+		if _, err := Path("/state/tasks", bad); err == nil || !cli.IsUsage(err) {
+			t.Errorf("Path(%q) = %v, want a usage error", bad, err)
+		}
+	}
+	if p, err := Path("/state/tasks", "PROJ-1"); err != nil || p != "/state/tasks/PROJ-1.json" {
+		t.Errorf("Path = %q, %v", p, err)
+	}
+}
+
+func TestReadPrefersFilename(t *testing.T) {
+	var buf bytes.Buffer
+	defer cli.SetStderr(&buf)()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "REAL-1.json")
+	if err := Write(p, &State{Ticket: "WRONG-1"}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Read(p)
+	if err != nil || st.Ticket != "REAL-1" {
+		t.Fatalf("Read = %+v, %v", st, err)
+	}
+	if !strings.Contains(buf.String(), `says ticket "WRONG-1"; using "REAL-1"`) {
+		t.Errorf("mismatch must be warned about, got %q", buf.String())
+	}
+	got, err := List(dir)
+	if err != nil || len(got) != 1 || got[0].Ticket != "REAL-1" {
+		t.Fatalf("List = %+v, %v", got, err)
 	}
 }
 
@@ -199,35 +181,53 @@ func TestStateJSONHasNoSchemaVersion(t *testing.T) {
 	}
 }
 
-func TestReadPrefersFilename(t *testing.T) {
-	var buf bytes.Buffer
-	defer cli.SetStderr(&buf)()
+func TestStateRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "REAL-1.json")
-	if err := Write(p, &State{Ticket: "WRONG-1"}); err != nil {
-		t.Fatal(err)
-	}
-	st, err := Read(p)
-	if err != nil || st.Ticket != "REAL-1" {
-		t.Fatalf("Read = %+v, %v", st, err)
-	}
-	if !strings.Contains(buf.String(), `says ticket "WRONG-1"; using "REAL-1"`) {
-		t.Errorf("mismatch must be warned about, got %q", buf.String())
-	}
-	got, err := List(dir)
-	if err != nil || len(got) != 1 || got[0].Ticket != "REAL-1" {
-		t.Fatalf("List = %+v, %v", got, err)
-	}
-}
+	path := filepath.Join(dir, "tasks", "PROJ-1234.json")
 
-func TestPathValidatesTicket(t *testing.T) {
-	for _, bad := range []string{"", "..", ".", "a/b", `a\b`, "../x"} {
-		if _, err := Path("/state/tasks", bad); err == nil || !cli.IsUsage(err) {
-			t.Errorf("Path(%q) = %v, want a usage error", bad, err)
+	want := &State{
+		Ticket:      "PROJ-1234",
+		Description: "Add retry logic to payment webhook",
+		CreatedAt:   time.Date(2026, 8, 2, 22, 58, 0, 0, time.UTC),
+		Repos: []Repo{
+			{Repo: "backend", Branch: "PROJ-1234", WorktreePath: "/home/jon/.local/state/fleet/worktrees/PROJ-1234/backend", Patches: []string{"local-env.patch"}},
+			{Repo: "admin-ui", Branch: "PROJ-1234", WorktreePath: "/home/jon/.local/state/fleet/worktrees/PROJ-1234/admin-ui", Patches: []string{}},
+			{Repo: "legacy", Branch: "PROJ-1234", WorktreePath: "/home/jon/.local/state/fleet/worktrees/PROJ-1234/legacy"},
+		},
+	}
+
+	if err := Write(path, want); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	got, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	if got.Ticket != want.Ticket {
+		t.Errorf("Ticket = %q, want %q", got.Ticket, want.Ticket)
+	}
+	if got.Description != want.Description {
+		t.Errorf("Description = %q, want %q", got.Description, want.Description)
+	}
+	if !got.CreatedAt.Equal(want.CreatedAt) {
+		t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, want.CreatedAt)
+	}
+	if len(got.Repos) != len(want.Repos) {
+		t.Fatalf("len(Repos) = %d, want %d", len(got.Repos), len(want.Repos))
+	}
+	for i := range want.Repos {
+		// reflect.DeepEqual distinguishes nil Patches (unknown, legacy) from
+		// an empty list (none applied); both must survive the round trip.
+		if !reflect.DeepEqual(got.Repos[i], want.Repos[i]) {
+			t.Errorf("Repos[%d] = %+v, want %+v", i, got.Repos[i], want.Repos[i])
 		}
 	}
-	if p, err := Path("/state/tasks", "PROJ-1"); err != nil || p != "/state/tasks/PROJ-1.json" {
-		t.Errorf("Path = %q, %v", p, err)
+
+	// Writing should not leave the sibling lockfile behind.
+	if _, err := Read(path + ".lock"); err == nil {
+		t.Errorf("lockfile %s.lock should not persist after write", path)
 	}
 }
 

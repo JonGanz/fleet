@@ -10,6 +10,28 @@ import (
 	"github.com/JonGanz/fleet/internal/xdg"
 )
 
+// envWithout returns env minus every KEY=... entry for key.
+func envWithout(env []string, key string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, key+"=") {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// insideServer reports whether $TMUX (tmuxEnv, "<socket path>,<pid>,<session>")
+// names a client of the server listening on socketPath. Either being empty
+// means no.
+func insideServer(tmuxEnv, socketPath string) bool {
+	if tmuxEnv == "" || socketPath == "" {
+		return false
+	}
+	envSocket, _, _ := strings.Cut(tmuxEnv, ",")
+	return filepath.Clean(envSocket) == filepath.Clean(socketPath)
+}
+
 // runAttach implements `fleet-run attach [repo:run-name]`.
 func runAttach(target string) error {
 	window := ""
@@ -66,28 +88,6 @@ func runAttach(target string) error {
 		return fmt.Errorf("attach to tmux session %q: %w", session, err)
 	}
 	return nil
-}
-
-// envWithout returns env minus every KEY=... entry for key.
-func envWithout(env []string, key string) []string {
-	out := make([]string, 0, len(env))
-	for _, kv := range env {
-		if !strings.HasPrefix(kv, key+"=") {
-			out = append(out, kv)
-		}
-	}
-	return out
-}
-
-// insideServer reports whether $TMUX (tmuxEnv, "<socket path>,<pid>,<session>")
-// names a client of the server listening on socketPath. Either being empty
-// means no.
-func insideServer(tmuxEnv, socketPath string) bool {
-	if tmuxEnv == "" || socketPath == "" {
-		return false
-	}
-	envSocket, _, _ := strings.Cut(tmuxEnv, ",")
-	return filepath.Clean(envSocket) == filepath.Clean(socketPath)
 }
 
 // serverSocketPath returns the socket path of the server holding session,

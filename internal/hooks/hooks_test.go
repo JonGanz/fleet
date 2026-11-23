@@ -105,24 +105,6 @@ func TestEnvVars(t *testing.T) {
 	}
 }
 
-// writeHooks creates the phase's hook dir under a sandboxed config dir and
-// writes each script into it, executable.
-func writeHooks(t *testing.T, phase string, scripts map[string]string) string {
-	t.Helper()
-	cfgDir := t.TempDir()
-	t.Setenv("FLEET_CONFIG_DIR", cfgDir)
-	dir := filepath.Join(cfgDir, "hooks", phase)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, body := range scripts {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return dir
-}
-
 // TestRunPostPhaseWarns runs real hook scripts: sorted order, env, output
 // routing, and a failing post-* hook warning without stopping the next one.
 func TestRunPostPhaseWarns(t *testing.T) {
@@ -192,4 +174,22 @@ func TestVetoes(t *testing.T) {
 			t.Errorf("Vetoes(%s) = %v", phase, !want)
 		}
 	}
+}
+
+// writeHooks creates the phase's hook dir under a sandboxed config dir and
+// writes each script into it, executable.
+func writeHooks(t *testing.T, phase string, scripts map[string]string) string {
+	t.Helper()
+	cfgDir := t.TempDir()
+	t.Setenv("FLEET_CONFIG_DIR", cfgDir)
+	dir := filepath.Join(cfgDir, "hooks", phase)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range scripts {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
 }

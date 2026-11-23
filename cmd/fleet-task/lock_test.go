@@ -9,27 +9,6 @@ import (
 	"time"
 )
 
-func TestParseLockPid(t *testing.T) {
-	cases := []struct {
-		in     string
-		want   int
-		wantOK bool
-	}{
-		{"1234\n", 1234, true},
-		{"  7 ", 7, true},
-		{"", 0, false},
-		{"abc", 0, false},
-		{"0", 0, false},
-		{"-5", 0, false},
-	}
-	for _, c := range cases {
-		got, ok := parseLockPid(c.in)
-		if got != c.want || ok != c.wantOK {
-			t.Errorf("parseLockPid(%q) = %d, %v; want %d, %v", c.in, got, ok, c.want, c.wantOK)
-		}
-	}
-}
-
 func TestLockIsStale(t *testing.T) {
 	now := time.Now()
 	alive := func(int) bool { return true }
@@ -53,15 +32,6 @@ func TestLockIsStale(t *testing.T) {
 	}
 }
 
-func TestPidAlive(t *testing.T) {
-	if !pidAlive(os.Getpid()) {
-		t.Error("own pid should be alive")
-	}
-	if pidAlive(0x7ffffff0) {
-		t.Error("absurd pid should not be alive")
-	}
-}
-
 func TestLockTicketCreateAndRelease(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "tasks", "T-1.json")
 	unlock, err := lockTicket(target)
@@ -78,23 +48,6 @@ func TestLockTicketCreateAndRelease(t *testing.T) {
 	unlock()
 	if _, err := os.Stat(target + ".lock"); !os.IsNotExist(err) {
 		t.Errorf("lock not removed on unlock: %v", err)
-	}
-}
-
-func TestLockTicketTakesOverDeadOwner(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "T-1.json")
-	if err := os.WriteFile(target+".lock", []byte("2147483000\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	unlock, err := lockTicket(target)
-	if err != nil {
-		t.Fatalf("expected takeover of stale lock, got %v", err)
-	}
-	unlock()
-	entries, _ := os.ReadDir(dir)
-	if len(entries) != 0 {
-		t.Errorf("takeover left files behind: %v", entries)
 	}
 }
 
@@ -129,6 +82,53 @@ func TestLockTicketSecondHolderRefused(t *testing.T) {
 	defer unlock()
 	if _, err := lockTicket(target); err == nil {
 		t.Error("a held lock must not be granted twice")
+	}
+}
+
+func TestLockTicketTakesOverDeadOwner(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "T-1.json")
+	if err := os.WriteFile(target+".lock", []byte("2147483000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockTicket(target)
+	if err != nil {
+		t.Fatalf("expected takeover of stale lock, got %v", err)
+	}
+	unlock()
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Errorf("takeover left files behind: %v", entries)
+	}
+}
+
+func TestParseLockPid(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   int
+		wantOK bool
+	}{
+		{"1234\n", 1234, true},
+		{"  7 ", 7, true},
+		{"", 0, false},
+		{"abc", 0, false},
+		{"0", 0, false},
+		{"-5", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := parseLockPid(c.in)
+		if got != c.want || ok != c.wantOK {
+			t.Errorf("parseLockPid(%q) = %d, %v; want %d, %v", c.in, got, ok, c.want, c.wantOK)
+		}
+	}
+}
+
+func TestPidAlive(t *testing.T) {
+	if !pidAlive(os.Getpid()) {
+		t.Error("own pid should be alive")
+	}
+	if pidAlive(0x7ffffff0) {
+		t.Error("absurd pid should not be alive")
 	}
 }
 

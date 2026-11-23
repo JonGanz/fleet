@@ -9,15 +9,6 @@ import (
 	"github.com/JonGanz/fleet/internal/cli"
 )
 
-func TestNeedInputIsUsageError(t *testing.T) {
-	if !cli.IsUsage(fmt.Errorf("context: %w", needInput("x", "pass y"))) {
-		t.Error("wrapped usage error not detected")
-	}
-	if cli.IsUsage(errors.New("plain")) {
-		t.Error("plain error misclassified as usage error")
-	}
-}
-
 func TestListFlag(t *testing.T) {
 	var l listFlag
 	for _, v := range []string{"a,b", " c ", ",,", "d"} {
@@ -25,6 +16,15 @@ func TestListFlag(t *testing.T) {
 	}
 	if want := (listFlag{"a", "b", "c", "d"}); !reflect.DeepEqual(l, want) {
 		t.Errorf("listFlag = %v, want %v", l, want)
+	}
+}
+
+func TestNeedInputIsUsageError(t *testing.T) {
+	if !cli.IsUsage(fmt.Errorf("context: %w", needInput("x", "pass y"))) {
+		t.Error("wrapped usage error not detected")
+	}
+	if cli.IsUsage(errors.New("plain")) {
+		t.Error("plain error misclassified as usage error")
 	}
 }
 

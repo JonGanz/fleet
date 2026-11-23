@@ -16,6 +16,23 @@ import (
 //go:embed hardlink_windows.ps1
 var hardlinkWindowsScript []byte
 
+// resolveWindowsCacheRoot returns the Windows-native cache root in WSL-
+// visible form: cacheRootFlag if set (already expanded/WSL-form, as passed
+// through from repos.yaml's windows_cache_root by fleet-task), else
+// %LOCALAPPDATA%\fleet auto-detected via PowerShell, mirroring the Linux
+// xdg.CacheDir default of ~/.cache/fleet.
+func resolveWindowsCacheRoot(cacheRootFlag string) (string, error) {
+	if cacheRootFlag != "" {
+		return cacheRootFlag, nil
+	}
+	localAppData, err := windowsLocalAppData()
+	if err != nil {
+		return "", err
+	}
+	winRoot := winJoin(localAppData, "fleet")
+	return wsl.WSLPath(winRoot)
+}
+
 // runEnsureWindows implements `fleet-cache ensure-windows <wsl-worktree-dir>
 // [--force] [--cache-root <wsl-cache-root>]`, the runtime: windows
 // counterpart of runEnsure. The cache entry (npm ci) and the target
@@ -118,23 +135,6 @@ func runEnsureWindows(wslWorktreeDir string, force bool, cacheRootFlag string) e
 
 	logf("linked node_modules from windows cache %s", shortHash(key))
 	return nil
-}
-
-// resolveWindowsCacheRoot returns the Windows-native cache root in WSL-
-// visible form: cacheRootFlag if set (already expanded/WSL-form, as passed
-// through from repos.yaml's windows_cache_root by fleet-task), else
-// %LOCALAPPDATA%\fleet auto-detected via PowerShell, mirroring the Linux
-// xdg.CacheDir default of ~/.cache/fleet.
-func resolveWindowsCacheRoot(cacheRootFlag string) (string, error) {
-	if cacheRootFlag != "" {
-		return cacheRootFlag, nil
-	}
-	localAppData, err := windowsLocalAppData()
-	if err != nil {
-		return "", err
-	}
-	winRoot := winJoin(localAppData, "fleet")
-	return wsl.WSLPath(winRoot)
 }
 
 // writeHardlinkScript writes the embedded hardlink_windows.ps1 content to

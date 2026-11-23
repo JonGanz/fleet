@@ -85,6 +85,25 @@ func TestHardlinkTree(t *testing.T) {
 	}
 }
 
+func TestHardlinkTreeKeepsDirSymlinksAsSymlinks(t *testing.T) {
+	src := t.TempDir()
+	dst := filepath.Join(t.TempDir(), "node_modules")
+	os.MkdirAll(filepath.Join(src, "real", "inner"), 0o755)
+	os.WriteFile(filepath.Join(src, "real", "inner", "f"), []byte("x"), 0o644)
+	os.Symlink("real", filepath.Join(src, "linked"))
+
+	if err := hardlinkTree(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(filepath.Join(dst, "linked"))
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("dir symlink must be recreated as a symlink, not descended into: %v %v", fi, err)
+	}
+	if target, _ := os.Readlink(filepath.Join(dst, "linked")); target != "real" {
+		t.Errorf("symlink target = %q", target)
+	}
+}
+
 func TestHardlinkTreeRequiresDirSource(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "notadir")
@@ -93,6 +112,16 @@ func TestHardlinkTreeRequiresDirSource(t *testing.T) {
 	}
 	if err := hardlinkTree(file, filepath.Join(dir, "dst")); err == nil {
 		t.Fatal("expected error when source is not a directory")
+	}
+}
+
+func TestLinkErrorEXDEV(t *testing.T) {
+	err := linkError("a", "b", &os.LinkError{Op: "link", Old: "a", New: "b", Err: syscall.EXDEV})
+	if !errors.Is(err, syscall.EXDEV) || !strings.Contains(err.Error(), "different filesystems") {
+		t.Errorf("err = %v", err)
+	}
+	if err := linkError("a", "b", os.ErrPermission); strings.Contains(err.Error(), "different filesystems") {
+		t.Errorf("non-EXDEV error got EXDEV message: %v", err)
 	}
 }
 
@@ -157,16 +186,6 @@ func TestLockDownPermissions(t *testing.T) {
 	}
 }
 
-func TestLinkErrorEXDEV(t *testing.T) {
-	err := linkError("a", "b", &os.LinkError{Op: "link", Old: "a", New: "b", Err: syscall.EXDEV})
-	if !errors.Is(err, syscall.EXDEV) || !strings.Contains(err.Error(), "different filesystems") {
-		t.Errorf("err = %v", err)
-	}
-	if err := linkError("a", "b", os.ErrPermission); strings.Contains(err.Error(), "different filesystems") {
-		t.Errorf("non-EXDEV error got EXDEV message: %v", err)
-	}
-}
-
 func TestSameDevice(t *testing.T) {
 	same, err := sameDevice(t.TempDir(), t.TempDir())
 	if err != nil || !same {
@@ -174,24 +193,5 @@ func TestSameDevice(t *testing.T) {
 	}
 	if got := nearestExisting(filepath.Join(t.TempDir(), "a", "b")); got == "" {
 		t.Error("nearestExisting returned empty")
-	}
-}
-
-func TestHardlinkTreeKeepsDirSymlinksAsSymlinks(t *testing.T) {
-	src := t.TempDir()
-	dst := filepath.Join(t.TempDir(), "node_modules")
-	os.MkdirAll(filepath.Join(src, "real", "inner"), 0o755)
-	os.WriteFile(filepath.Join(src, "real", "inner", "f"), []byte("x"), 0o644)
-	os.Symlink("real", filepath.Join(src, "linked"))
-
-	if err := hardlinkTree(src, dst); err != nil {
-		t.Fatal(err)
-	}
-	fi, err := os.Lstat(filepath.Join(dst, "linked"))
-	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("dir symlink must be recreated as a symlink, not descended into: %v %v", fi, err)
-	}
-	if target, _ := os.Readlink(filepath.Join(dst, "linked")); target != "real" {
-		t.Errorf("symlink target = %q", target)
 	}
 }

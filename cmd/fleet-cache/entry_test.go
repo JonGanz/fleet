@@ -9,6 +9,10 @@ import (
 	"testing"
 )
 
+func fakeInstall(_ context.Context, staging string) error {
+	return os.MkdirAll(filepath.Join(staging, "node_modules", "pkg"), 0o755)
+}
+
 func fakeProject(t *testing.T) (dir, lockPath, hash string) {
 	t.Helper()
 	dir = t.TempDir()
@@ -21,10 +25,6 @@ func fakeProject(t *testing.T) (dir, lockPath, hash string) {
 	return dir, lockPath, hash
 }
 
-func fakeInstall(_ context.Context, staging string) error {
-	return os.MkdirAll(filepath.Join(staging, "node_modules", "pkg"), 0o755)
-}
-
 func noStaging(t *testing.T, nodeCache string) {
 	t.Helper()
 	items, _ := os.ReadDir(nodeCache)
@@ -35,29 +35,27 @@ func noStaging(t *testing.T, nodeCache string) {
 	}
 }
 
-func TestEnsureCacheEntrySuccess(t *testing.T) {
-	_, lock, hash := fakeProject(t)
-	nc := filepath.Join(t.TempDir(), "node-cache")
-	entry := filepath.Join(nc, hash)
-
-	err := ensureCacheEntry(context.Background(), entry, hash, lock, entryOps{install: fakeInstall, remove: os.RemoveAll})
-	if err != nil {
-		t.Fatal(err)
+func TestDeclaresWorkspaces(t *testing.T) {
+	cases := []struct {
+		json    string
+		want    bool
+		wantErr bool
+	}{
+		{`{"name":"x"}`, false, false},
+		{`{"workspaces":null}`, false, false},
+		{`{"workspaces":[ ]}`, false, false},
+		{`{"workspaces":{}}`, false, false},
+		{`{"workspaces":["packages/*"]}`, true, false},
+		{`{"workspaces":{"packages":["a"]}}`, true, false},
+		{`{"name":`, false, true},
+		{`["not","an","object"]`, false, true},
+		{``, false, true},
 	}
-	for _, f := range []string{"package.json", "package-lock.json", "node_modules/pkg", entryCompleteMarker} {
-		if _, err := os.Stat(filepath.Join(entry, f)); err != nil {
-			t.Errorf("entry missing %s: %v", f, err)
+	for _, c := range cases {
+		got, err := declaresWorkspaces([]byte(c.json))
+		if (err != nil) != c.wantErr || got != c.want {
+			t.Errorf("%q: got %v, %v; want %v, err=%v", c.json, got, err, c.want, c.wantErr)
 		}
-	}
-	noStaging(t, nc)
-
-	// second call is a no-op: install must not run
-	err = ensureCacheEntry(context.Background(), entry, hash, lock, entryOps{
-		install: func(context.Context, string) error { t.Error("install ran for existing entry"); return nil },
-		remove:  os.RemoveAll,
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -94,6 +92,30 @@ func TestEnsureCacheEntryFailureLeavesNothing(t *testing.T) {
 	noStaging(t, nc)
 }
 
+func TestEnsureCacheEntryInterruptedCleansUp(t *testing.T) {
+	_, lock, hash := fakeProject(t)
+	nc := filepath.Join(t.TempDir(), "node-cache")
+	entry := filepath.Join(nc, hash)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// The "signal" arrives while npm ci runs; install itself succeeds (as npm
+	// might, racing the signal), but the entry must still not be committed.
+	err := ensureCacheEntry(ctx, entry, hash, lock, entryOps{
+		install: func(ctx context.Context, staging string) error {
+			cancel()
+			return fakeInstall(ctx, staging)
+		},
+		remove: os.RemoveAll,
+	})
+	if err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("err = %v, want interrupted", err)
+	}
+	if _, err := os.Stat(entry); !os.IsNotExist(err) {
+		t.Error("entry must not exist after an interrupt")
+	}
+	noStaging(t, nc)
+}
+
 func TestEnsureCacheEntryLosesRace(t *testing.T) {
 	_, lock, hash := fakeProject(t)
 	nc := filepath.Join(t.TempDir(), "node-cache")
@@ -120,102 +142,6 @@ func TestEnsureCacheEntryLosesRace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(entry, "node_modules", "pkg")); err == nil {
 		t.Error("loser's content must not be merged into the winner's entry")
-	}
-	noStaging(t, nc)
-}
-
-func TestEnsureCacheEntryReplacesLegacyPartialEntry(t *testing.T) {
-	_, lock, hash := fakeProject(t)
-	nc := filepath.Join(t.TempDir(), "node-cache")
-	entry := filepath.Join(nc, hash)
-	os.MkdirAll(entry, 0o755) // dir without node_modules
-	os.WriteFile(filepath.Join(entry, "junk"), nil, 0o644)
-
-	if err := ensureCacheEntry(context.Background(), entry, hash, lock, entryOps{install: fakeInstall, remove: os.RemoveAll}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(entry, "node_modules", "pkg")); err != nil {
-		t.Error("entry should have been rebuilt")
-	}
-	if _, err := os.Stat(filepath.Join(entry, "junk")); err == nil {
-		t.Error("partial entry's junk should be gone")
-	}
-}
-
-func TestStageEntryInputsDetectsLockfileChange(t *testing.T) {
-	dir, lock, _ := fakeProject(t)
-	_ = dir
-	if err := stageEntryInputs(filepath.Join(t.TempDir(), "s"), lock, "not-the-hash"); err == nil {
-		t.Fatal("expected mismatch error")
-	}
-}
-
-func TestStageEntryInputsDetectsNpmrcChange(t *testing.T) {
-	dir, lock, key := fakeProject(t)
-	// .npmrc appears after the key was computed (without one)
-	os.WriteFile(filepath.Join(dir, ".npmrc"), []byte("registry=https://other.example/\n"), 0o600)
-	err := stageEntryInputs(filepath.Join(t.TempDir(), "s"), lock, key)
-	if err == nil || !strings.Contains(err.Error(), ".npmrc") {
-		t.Fatalf("err = %v, want a changed-while-staging error", err)
-	}
-}
-
-func TestEnsureCacheEntryReplacesLegacyEntryWithoutMarker(t *testing.T) {
-	_, lock, hash := fakeProject(t)
-	nc := filepath.Join(t.TempDir(), "node-cache")
-	entry := filepath.Join(nc, hash)
-	// legacy entry: node_modules present (maybe partial), no completion marker
-	os.MkdirAll(filepath.Join(entry, "node_modules", "partial"), 0o755)
-
-	if err := ensureCacheEntry(context.Background(), entry, hash, lock, entryOps{install: fakeInstall, remove: os.RemoveAll}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(entry, "node_modules", "partial")); err == nil {
-		t.Error("legacy partial content must be discarded")
-	}
-	for _, f := range []string{"node_modules/pkg", entryCompleteMarker} {
-		if _, err := os.Stat(filepath.Join(entry, f)); err != nil {
-			t.Errorf("rebuilt entry missing %s: %v", f, err)
-		}
-	}
-	noStaging(t, nc)
-}
-
-func TestDeclaresWorkspaces(t *testing.T) {
-	cases := []struct {
-		json    string
-		want    bool
-		wantErr bool
-	}{
-		{`{"name":"x"}`, false, false},
-		{`{"workspaces":null}`, false, false},
-		{`{"workspaces":[ ]}`, false, false},
-		{`{"workspaces":{}}`, false, false},
-		{`{"workspaces":["packages/*"]}`, true, false},
-		{`{"workspaces":{"packages":["a"]}}`, true, false},
-		{`{"name":`, false, true},
-		{`["not","an","object"]`, false, true},
-		{``, false, true},
-	}
-	for _, c := range cases {
-		got, err := declaresWorkspaces([]byte(c.json))
-		if (err != nil) != c.wantErr || got != c.want {
-			t.Errorf("%q: got %v, %v; want %v, err=%v", c.json, got, err, c.want, c.wantErr)
-		}
-	}
-}
-
-func TestEnsureCacheEntryRejectsWorkspaces(t *testing.T) {
-	dir, lock, hash := fakeProject(t)
-	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"workspaces":["packages/*"]}`), 0o644)
-	nc := filepath.Join(t.TempDir(), "node-cache")
-
-	err := ensureCacheEntry(context.Background(), filepath.Join(nc, hash), hash, lock, entryOps{
-		install: func(context.Context, string) error { t.Error("install must not run for workspaces"); return nil },
-		remove:  os.RemoveAll,
-	})
-	if err == nil || !strings.Contains(err.Error(), "workspaces") || !strings.Contains(err.Error(), "npm ci") {
-		t.Fatalf("err = %v, want a workspaces error pointing at npm ci", err)
 	}
 	noStaging(t, nc)
 }
@@ -277,6 +203,104 @@ func TestEnsureCacheEntryNpmrcOnlyDuringInstall(t *testing.T) {
 	}
 }
 
+func TestEnsureCacheEntryRejectsWorkspaces(t *testing.T) {
+	dir, lock, hash := fakeProject(t)
+	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"workspaces":["packages/*"]}`), 0o644)
+	nc := filepath.Join(t.TempDir(), "node-cache")
+
+	err := ensureCacheEntry(context.Background(), filepath.Join(nc, hash), hash, lock, entryOps{
+		install: func(context.Context, string) error { t.Error("install must not run for workspaces"); return nil },
+		remove:  os.RemoveAll,
+	})
+	if err == nil || !strings.Contains(err.Error(), "workspaces") || !strings.Contains(err.Error(), "npm ci") {
+		t.Fatalf("err = %v, want a workspaces error pointing at npm ci", err)
+	}
+	noStaging(t, nc)
+}
+
+func TestEnsureCacheEntryReplacesLegacyEntryWithoutMarker(t *testing.T) {
+	_, lock, hash := fakeProject(t)
+	nc := filepath.Join(t.TempDir(), "node-cache")
+	entry := filepath.Join(nc, hash)
+	// legacy entry: node_modules present (maybe partial), no completion marker
+	os.MkdirAll(filepath.Join(entry, "node_modules", "partial"), 0o755)
+
+	if err := ensureCacheEntry(context.Background(), entry, hash, lock, entryOps{install: fakeInstall, remove: os.RemoveAll}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(entry, "node_modules", "partial")); err == nil {
+		t.Error("legacy partial content must be discarded")
+	}
+	for _, f := range []string{"node_modules/pkg", entryCompleteMarker} {
+		if _, err := os.Stat(filepath.Join(entry, f)); err != nil {
+			t.Errorf("rebuilt entry missing %s: %v", f, err)
+		}
+	}
+	noStaging(t, nc)
+}
+
+func TestEnsureCacheEntryReplacesLegacyPartialEntry(t *testing.T) {
+	_, lock, hash := fakeProject(t)
+	nc := filepath.Join(t.TempDir(), "node-cache")
+	entry := filepath.Join(nc, hash)
+	os.MkdirAll(entry, 0o755) // dir without node_modules
+	os.WriteFile(filepath.Join(entry, "junk"), nil, 0o644)
+
+	if err := ensureCacheEntry(context.Background(), entry, hash, lock, entryOps{install: fakeInstall, remove: os.RemoveAll}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(entry, "node_modules", "pkg")); err != nil {
+		t.Error("entry should have been rebuilt")
+	}
+	if _, err := os.Stat(filepath.Join(entry, "junk")); err == nil {
+		t.Error("partial entry's junk should be gone")
+	}
+}
+
+func TestEnsureCacheEntrySuccess(t *testing.T) {
+	_, lock, hash := fakeProject(t)
+	nc := filepath.Join(t.TempDir(), "node-cache")
+	entry := filepath.Join(nc, hash)
+
+	err := ensureCacheEntry(context.Background(), entry, hash, lock, entryOps{install: fakeInstall, remove: os.RemoveAll})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"package.json", "package-lock.json", "node_modules/pkg", entryCompleteMarker} {
+		if _, err := os.Stat(filepath.Join(entry, f)); err != nil {
+			t.Errorf("entry missing %s: %v", f, err)
+		}
+	}
+	noStaging(t, nc)
+
+	// second call is a no-op: install must not run
+	err = ensureCacheEntry(context.Background(), entry, hash, lock, entryOps{
+		install: func(context.Context, string) error { t.Error("install ran for existing entry"); return nil },
+		remove:  os.RemoveAll,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStageEntryInputsDetectsLockfileChange(t *testing.T) {
+	dir, lock, _ := fakeProject(t)
+	_ = dir
+	if err := stageEntryInputs(filepath.Join(t.TempDir(), "s"), lock, "not-the-hash"); err == nil {
+		t.Fatal("expected mismatch error")
+	}
+}
+
+func TestStageEntryInputsDetectsNpmrcChange(t *testing.T) {
+	dir, lock, key := fakeProject(t)
+	// .npmrc appears after the key was computed (without one)
+	os.WriteFile(filepath.Join(dir, ".npmrc"), []byte("registry=https://other.example/\n"), 0o600)
+	err := stageEntryInputs(filepath.Join(t.TempDir(), "s"), lock, key)
+	if err == nil || !strings.Contains(err.Error(), ".npmrc") {
+		t.Fatalf("err = %v, want a changed-while-staging error", err)
+	}
+}
+
 func TestStageNpmrcRejectsNonRegularFile(t *testing.T) {
 	src := t.TempDir()
 	os.Mkdir(filepath.Join(src, ".npmrc"), 0o755)
@@ -286,28 +310,4 @@ func TestStageNpmrcRejectsNonRegularFile(t *testing.T) {
 	if err := stageNpmrc(t.TempDir(), t.TempDir()); err != nil {
 		t.Fatalf("no .npmrc should be fine: %v", err)
 	}
-}
-
-func TestEnsureCacheEntryInterruptedCleansUp(t *testing.T) {
-	_, lock, hash := fakeProject(t)
-	nc := filepath.Join(t.TempDir(), "node-cache")
-	entry := filepath.Join(nc, hash)
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// The "signal" arrives while npm ci runs; install itself succeeds (as npm
-	// might, racing the signal), but the entry must still not be committed.
-	err := ensureCacheEntry(ctx, entry, hash, lock, entryOps{
-		install: func(ctx context.Context, staging string) error {
-			cancel()
-			return fakeInstall(ctx, staging)
-		},
-		remove: os.RemoveAll,
-	})
-	if err == nil || !strings.Contains(err.Error(), "interrupted") {
-		t.Fatalf("err = %v, want interrupted", err)
-	}
-	if _, err := os.Stat(entry); !os.IsNotExist(err) {
-		t.Error("entry must not exist after an interrupt")
-	}
-	noStaging(t, nc)
 }

@@ -37,14 +37,48 @@ repos:
         cmd: "npm run dev"
 `
 
-func writeFixture(t *testing.T, dir, name, content string) string {
-	t.Helper()
-	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-		t.Fatalf("write fixture %s: %v", p, err)
-	}
-	return p
-}
+const defaultsFixtureYAML = `
+defaults:
+  default_branch: main
+  branch_template: "eng/{ticket}"
+  base_root: ~/dev/.fleet-base
+  windows_base_root: ~/dev/.fleet-base-windows
+
+worktree_root: ~/.local/state/fleet/worktrees
+windows_worktree_root: ~/dev/.fleet-worktrees-windows
+windows_cache_root: ~/dev/.fleet-cache-windows
+
+repos:
+  - name: backend
+    origin: git@github.com:org/backend.git
+    run:
+      - name: api
+        cmd: "npm run start:dev"
+
+  - name: admin-ui
+    origin: git@github.com:org/admin-ui.git
+    base: ~/dev/.fleet-base/admin-ui-custom
+    default_branch: develop
+    branch_template: "ui/{ticket}"
+    run:
+      - name: dev
+        cmd: "npm run dev"
+
+  - name: room-launcher
+    origin: git@github.com:org/room-launcher.git
+    runtime: windows
+    run:
+      - name: dev
+        cmd: "npm run dev"
+
+  - name: staff-quiosk
+    origin: git@github.com:org/staff-quiosk.git
+    runtime: windows
+    windows_base: ~/dev/.fleet-base-windows/staff-quiosk-custom
+    run:
+      - name: dev
+        cmd: "npm run dev"
+`
 
 func TestLoadReposConfig(t *testing.T) {
 	dir := t.TempDir()
@@ -108,49 +142,6 @@ func TestLoadReposConfig(t *testing.T) {
 		t.Errorf("RepoNames() = %v", names)
 	}
 }
-
-const defaultsFixtureYAML = `
-defaults:
-  default_branch: main
-  branch_template: "eng/{ticket}"
-  base_root: ~/dev/.fleet-base
-  windows_base_root: ~/dev/.fleet-base-windows
-
-worktree_root: ~/.local/state/fleet/worktrees
-windows_worktree_root: ~/dev/.fleet-worktrees-windows
-windows_cache_root: ~/dev/.fleet-cache-windows
-
-repos:
-  - name: backend
-    origin: git@github.com:org/backend.git
-    run:
-      - name: api
-        cmd: "npm run start:dev"
-
-  - name: admin-ui
-    origin: git@github.com:org/admin-ui.git
-    base: ~/dev/.fleet-base/admin-ui-custom
-    default_branch: develop
-    branch_template: "ui/{ticket}"
-    run:
-      - name: dev
-        cmd: "npm run dev"
-
-  - name: room-launcher
-    origin: git@github.com:org/room-launcher.git
-    runtime: windows
-    run:
-      - name: dev
-        cmd: "npm run dev"
-
-  - name: staff-quiosk
-    origin: git@github.com:org/staff-quiosk.git
-    runtime: windows
-    windows_base: ~/dev/.fleet-base-windows/staff-quiosk-custom
-    run:
-      - name: dev
-        cmd: "npm run dev"
-`
 
 func TestLoadReposConfigAppliesDefaults(t *testing.T) {
 	dir := t.TempDir()
@@ -224,29 +215,6 @@ func TestLoadReposConfigAppliesDefaults(t *testing.T) {
 	}
 }
 
-func TestReposConfigValidate(t *testing.T) {
-	cases := []struct {
-		name  string
-		repos []RepoConfig
-		ok    bool
-	}{
-		{"fine", []RepoConfig{{Name: "a"}, {Name: "b", Runtime: "linux"}, {Name: "c", Runtime: "windows"}}, true},
-		{"empty name", []RepoConfig{{Name: ""}}, false},
-		{"dup", []RepoConfig{{Name: "a"}, {Name: "a"}}, false},
-		{"slash", []RepoConfig{{Name: "a/b"}}, false},
-		{"backslash", []RepoConfig{{Name: `a\b`}}, false},
-		{"dot", []RepoConfig{{Name: "."}}, false},
-		{"dotdot", []RepoConfig{{Name: ".."}}, false},
-		{"bad runtime", []RepoConfig{{Name: "a", Runtime: "Windows"}}, false},
-	}
-	for _, c := range cases {
-		err := (&ReposConfig{Repos: c.repos}).validate()
-		if (err == nil) != c.ok {
-			t.Errorf("%s: err = %v, want ok=%v", c.name, err, c.ok)
-		}
-	}
-}
-
 func TestLoadReposConfigRejectsInvalid(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "repos.yaml")
 	if err := os.WriteFile(p, []byte("repos:\n  - name: a\n    runtime: macos\n"), 0o644); err != nil {
@@ -277,6 +245,29 @@ func TestParseAppliesDefaultsAndValidates(t *testing.T) {
 	var nilCfg *ReposConfig
 	if nilCfg.FindRepo("x") != nil {
 		t.Error("FindRepo on a nil config must return nil")
+	}
+}
+
+func TestReposConfigValidate(t *testing.T) {
+	cases := []struct {
+		name  string
+		repos []RepoConfig
+		ok    bool
+	}{
+		{"fine", []RepoConfig{{Name: "a"}, {Name: "b", Runtime: "linux"}, {Name: "c", Runtime: "windows"}}, true},
+		{"empty name", []RepoConfig{{Name: ""}}, false},
+		{"dup", []RepoConfig{{Name: "a"}, {Name: "a"}}, false},
+		{"slash", []RepoConfig{{Name: "a/b"}}, false},
+		{"backslash", []RepoConfig{{Name: `a\b`}}, false},
+		{"dot", []RepoConfig{{Name: "."}}, false},
+		{"dotdot", []RepoConfig{{Name: ".."}}, false},
+		{"bad runtime", []RepoConfig{{Name: "a", Runtime: "Windows"}}, false},
+	}
+	for _, c := range cases {
+		err := (&ReposConfig{Repos: c.repos}).validate()
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err = %v, want ok=%v", c.name, err, c.ok)
+		}
 	}
 }
 
@@ -316,4 +307,13 @@ func TestTimeouts(t *testing.T) {
 			t.Errorf("%q: err = %v, want it to mention %q", body, err, want)
 		}
 	}
+}
+
+func writeFixture(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fixture %s: %v", p, err)
+	}
+	return p
 }

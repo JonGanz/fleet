@@ -10,13 +10,18 @@ import (
 	"github.com/JonGanz/fleet/internal/wsl"
 )
 
-// windowsRemoveScript builds the PowerShell -Command text that recursively
-// deletes winPath if it exists. A cmdlet failure (e.g. a locked file) must
-// not report success: Remove-Item's errors are non-terminating by default and
-// leave $LASTEXITCODE untouched, so ErrorAction Stop + try/catch is used.
-func windowsRemoveScript(winPath string) string {
-	return fmt.Sprintf("$ErrorActionPreference='Stop'; try { if (Test-Path -LiteralPath %s) { Remove-Item -LiteralPath %s -Recurse -Force } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }; exit 0",
-		wsl.PSQuote(winPath), wsl.PSQuote(winPath))
+// windowsLocalAppDataScript makes PowerShell print %LOCALAPPDATA% as UTF-8.
+// cmd.exe's `echo` would emit the OEM codepage, mangling non-ASCII
+// usernames when Go reads it as UTF-8.
+const windowsLocalAppDataScript = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; [Console]::Out.Write($env:LOCALAPPDATA)"
+
+// parseLocalAppData cleans the output of windowsLocalAppDataScript.
+func parseLocalAppData(out []byte) (string, error) {
+	v := strings.TrimSpace(strings.TrimPrefix(string(out), "\ufeff"))
+	if v == "" {
+		return "", fmt.Errorf("%%LOCALAPPDATA%% not set")
+	}
+	return v, nil
 }
 
 // runWindowsCommand runs args as a native Windows process (e.g. npm) with
@@ -51,20 +56,6 @@ func runWindowsRemoveAll(winPath string) error {
 	return nil
 }
 
-// windowsLocalAppDataScript makes PowerShell print %LOCALAPPDATA% as UTF-8.
-// cmd.exe's `echo` would emit the OEM codepage, mangling non-ASCII
-// usernames when Go reads it as UTF-8.
-const windowsLocalAppDataScript = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; [Console]::Out.Write($env:LOCALAPPDATA)"
-
-// parseLocalAppData cleans the output of windowsLocalAppDataScript.
-func parseLocalAppData(out []byte) (string, error) {
-	v := strings.TrimSpace(strings.TrimPrefix(string(out), "\ufeff"))
-	if v == "" {
-		return "", fmt.Errorf("%%LOCALAPPDATA%% not set")
-	}
-	return v, nil
-}
-
 // windowsLocalAppData reads Windows' %LOCALAPPDATA% via PowerShell, for the
 // Windows-native cache root's auto-default.
 func windowsLocalAppData() (string, error) {
@@ -73,6 +64,15 @@ func windowsLocalAppData() (string, error) {
 		return "", fmt.Errorf("powershell.exe reading %%LOCALAPPDATA%%: %w", err)
 	}
 	return parseLocalAppData(out)
+}
+
+// windowsRemoveScript builds the PowerShell -Command text that recursively
+// deletes winPath if it exists. A cmdlet failure (e.g. a locked file) must
+// not report success: Remove-Item's errors are non-terminating by default and
+// leave $LASTEXITCODE untouched, so ErrorAction Stop + try/catch is used.
+func windowsRemoveScript(winPath string) string {
+	return fmt.Sprintf("$ErrorActionPreference='Stop'; try { if (Test-Path -LiteralPath %s) { Remove-Item -LiteralPath %s -Recurse -Force } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }; exit 0",
+		wsl.PSQuote(winPath), wsl.PSQuote(winPath))
 }
 
 // winJoin joins win32 path segments with a backslash, since Go's

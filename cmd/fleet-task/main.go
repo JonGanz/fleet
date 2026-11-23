@@ -17,31 +17,6 @@ import (
 // (install.sh does); see cli.Version for the fallback.
 var version = "dev"
 
-// usage prints the top-level help to w: stdout when asked for (`--help`),
-// stderr alongside a usage error.
-func usage(w io.Writer) {
-	fmt.Fprintln(w, `usage: fleet-task <command> [flags] [args]
-
-commands:
-  new [ticket]          create a task's worktrees (interactive unless --repo is given)
-  list [--status]       list existing tasks (--status: count repos with uncommitted changes)
-  show <ticket>         show one task's repos, branches, worktrees and patches
-  repos [--json]        list configured repos, their run targets and patches
-  patches [repo]        list available patches with summaries and touched files
-  jump [ticket]         print a worktree path (picker unless --repo or only one match)
-  edit [ticket]         add/remove repos (interactive unless --add/--remove is given)
-  mv [old] [new]        rename a task's ticket id (prompts for whatever is omitted)
-  rm [ticket]           remove a task's worktrees, state file and pushed branches
-  unlock <ticket>       remove a ticket's lock left by a fleet-task that is gone
-  version               print the fleet-task version (also --version)
-
-Without a terminal on stdin (or with FLEET_NO_INPUT=1) no picker or prompt is
-ever shown: a missing value is an error naming the flag that supplies it.
-Exit codes: 0 ok, 1 operation failed, 2 usage error or input required.
-
-Run `+"`fleet-task <command> --help`"+` for a command's flags.`)
-}
-
 var (
 	specEdit    = cmdSpec{name: "edit", synopsis: "edit [ticket] [--add <repo>]... [--remove <repo>]... [--skip-patch <repo>:<name>]... [--no-patches] [--force] [--keep-branch | --delete-branch] [--json]", summary: "Add and/or remove repos of an existing task. --add/--remove skip the pickers; added repos then get every available patch unless --skip-patch/--no-patches say otherwise. Removing a repo whose worktree has uncommitted changes (beyond fleet-task's own patches) is refused, or asked about on a terminal, unless --force. A removed repo's branch is handled as by rm. An added repo whose worktree an interrupted run left in place (same base, same branch) is adopted.", maxPos: 1}
 	specJump    = cmdSpec{name: "jump", synopsis: "jump [ticket] [--repo <name>]", summary: "Print a worktree path on stdout. Picks without a picker when --repo is given or only one worktree matches.", maxPos: 1}
@@ -70,6 +45,20 @@ func at(args []string, i int) string {
 		return args[i]
 	}
 	return ""
+}
+
+// branchModeFromFlags turns rm/edit's --keep-branch/--delete-branch into a
+// branch mode; both together is a usage error.
+func branchModeFromFlags(keep, del bool) (string, error) {
+	switch {
+	case keep && del:
+		return "", cli.Usagef("--keep-branch and --delete-branch are mutually exclusive")
+	case keep:
+		return branchKeep, nil
+	case del:
+		return branchDelete, nil
+	}
+	return branchAuto, nil
 }
 
 func main() {
@@ -176,20 +165,6 @@ func run(args []string) error {
 	}
 }
 
-// branchModeFromFlags turns rm/edit's --keep-branch/--delete-branch into a
-// branch mode; both together is a usage error.
-func branchModeFromFlags(keep, del bool) (string, error) {
-	switch {
-	case keep && del:
-		return "", cli.Usagef("--keep-branch and --delete-branch are mutually exclusive")
-	case keep:
-		return branchKeep, nil
-	case del:
-		return branchDelete, nil
-	}
-	return branchAuto, nil
-}
-
 func runEdit(args []string) error {
 	var o editOpts
 	var add, remove, skip listFlag
@@ -243,4 +218,29 @@ func runNew(args []string) error {
 	o.Ticket, o.Repos, o.SkipPatches = at(pos, 0), repos, skip
 	o.Description, o.DescriptionSet = description.value, description.set
 	return cmdNew(o)
+}
+
+// usage prints the top-level help to w: stdout when asked for (`--help`),
+// stderr alongside a usage error.
+func usage(w io.Writer) {
+	fmt.Fprintln(w, `usage: fleet-task <command> [flags] [args]
+
+commands:
+  new [ticket]          create a task's worktrees (interactive unless --repo is given)
+  list [--status]       list existing tasks (--status: count repos with uncommitted changes)
+  show <ticket>         show one task's repos, branches, worktrees and patches
+  repos [--json]        list configured repos, their run targets and patches
+  patches [repo]        list available patches with summaries and touched files
+  jump [ticket]         print a worktree path (picker unless --repo or only one match)
+  edit [ticket]         add/remove repos (interactive unless --add/--remove is given)
+  mv [old] [new]        rename a task's ticket id (prompts for whatever is omitted)
+  rm [ticket]           remove a task's worktrees, state file and pushed branches
+  unlock <ticket>       remove a ticket's lock left by a fleet-task that is gone
+  version               print the fleet-task version (also --version)
+
+Without a terminal on stdin (or with FLEET_NO_INPUT=1) no picker or prompt is
+ever shown: a missing value is an error naming the flag that supplies it.
+Exit codes: 0 ok, 1 operation failed, 2 usage error or input required.
+
+Run `+"`fleet-task <command> --help`"+` for a command's flags.`)
 }

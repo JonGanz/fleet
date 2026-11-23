@@ -35,14 +35,69 @@ type StopReport struct {
 	ClearedActive bool `json:"cleared_active"`
 }
 
-// newStopReport returns a report whose arrays are all non-nil, so they
-// encode as [] rather than null.
-func newStopReport() StopReport {
-	return StopReport{
-		Stopped: []string{}, StoppedTargets: []string{},
-		NotRunning: []string{}, NotRunningTargets: []string{},
-		Failed: []string{}, FailedTargets: []string{},
+// clearStaleActive clears an active-ticket record when no windows are
+// running, reporting whether there was one to clear.
+func clearStaleActive() bool {
+	active, hasActive, err := activeTicket()
+	if err != nil || !hasActive {
+		return false
 	}
+	if err := clearActiveTicket(); err != nil {
+		cli.Warnf("clearing stale active ticket record for %s: %v", active, err)
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "cleared stale active ticket record for %s\n", active)
+	return true
+}
+
+// finishStop fills in report's *Targets fields and OK, prints it (with
+// asJSON) and turns failures into an error.
+func finishStop(report StopReport, labels map[string]string, asJSON bool) error {
+	report.StoppedTargets = labelsFor(report.Stopped, labels)
+	report.NotRunningTargets = labelsFor(report.NotRunning, labels)
+	report.FailedTargets = labelsFor(report.Failed, labels)
+	report.OK = len(report.Failed) == 0
+	if asJSON {
+		if err := cli.PrintJSON(report); err != nil {
+			return err
+		}
+	}
+	if len(report.Failed) > 0 {
+		return fmt.Errorf("%d window(s) failed to stop", len(report.Failed))
+	}
+	return nil
+}
+
+// killAllWindowsInSession kills every window currently in the session,
+// unconditionally. Used internally by `start` when switching to a
+// different ticket than whatever's currently active (only one ticket's app
+// set is meant to be live at a time). Errors if any window couldn't be
+// killed, so a switch never proceeds on top of the old ticket's windows.
+func killAllWindowsInSession(session string) error {
+	windows, err := listWindows(session)
+	if err != nil {
+		return err
+	}
+	if _, failed := killWindows(windows); len(failed) > 0 {
+		return fmt.Errorf("%d window(s) failed to stop while switching tickets", len(failed))
+	}
+	return nil
+}
+
+// killWindows kills each window (by id), reporting progress on stderr, and
+// returns the names of those whose kill succeeded and failed. Shared by
+// `stop` and the switch path in `start`.
+func killWindows(windows []tmuxWindow) (stopped, failed []string) {
+	for _, w := range windows {
+		if err := killWindow(w.ID); err != nil {
+			cli.Warnf("failed to kill window %q: %v", w.Name, err)
+			failed = append(failed, w.Name)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "stopped %s\n", w.Name)
+		stopped = append(stopped, w.Name)
+	}
+	return stopped, failed
 }
 
 // labelsFor maps window names to "repo:run-name" labels ("" when unknown).
@@ -52,6 +107,16 @@ func labelsFor(windows []string, labels map[string]string) []string {
 		out[i] = labels[w]
 	}
 	return out
+}
+
+// newStopReport returns a report whose arrays are all non-nil, so they
+// encode as [] rather than null.
+func newStopReport() StopReport {
+	return StopReport{
+		Stopped: []string{}, StoppedTargets: []string{},
+		NotRunning: []string{}, NotRunningTargets: []string{},
+		Failed: []string{}, FailedTargets: []string{},
+	}
 }
 
 // runStop implements `fleet-run stop [--ticket <id>] [--all]
@@ -165,69 +230,4 @@ func runStop(opts stopOpts) error {
 		}
 	}
 	return finishStop(report, windowLabels(cfg), opts.asJSON)
-}
-
-// clearStaleActive clears an active-ticket record when no windows are
-// running, reporting whether there was one to clear.
-func clearStaleActive() bool {
-	active, hasActive, err := activeTicket()
-	if err != nil || !hasActive {
-		return false
-	}
-	if err := clearActiveTicket(); err != nil {
-		cli.Warnf("clearing stale active ticket record for %s: %v", active, err)
-		return false
-	}
-	fmt.Fprintf(os.Stderr, "cleared stale active ticket record for %s\n", active)
-	return true
-}
-
-// finishStop fills in report's *Targets fields and OK, prints it (with
-// asJSON) and turns failures into an error.
-func finishStop(report StopReport, labels map[string]string, asJSON bool) error {
-	report.StoppedTargets = labelsFor(report.Stopped, labels)
-	report.NotRunningTargets = labelsFor(report.NotRunning, labels)
-	report.FailedTargets = labelsFor(report.Failed, labels)
-	report.OK = len(report.Failed) == 0
-	if asJSON {
-		if err := cli.PrintJSON(report); err != nil {
-			return err
-		}
-	}
-	if len(report.Failed) > 0 {
-		return fmt.Errorf("%d window(s) failed to stop", len(report.Failed))
-	}
-	return nil
-}
-
-// killWindows kills each window (by id), reporting progress on stderr, and
-// returns the names of those whose kill succeeded and failed. Shared by
-// `stop` and the switch path in `start`.
-func killWindows(windows []tmuxWindow) (stopped, failed []string) {
-	for _, w := range windows {
-		if err := killWindow(w.ID); err != nil {
-			cli.Warnf("failed to kill window %q: %v", w.Name, err)
-			failed = append(failed, w.Name)
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "stopped %s\n", w.Name)
-		stopped = append(stopped, w.Name)
-	}
-	return stopped, failed
-}
-
-// killAllWindowsInSession kills every window currently in the session,
-// unconditionally. Used internally by `start` when switching to a
-// different ticket than whatever's currently active (only one ticket's app
-// set is meant to be live at a time). Errors if any window couldn't be
-// killed, so a switch never proceeds on top of the old ticket's windows.
-func killAllWindowsInSession(session string) error {
-	windows, err := listWindows(session)
-	if err != nil {
-		return err
-	}
-	if _, failed := killWindows(windows); len(failed) > 0 {
-		return fmt.Errorf("%d window(s) failed to stop while switching tickets", len(failed))
-	}
-	return nil
 }

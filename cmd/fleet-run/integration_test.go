@@ -33,6 +33,74 @@ type itEnv struct {
 	wtRoot   string
 }
 
+// captureStdout runs f with os.Stdout redirected, returning what it printed.
+func captureStdout(t *testing.T, f func() error) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	done := make(chan string)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+	ferr := f()
+	os.Stdout = old
+	w.Close()
+	return <-done, ferr
+}
+
+// tmux runs tmux against the private server and returns trimmed stdout.
+func (e *itEnv) tmux(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("tmux", append([]string{"-L", e.socket}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("tmux %v: %v", args, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// writeTask writes tasks/<ticket>.json with a real worktree dir per repo.
+func (e *itEnv) writeTask(t *testing.T, ticket, desc string, repos ...string) {
+	t.Helper()
+	ts := taskstate.State{Ticket: ticket, Description: desc, CreatedAt: time.Now()}
+	for _, r := range repos {
+		dir := filepath.Join(e.wtRoot, ticket, r)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ts.Repos = append(ts.Repos, taskstate.Repo{Repo: r, Branch: "br-" + ticket, WorktreePath: dir})
+	}
+	data, err := json.Marshal(ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(e.stateDir, "tasks", ticket+".json"), string(data), 0o644)
+}
+
+func itStatus(t *testing.T) Status {
+	t.Helper()
+	var st Status
+	if err := runJSON(t, &st, "status", "--json"); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	return st
+}
+
+func mustWrite(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // newITEnv sets up the sandbox: private tmux socket, temp config/state dirs,
 // an empty tmux config (so the user's ~/.tmux.conf isn't loaded), and
 // FLEET_NO_INPUT=1 so no picker can open. The tmux server is killed on
@@ -91,63 +159,12 @@ repos:
 	return e
 }
 
-// writeTask writes tasks/<ticket>.json with a real worktree dir per repo.
-func (e *itEnv) writeTask(t *testing.T, ticket, desc string, repos ...string) {
-	t.Helper()
-	ts := taskstate.State{Ticket: ticket, Description: desc, CreatedAt: time.Now()}
-	for _, r := range repos {
-		dir := filepath.Join(e.wtRoot, ticket, r)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		ts.Repos = append(ts.Repos, taskstate.Repo{Repo: r, Branch: "br-" + ticket, WorktreePath: dir})
+func resultStatuses(rep StartReport) map[string]string {
+	m := map[string]string{}
+	for _, r := range rep.Results {
+		m[r.Target] = r.Status
 	}
-	data, err := json.Marshal(ts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustWrite(t, filepath.Join(e.stateDir, "tasks", ticket+".json"), string(data), 0o644)
-}
-
-// tmux runs tmux against the private server and returns trimmed stdout.
-func (e *itEnv) tmux(t *testing.T, args ...string) string {
-	t.Helper()
-	out, err := exec.Command("tmux", append([]string{"-L", e.socket}, args...)...).Output()
-	if err != nil {
-		t.Fatalf("tmux %v: %v", args, err)
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func mustWrite(t *testing.T, path, content string, mode os.FileMode) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), mode); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// captureStdout runs f with os.Stdout redirected, returning what it printed.
-func captureStdout(t *testing.T, f func() error) (string, error) {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := os.Stdout
-	os.Stdout = w
-	done := make(chan string)
-	go func() {
-		var buf bytes.Buffer
-		_, _ = io.Copy(&buf, r)
-		done <- buf.String()
-	}()
-	ferr := f()
-	os.Stdout = old
-	w.Close()
-	return <-done, ferr
+	return m
 }
 
 // runJSON runs the CLI with args and decodes its stdout into v.
@@ -162,34 +179,21 @@ func runJSON(t *testing.T, v any, args ...string) error {
 	return err
 }
 
-func itStatus(t *testing.T) Status {
-	t.Helper()
-	var st Status
-	if err := runJSON(t, &st, "status", "--json"); err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	return st
-}
-
-// waitDead polls status until window's pane is dead.
-func waitDead(t *testing.T, window string) PaneInfo {
-	t.Helper()
-	for i := 0; i < 50; i++ {
-		if p, ok := findPane(itStatus(t).Panes, window); ok && !p.Alive {
-			return p
+func TestHelpAndVersionGoToStdout(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"start", "--help"}, {"restart", "-h"}, {"attach", "--help"}, {"version"}, {"--version"}} {
+		out, err := captureStdout(t, func() error { return run(args) })
+		if err != nil || out == "" {
+			t.Errorf("%v: out=%q err=%v", args, out, err)
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("window %s never became a dead pane", window)
-	return PaneInfo{}
-}
-
-func resultStatuses(rep StartReport) map[string]string {
-	m := map[string]string{}
-	for _, r := range rep.Results {
-		m[r.Target] = r.Status
+	out, _ := captureStdout(t, func() error { return run([]string{"--version"}) })
+	if !strings.HasPrefix(out, "fleet-run ") {
+		t.Errorf("version output = %q", out)
 	}
-	return m
+	out, err := captureStdout(t, func() error { return run([]string{"bogus"}) })
+	if out != "" || cli.ExitCode(err) != cli.ExitUsage {
+		t.Errorf("unknown command: out=%q err=%v", out, err)
+	}
 }
 
 func TestIntegrationLifecycle(t *testing.T) {
@@ -314,37 +318,58 @@ func TestIntegrationLifecycle(t *testing.T) {
 	}
 }
 
-// windowID resolves a window name to its id in the test session.
-func windowID(t *testing.T, e *itEnv, name string) string {
-	t.Helper()
-	for _, line := range strings.Split(e.tmux(t, "list-windows", "-t", "="+itSession, "-F", "#{window_id}\t#{window_name}"), "\n") {
-		if id, n, _ := strings.Cut(line, "\t"); n == name {
-			return id
-		}
+// TestIntegrationPreRunVeto: a pre-run hook that exits non-zero cancels its
+// window (reported failed, with the hook and exit status), the other window
+// still starts, and the command fails.
+func TestIntegrationPreRunVeto(t *testing.T) {
+	e := newITEnv(t)
+	script := "#!/bin/sh\n[ \"$FLEET_RUN_NAME\" = api ] && exit 9\nexit 0\n"
+	mustWrite(t, filepath.Join(e.cfgDir, "hooks", hooks.PreRun, "10-veto-api"), script, 0o755)
+	var rep StartReport
+	err := runJSON(t, &rep, "start", "--ticket", "A-1", "backend:api", "my.app:dev", "--json")
+	if err == nil {
+		t.Fatal("want a failure exit")
 	}
-	t.Fatalf("no window %s", name)
-	return ""
+	if rep.OK || len(rep.Results) != 2 {
+		t.Fatalf("report = %+v", rep)
+	}
+	api, dev := rep.Results[0], rep.Results[1]
+	if api.Status != startStatusFailed || !strings.Contains(api.Error, "10-veto-api failed: exit status 9") {
+		t.Errorf("api result = %+v", api)
+	}
+	if dev.Status != startStatusStarted {
+		t.Errorf("dev result = %+v", dev)
+	}
+	panes := itStatus(t).Panes
+	if _, ok := findPane(panes, "backend-api"); ok {
+		t.Error("vetoed window backend-api was created")
+	}
+	if _, ok := findPane(panes, "my.app-dev"); !ok {
+		t.Error("window my.app-dev missing")
+	}
 }
 
-func TestIntegrationTicketSwitch(t *testing.T) {
-	newITEnv(t)
-	if err := runJSON(t, &StartReport{}, "start", "--ticket", "A-1", "backend:api", "my.app:dev", "--json"); err != nil {
-		t.Fatalf("start A-1: %v", err)
+func TestIntegrationRunHooks(t *testing.T) {
+	e := newITEnv(t)
+	log := filepath.Join(t.TempDir(), "hooks.log")
+	for _, phase := range []string{hooks.PreRun, hooks.PostRun} {
+		script := fmt.Sprintf("#!/bin/sh\necho \"%s $FLEET_TICKET $FLEET_REPO $FLEET_RUN_NAME $FLEET_BRANCH $FLEET_DESCRIPTION\" >> %s\n", phase, log)
+		mustWrite(t, filepath.Join(e.cfgDir, "hooks", phase, "10-log"), script, 0o755)
 	}
-	var rep StartReport
-	if err := runJSON(t, &rep, "start", "--ticket", "B-2", "backend:api", "--json"); err != nil {
-		t.Fatalf("start B-2: %v", err)
+	if err := runJSON(t, &StartReport{}, "start", "--ticket", "A-1", "backend:api", "--json"); err != nil {
+		t.Fatalf("start: %v", err)
 	}
-	if rep.SwitchedFrom != "A-1" || resultStatuses(rep)["backend:api"] != startStatusStarted {
-		t.Errorf("switch report = %+v", rep)
+	// Already running: no hooks.
+	if err := runJSON(t, &StartReport{}, "start", "--ticket", "A-1", "backend:api", "--json"); err != nil {
+		t.Fatalf("start again: %v", err)
 	}
-	st := itStatus(t)
-	if st.ActiveTicket != "B-2" || st.Description != "second ticket" || len(st.Windows) != 1 || st.Windows[0] != "backend-api" {
-		t.Errorf("status after switch = %+v", st)
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// --ticket on stop is an assertion against the active ticket.
-	if err := run([]string{"stop", "--all", "--ticket", "A-1"}); err == nil {
-		t.Error("stop --ticket A-1 should fail while B-2 is active")
+	want := "pre-run A-1 backend api br-A-1 first ticket\npost-run A-1 backend api br-A-1 first ticket\n"
+	if string(data) != want {
+		t.Errorf("hook log = %q, want %q", data, want)
 	}
 }
 
@@ -379,6 +404,40 @@ func TestIntegrationStaleActive(t *testing.T) {
 	}
 }
 
+func TestIntegrationStopWithNothingRunning(t *testing.T) {
+	newITEnv(t)
+	// No server at all: bare stop (no terminal) still succeeds.
+	var sr StopReport
+	if err := runJSON(t, &sr, "stop", "--json"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if sr.ClearedActive || !sr.OK {
+		t.Errorf("report = %+v", sr)
+	}
+}
+
+func TestIntegrationTicketSwitch(t *testing.T) {
+	newITEnv(t)
+	if err := runJSON(t, &StartReport{}, "start", "--ticket", "A-1", "backend:api", "my.app:dev", "--json"); err != nil {
+		t.Fatalf("start A-1: %v", err)
+	}
+	var rep StartReport
+	if err := runJSON(t, &rep, "start", "--ticket", "B-2", "backend:api", "--json"); err != nil {
+		t.Fatalf("start B-2: %v", err)
+	}
+	if rep.SwitchedFrom != "A-1" || resultStatuses(rep)["backend:api"] != startStatusStarted {
+		t.Errorf("switch report = %+v", rep)
+	}
+	st := itStatus(t)
+	if st.ActiveTicket != "B-2" || st.Description != "second ticket" || len(st.Windows) != 1 || st.Windows[0] != "backend-api" {
+		t.Errorf("status after switch = %+v", st)
+	}
+	// --ticket on stop is an assertion against the active ticket.
+	if err := run([]string{"stop", "--all", "--ticket", "A-1"}); err == nil {
+		t.Error("stop --ticket A-1 should fail while B-2 is active")
+	}
+}
+
 func TestIntegrationUnknownTicketIsUsageError(t *testing.T) {
 	newITEnv(t)
 	for _, args := range [][]string{
@@ -392,86 +451,27 @@ func TestIntegrationUnknownTicketIsUsageError(t *testing.T) {
 	}
 }
 
-func TestIntegrationRunHooks(t *testing.T) {
-	e := newITEnv(t)
-	log := filepath.Join(t.TempDir(), "hooks.log")
-	for _, phase := range []string{hooks.PreRun, hooks.PostRun} {
-		script := fmt.Sprintf("#!/bin/sh\necho \"%s $FLEET_TICKET $FLEET_REPO $FLEET_RUN_NAME $FLEET_BRANCH $FLEET_DESCRIPTION\" >> %s\n", phase, log)
-		mustWrite(t, filepath.Join(e.cfgDir, "hooks", phase, "10-log"), script, 0o755)
+// waitDead polls status until window's pane is dead.
+func waitDead(t *testing.T, window string) PaneInfo {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		if p, ok := findPane(itStatus(t).Panes, window); ok && !p.Alive {
+			return p
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	if err := runJSON(t, &StartReport{}, "start", "--ticket", "A-1", "backend:api", "--json"); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	// Already running: no hooks.
-	if err := runJSON(t, &StartReport{}, "start", "--ticket", "A-1", "backend:api", "--json"); err != nil {
-		t.Fatalf("start again: %v", err)
-	}
-	data, err := os.ReadFile(log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "pre-run A-1 backend api br-A-1 first ticket\npost-run A-1 backend api br-A-1 first ticket\n"
-	if string(data) != want {
-		t.Errorf("hook log = %q, want %q", data, want)
-	}
+	t.Fatalf("window %s never became a dead pane", window)
+	return PaneInfo{}
 }
 
-// TestIntegrationPreRunVeto: a pre-run hook that exits non-zero cancels its
-// window (reported failed, with the hook and exit status), the other window
-// still starts, and the command fails.
-func TestIntegrationPreRunVeto(t *testing.T) {
-	e := newITEnv(t)
-	script := "#!/bin/sh\n[ \"$FLEET_RUN_NAME\" = api ] && exit 9\nexit 0\n"
-	mustWrite(t, filepath.Join(e.cfgDir, "hooks", hooks.PreRun, "10-veto-api"), script, 0o755)
-	var rep StartReport
-	err := runJSON(t, &rep, "start", "--ticket", "A-1", "backend:api", "my.app:dev", "--json")
-	if err == nil {
-		t.Fatal("want a failure exit")
-	}
-	if rep.OK || len(rep.Results) != 2 {
-		t.Fatalf("report = %+v", rep)
-	}
-	api, dev := rep.Results[0], rep.Results[1]
-	if api.Status != startStatusFailed || !strings.Contains(api.Error, "10-veto-api failed: exit status 9") {
-		t.Errorf("api result = %+v", api)
-	}
-	if dev.Status != startStatusStarted {
-		t.Errorf("dev result = %+v", dev)
-	}
-	panes := itStatus(t).Panes
-	if _, ok := findPane(panes, "backend-api"); ok {
-		t.Error("vetoed window backend-api was created")
-	}
-	if _, ok := findPane(panes, "my.app-dev"); !ok {
-		t.Error("window my.app-dev missing")
-	}
-}
-
-func TestIntegrationStopWithNothingRunning(t *testing.T) {
-	newITEnv(t)
-	// No server at all: bare stop (no terminal) still succeeds.
-	var sr StopReport
-	if err := runJSON(t, &sr, "stop", "--json"); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	if sr.ClearedActive || !sr.OK {
-		t.Errorf("report = %+v", sr)
-	}
-}
-
-func TestHelpAndVersionGoToStdout(t *testing.T) {
-	for _, args := range [][]string{{"--help"}, {"start", "--help"}, {"restart", "-h"}, {"attach", "--help"}, {"version"}, {"--version"}} {
-		out, err := captureStdout(t, func() error { return run(args) })
-		if err != nil || out == "" {
-			t.Errorf("%v: out=%q err=%v", args, out, err)
+// windowID resolves a window name to its id in the test session.
+func windowID(t *testing.T, e *itEnv, name string) string {
+	t.Helper()
+	for _, line := range strings.Split(e.tmux(t, "list-windows", "-t", "="+itSession, "-F", "#{window_id}\t#{window_name}"), "\n") {
+		if id, n, _ := strings.Cut(line, "\t"); n == name {
+			return id
 		}
 	}
-	out, _ := captureStdout(t, func() error { return run([]string{"--version"}) })
-	if !strings.HasPrefix(out, "fleet-run ") {
-		t.Errorf("version output = %q", out)
-	}
-	out, err := captureStdout(t, func() error { return run([]string{"bogus"}) })
-	if out != "" || cli.ExitCode(err) != cli.ExitUsage {
-		t.Errorf("unknown command: out=%q err=%v", out, err)
-	}
+	t.Fatalf("no window %s", name)
+	return ""
 }

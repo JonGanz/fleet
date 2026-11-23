@@ -10,16 +10,13 @@ import (
 	"time"
 )
 
-func TestWinJoin(t *testing.T) {
-	cases := []struct{ base, sub, want string }{
-		{`C:\fleet\cache`, "node-cache", `C:\fleet\cache\node-cache`},
-		{`C:\fleet\cache\`, `\node-cache`, `C:\fleet\cache\node-cache`},
-		{`C:\Users\jon\AppData\Local`, "fleet", `C:\Users\jon\AppData\Local\fleet`},
+func TestParseLocalAppData(t *testing.T) {
+	got, err := parseLocalAppData([]byte("\ufeffC:\\Users\\Jörg\\AppData\\Local\r\n"))
+	if err != nil || got != `C:\Users\Jörg\AppData\Local` {
+		t.Errorf("parseLocalAppData = %q, %v", got, err)
 	}
-	for _, c := range cases {
-		if got := winJoin(c.base, c.sub); got != c.want {
-			t.Errorf("winJoin(%q, %q) = %q, want %q", c.base, c.sub, got, c.want)
-		}
+	if _, err := parseLocalAppData([]byte("  \n")); err == nil {
+		t.Error("empty output should error")
 	}
 }
 
@@ -42,13 +39,16 @@ func TestWindowsRemoveScriptFailsOnCmdletError(t *testing.T) {
 	}
 }
 
-func TestParseLocalAppData(t *testing.T) {
-	got, err := parseLocalAppData([]byte("\ufeffC:\\Users\\Jörg\\AppData\\Local\r\n"))
-	if err != nil || got != `C:\Users\Jörg\AppData\Local` {
-		t.Errorf("parseLocalAppData = %q, %v", got, err)
+func TestWinJoin(t *testing.T) {
+	cases := []struct{ base, sub, want string }{
+		{`C:\fleet\cache`, "node-cache", `C:\fleet\cache\node-cache`},
+		{`C:\fleet\cache\`, `\node-cache`, `C:\fleet\cache\node-cache`},
+		{`C:\Users\jon\AppData\Local`, "fleet", `C:\Users\jon\AppData\Local\fleet`},
 	}
-	if _, err := parseLocalAppData([]byte("  \n")); err == nil {
-		t.Error("empty output should error")
+	for _, c := range cases {
+		if got := winJoin(c.base, c.sub); got != c.want {
+			t.Errorf("winJoin(%q, %q) = %q, want %q", c.base, c.sub, got, c.want)
+		}
 	}
 }
 

@@ -27,6 +27,50 @@ type newOpts struct {
 	JSON           bool
 }
 
+// addRepos sets up a worktree for each named repo (createRepoWorktree),
+// appending each success to st.Repos and writing st to tf right away, so
+// the state file always lists every worktree that exists even if the
+// command dies partway (Ctrl-C during a long npm ci). Every repo is
+// attempted even after a failure; failed counts them (unknown repo, or
+// worktree setup error). err is set only if the state write itself fails,
+// which stops further work: carrying on would create worktrees nothing
+// records. The caller must hold the ticket's lock.
+func addRepos(cfg *config.ReposConfig, st *taskstate.State, tf, wtRoot string, repoNames []string, patchesByRepo map[string][]string) (results []repoResult, failed int, err error) {
+	for _, repoName := range repoNames {
+		repo := cfg.FindRepo(repoName)
+		if repo == nil {
+			err := fmt.Errorf("repo %q not found in config, skipping", repoName)
+			cli.Errorf("%v", err)
+			results = append(results, repoResult{Repo: repoName, Action: "created", Error: err.Error()})
+			failed++
+			continue
+		}
+		tr, patchErrors, adopted, err := createRepoWorktree(cfg, repo, st.Ticket, st.Description, wtRoot, patchesByRepo[repoName])
+		if err != nil {
+			cli.Errorf("%v", err)
+			results = append(results, repoResult{Repo: repoName, Action: "created", Error: err.Error()})
+			failed++
+			continue
+		}
+		st.Repos = append(st.Repos, tr)
+		if err := taskstate.Write(tf, st); err != nil {
+			results = append(results, repoResult{Repo: tr.Repo, Action: "created", Branch: tr.Branch, WorktreePath: tr.WorktreePath, Patches: tr.Patches, Error: err.Error()})
+			return results, failed + 1, fmt.Errorf("worktree for %s was created at %s but recording it in %s failed: %w", tr.Repo, tr.WorktreePath, tf, err)
+		}
+		results = append(results, repoResult{
+			Repo:         tr.Repo,
+			Action:       "created",
+			OK:           true,
+			Branch:       tr.Branch,
+			WorktreePath: tr.WorktreePath,
+			Patches:      tr.Patches,
+			PatchErrors:  patchErrors,
+			Adopted:      adopted,
+		})
+	}
+	return results, failed, nil
+}
+
 func cmdNew(o newOpts) error {
 	useJSONOutput(o.JSON)
 
@@ -124,134 +168,6 @@ func cmdNew(o newOpts) error {
 	return nil
 }
 
-// patchesFromFlags lists each repo's available patches and applies
-// --skip-patch/--no-patches to them (see resolvePatches).
-func patchesFromFlags(repoNames, skip []string, noPatches bool) (map[string][]string, error) {
-	available := make(map[string][]string, len(repoNames))
-	for _, repo := range repoNames {
-		paths, err := listPatchPaths(repo)
-		if err != nil {
-			return nil, fmt.Errorf("listing patches for %s: %w", repo, err)
-		}
-		available[repo] = paths
-	}
-	return resolvePatches(repoNames, available, skip, noPatches)
-}
-
-// resolveNewRepos returns the repos to set up: the --repo values (validated
-// against repos.yaml, deduplicated, order kept) if any, else the picker.
-func resolveNewRepos(cfg *config.ReposConfig, flagRepos []string) ([]string, error) {
-	if len(flagRepos) > 0 {
-		repos := uniqueStrings(flagRepos)
-		for _, name := range repos {
-			if cfg.FindRepo(name) == nil {
-				return nil, cli.Usagef("unknown repo %q (see `fleet-task repos`)", name)
-			}
-		}
-		return repos, nil
-	}
-	if !cli.InteractiveAllowed() {
-		return nil, needInput("at least one repo", "pass --repo <name> (see `fleet-task repos`)")
-	}
-	selected, err := picker.Run(picker.Options{Items: cfg.RepoNames(), Multi: true, CursorFallback: true})
-	if err != nil {
-		return nil, fmt.Errorf("repo selection: %w", err)
-	}
-	if len(selected) == 0 {
-		return nil, fmt.Errorf("no repos selected")
-	}
-	return selected, nil
-}
-
-// resolveNewTicket returns the ticket id and description: from arguments
-// when the ticket was given, else from the interactive form (asking for the
-// description too unless --description was given).
-func resolveNewTicket(o newOpts) (ticket, description string, err error) {
-	if o.Ticket != "" {
-		return o.Ticket, o.Description, nil
-	}
-	if !cli.InteractiveAllowed() {
-		return "", "", needInput("a ticket id", "pass it as `fleet-task new <ticket> --repo <name> [-d <description>]`")
-	}
-	labels := []string{"Ticket", "Description"}
-	if o.DescriptionSet {
-		labels = labels[:1]
-	}
-	values, err := promptForm(labels)
-	if err != nil {
-		return "", "", fmt.Errorf("read ticket/description: %w", err)
-	}
-	if o.DescriptionSet {
-		return values[0], o.Description, nil
-	}
-	return values[0], values[1], nil
-}
-
-// selectPatchesFor asks about every named repo's patches up front, before
-// any directory/worktree work starts, so all user interaction front-loads
-// instead of interleaving prompts with (potentially slow) git/hook/cache
-// work. Shared by `new` and `edit`'s add phase. A repo whose patch selection
-// fails gets a warning and no patches.
-func selectPatchesFor(cfg *config.ReposConfig, repoNames []string) map[string][]string {
-	patchesByRepo := make(map[string][]string, len(repoNames))
-	for _, repoName := range repoNames {
-		if cfg.FindRepo(repoName) == nil {
-			continue
-		}
-		patches, err := selectPatches(repoName)
-		if err != nil {
-			cli.Warnf("patch selection for %s: %v", repoName, err)
-			continue
-		}
-		patchesByRepo[repoName] = patches
-	}
-	return patchesByRepo
-}
-
-// addRepos sets up a worktree for each named repo (createRepoWorktree),
-// appending each success to st.Repos and writing st to tf right away, so
-// the state file always lists every worktree that exists even if the
-// command dies partway (Ctrl-C during a long npm ci). Every repo is
-// attempted even after a failure; failed counts them (unknown repo, or
-// worktree setup error). err is set only if the state write itself fails,
-// which stops further work: carrying on would create worktrees nothing
-// records. The caller must hold the ticket's lock.
-func addRepos(cfg *config.ReposConfig, st *taskstate.State, tf, wtRoot string, repoNames []string, patchesByRepo map[string][]string) (results []repoResult, failed int, err error) {
-	for _, repoName := range repoNames {
-		repo := cfg.FindRepo(repoName)
-		if repo == nil {
-			err := fmt.Errorf("repo %q not found in config, skipping", repoName)
-			cli.Errorf("%v", err)
-			results = append(results, repoResult{Repo: repoName, Action: "created", Error: err.Error()})
-			failed++
-			continue
-		}
-		tr, patchErrors, adopted, err := createRepoWorktree(cfg, repo, st.Ticket, st.Description, wtRoot, patchesByRepo[repoName])
-		if err != nil {
-			cli.Errorf("%v", err)
-			results = append(results, repoResult{Repo: repoName, Action: "created", Error: err.Error()})
-			failed++
-			continue
-		}
-		st.Repos = append(st.Repos, tr)
-		if err := taskstate.Write(tf, st); err != nil {
-			results = append(results, repoResult{Repo: tr.Repo, Action: "created", Branch: tr.Branch, WorktreePath: tr.WorktreePath, Patches: tr.Patches, Error: err.Error()})
-			return results, failed + 1, fmt.Errorf("worktree for %s was created at %s but recording it in %s failed: %w", tr.Repo, tr.WorktreePath, tf, err)
-		}
-		results = append(results, repoResult{
-			Repo:         tr.Repo,
-			Action:       "created",
-			OK:           true,
-			Branch:       tr.Branch,
-			WorktreePath: tr.WorktreePath,
-			Patches:      tr.Patches,
-			PatchErrors:  patchErrors,
-			Adopted:      adopted,
-		})
-	}
-	return results, failed, nil
-}
-
 // createRepoWorktree performs the full per-repo worktree setup, shared
 // between `new` (every repo for a brand new task) and `edit`'s add-repo
 // path (a subset of repos added to an already-existing task): pre-create
@@ -317,6 +233,79 @@ func createRepoWorktree(cfg *config.ReposConfig, repo *config.RepoConfig, ticket
 	}, patchErrors, adopted, nil
 }
 
+// patchesFromFlags lists each repo's available patches and applies
+// --skip-patch/--no-patches to them (see resolvePatches).
+func patchesFromFlags(repoNames, skip []string, noPatches bool) (map[string][]string, error) {
+	available := make(map[string][]string, len(repoNames))
+	for _, repo := range repoNames {
+		paths, err := listPatchPaths(repo)
+		if err != nil {
+			return nil, fmt.Errorf("listing patches for %s: %w", repo, err)
+		}
+		available[repo] = paths
+	}
+	return resolvePatches(repoNames, available, skip, noPatches)
+}
+
+// requireNoTask refuses (usage error) a ticket that already has a state
+// file: `new` would overwrite it with only this run's repos and reset
+// created_at, orphaning the earlier worktrees.
+func requireNoTask(ticket, tf string) error {
+	if _, err := os.Stat(tf); err == nil {
+		return cli.Usagef("task %s already exists (%s); use `fleet-task edit %s` to add or remove repos, or `fleet-task rm %s` to start over", ticket, tf, ticket, ticket)
+	}
+	return nil
+}
+
+// resolveNewRepos returns the repos to set up: the --repo values (validated
+// against repos.yaml, deduplicated, order kept) if any, else the picker.
+func resolveNewRepos(cfg *config.ReposConfig, flagRepos []string) ([]string, error) {
+	if len(flagRepos) > 0 {
+		repos := uniqueStrings(flagRepos)
+		for _, name := range repos {
+			if cfg.FindRepo(name) == nil {
+				return nil, cli.Usagef("unknown repo %q (see `fleet-task repos`)", name)
+			}
+		}
+		return repos, nil
+	}
+	if !cli.InteractiveAllowed() {
+		return nil, needInput("at least one repo", "pass --repo <name> (see `fleet-task repos`)")
+	}
+	selected, err := picker.Run(picker.Options{Items: cfg.RepoNames(), Multi: true, CursorFallback: true})
+	if err != nil {
+		return nil, fmt.Errorf("repo selection: %w", err)
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no repos selected")
+	}
+	return selected, nil
+}
+
+// resolveNewTicket returns the ticket id and description: from arguments
+// when the ticket was given, else from the interactive form (asking for the
+// description too unless --description was given).
+func resolveNewTicket(o newOpts) (ticket, description string, err error) {
+	if o.Ticket != "" {
+		return o.Ticket, o.Description, nil
+	}
+	if !cli.InteractiveAllowed() {
+		return "", "", needInput("a ticket id", "pass it as `fleet-task new <ticket> --repo <name> [-d <description>]`")
+	}
+	labels := []string{"Ticket", "Description"}
+	if o.DescriptionSet {
+		labels = labels[:1]
+	}
+	values, err := promptForm(labels)
+	if err != nil {
+		return "", "", fmt.Errorf("read ticket/description: %w", err)
+	}
+	if o.DescriptionSet {
+		return values[0], o.Description, nil
+	}
+	return values[0], values[1], nil
+}
+
 // selectPatches globs <config dir>/patches/<repo>/*.patch and, if any
 // exist, lets the user multiselect which to apply, starting with every
 // patch checked so the common case ("apply them all") needs no input —
@@ -358,14 +347,25 @@ func selectPatches(repo string) ([]string, error) {
 	return selected, nil
 }
 
-// requireNoTask refuses (usage error) a ticket that already has a state
-// file: `new` would overwrite it with only this run's repos and reset
-// created_at, orphaning the earlier worktrees.
-func requireNoTask(ticket, tf string) error {
-	if _, err := os.Stat(tf); err == nil {
-		return cli.Usagef("task %s already exists (%s); use `fleet-task edit %s` to add or remove repos, or `fleet-task rm %s` to start over", ticket, tf, ticket, ticket)
+// selectPatchesFor asks about every named repo's patches up front, before
+// any directory/worktree work starts, so all user interaction front-loads
+// instead of interleaving prompts with (potentially slow) git/hook/cache
+// work. Shared by `new` and `edit`'s add phase. A repo whose patch selection
+// fails gets a warning and no patches.
+func selectPatchesFor(cfg *config.ReposConfig, repoNames []string) map[string][]string {
+	patchesByRepo := make(map[string][]string, len(repoNames))
+	for _, repoName := range repoNames {
+		if cfg.FindRepo(repoName) == nil {
+			continue
+		}
+		patches, err := selectPatches(repoName)
+		if err != nil {
+			cli.Warnf("patch selection for %s: %v", repoName, err)
+			continue
+		}
+		patchesByRepo[repoName] = patches
 	}
-	return nil
+	return patchesByRepo
 }
 
 // setupWorktree ensures the repo's base clone exists and is fetched

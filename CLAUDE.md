@@ -117,6 +117,11 @@ tmux installed, so fleet-run's integration tests run), staticcheck and govulnche
 shellcheck on `install.sh`; dependabot updates the Go module and actions weekly. Locally,
 `make check` (plus `make lint` if staticcheck is installed) is the verification loop.
 
+## Code style
+
+- Within a file: imports, then const/var/type declarations, then functions and methods sorted
+  alphabetically (methods grouped by receiver type at the type name's position).
+
 ## Architecture
 
 ### The `runtime: linux|windows` split

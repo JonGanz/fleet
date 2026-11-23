@@ -36,87 +36,17 @@ const npmrcName = ".npmrc"
 // abandoned (a live `ensure` is never expected to take this long).
 const stagingMaxAge = 24 * time.Hour
 
-// logf writes fleet-cache's own progress/status output to stderr, keeping
-// stdout free for machine-readable output and for callers (fleet-task)
-// that interleave several tools' output.
-func logf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
-}
-
-func shortHash(h string) string {
-	if len(h) > 8 {
-		return h[:8]
-	}
-	return h
-}
-
-// stageEntryInputs creates stagingDir and copies package-lock.json,
-// package.json and, if present, .npmrc (taken from lockPath's directory)
-// into it.
-//
-// `npm ci` requires both package files in its working directory (it
-// validates the lockfile against the manifest) -- copying the lockfile alone
-// fails with an ENOENT reading package.json. The staged inputs are re-keyed
-// (cacheKey on the staging dir) to make sure they still match wantKey (the
-// lockfile or .npmrc could have changed since they were keyed), so an entry
-// is never filed under the wrong key.
-// A package.json declaring workspaces is rejected up front: the workspace
-// packages aren't in the staging dir, so `npm ci` there can't work.
-func stageEntryInputs(stagingDir, lockPath, wantKey string) error {
-	srcDir := filepath.Dir(lockPath)
-	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
-		return fmt.Errorf("creating cache staging dir %s: %w", stagingDir, err)
-	}
-	stagedLock := filepath.Join(stagingDir, lockfileName)
-	if err := copyFile(lockPath, stagedLock, 0o644); err != nil {
-		return fmt.Errorf("copying package-lock.json into cache: %w", err)
-	}
-	stagedPkg := filepath.Join(stagingDir, "package.json")
-	if err := copyFile(filepath.Join(srcDir, "package.json"), stagedPkg, 0o644); err != nil {
-		return fmt.Errorf("copying package.json into cache: %w", err)
-	}
-	if err := checkNoWorkspaces(stagedPkg, srcDir); err != nil {
-		return err
-	}
-	if err := stageNpmrc(srcDir, stagingDir); err != nil {
-		return err
-	}
-	if _, got, err := cacheKey(stagingDir); err != nil || got != wantKey {
-		return fmt.Errorf("package-lock.json or .npmrc changed while staging the cache entry; rerun")
-	}
-	return nil
-}
-
-// stageNpmrc copies <srcDir>/.npmrc into stagingDir with mode 0600 (it may
-// hold a token) if it exists. Anything other than a regular file (or a
-// symlink to one) under that name is an error rather than silently ignored,
-// since npm would otherwise run without the config the project expects.
-func stageNpmrc(srcDir, stagingDir string) error {
-	src := filepath.Join(srcDir, npmrcName)
-	info, err := os.Stat(src)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("checking %s: %w", src, err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", src)
-	}
-	if err := copyFile(src, filepath.Join(stagingDir, npmrcName), 0o600); err != nil {
-		return fmt.Errorf("copying .npmrc into cache: %w", err)
-	}
-	return nil
-}
-
-// removeStagedNpmrc deletes the .npmrc stageNpmrc may have copied into
-// stagingDir, so a registry token never ends up in a committed entry.
-func removeStagedNpmrc(stagingDir string) error {
-	err := os.Remove(filepath.Join(stagingDir, npmrcName))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("removing .npmrc from cache staging dir: %w", err)
-	}
-	return nil
+// entryOps are the platform-specific pieces of building a cache entry.
+type entryOps struct {
+	// install runs `npm ci` inside stagingDir (a WSL/Linux-form path),
+	// stopping it when ctx is cancelled.
+	install func(ctx context.Context, stagingDir string) error
+	// finalize, if non-nil, runs after a successful install (e.g.
+	// lockDownPermissions on the Linux path).
+	finalize func(stagingDir string) error
+	// remove deletes a directory tree (os.RemoveAll, or a native Windows
+	// bulk delete).
+	remove func(dir string) error
 }
 
 // checkNoWorkspaces errors if the package.json at pkgPath declares npm
@@ -135,25 +65,6 @@ func checkNoWorkspaces(pkgPath, srcDir string) error {
 		return fmt.Errorf("%s declares npm workspaces, which fleet-cache does not support (the workspace packages are not available to `npm ci` in the cache); run `npm ci` in %s directly instead", filepath.Join(srcDir, "package.json"), srcDir)
 	}
 	return nil
-}
-
-// declaresWorkspaces reports whether package.json content data has a
-// "workspaces" field that is neither null nor empty ([] or {}). Malformed
-// JSON, or a top level that isn't an object, is an error.
-func declaresWorkspaces(data []byte) (bool, error) {
-	var manifest map[string]json.RawMessage
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return false, fmt.Errorf("not a valid package.json (expected a JSON object): %w", err)
-	}
-	raw, ok := manifest["workspaces"]
-	if !ok {
-		return false, nil
-	}
-	switch string(bytes.Join(bytes.Fields(raw), nil)) {
-	case "null", "[]", "{}":
-		return false, nil
-	}
-	return true, nil
 }
 
 // copyFile copies src to dst, creating dst with perm (subject to umask) or
@@ -177,38 +88,23 @@ func copyFile(src, dst string, perm os.FileMode) error {
 	return out.Close()
 }
 
-// stagingPath returns this process's staging dir for entry.
-func stagingPath(entry string) string {
-	return fmt.Sprintf("%s%s%d", entry, stagingInfix, os.Getpid())
-}
-
-// isEntryComplete reports whether entry carries entryCompleteMarker.
-func isEntryComplete(entry string) (bool, error) {
-	_, err := os.Stat(filepath.Join(entry, entryCompleteMarker))
-	if err == nil {
-		return true, nil
+// declaresWorkspaces reports whether package.json content data has a
+// "workspaces" field that is neither null nor empty ([] or {}). Malformed
+// JSON, or a top level that isn't an object, is an error.
+func declaresWorkspaces(data []byte) (bool, error) {
+	var manifest map[string]json.RawMessage
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return false, fmt.Errorf("not a valid package.json (expected a JSON object): %w", err)
 	}
-	if os.IsNotExist(err) {
+	raw, ok := manifest["workspaces"]
+	if !ok {
 		return false, nil
 	}
-	return false, fmt.Errorf("checking cache entry %s: %w", entry, err)
-}
-
-func isStagingName(name string) bool {
-	return strings.Contains(name, stagingInfix)
-}
-
-// entryOps are the platform-specific pieces of building a cache entry.
-type entryOps struct {
-	// install runs `npm ci` inside stagingDir (a WSL/Linux-form path),
-	// stopping it when ctx is cancelled.
-	install func(ctx context.Context, stagingDir string) error
-	// finalize, if non-nil, runs after a successful install (e.g.
-	// lockDownPermissions on the Linux path).
-	finalize func(stagingDir string) error
-	// remove deletes a directory tree (os.RemoveAll, or a native Windows
-	// bulk delete).
-	remove func(dir string) error
+	switch string(bytes.Join(bytes.Fields(raw), nil)) {
+	case "null", "[]", "{}":
+		return false, nil
+	}
+	return true, nil
 }
 
 // ensureCacheEntry makes sure the cache entry at entry (<node-cache>/<key>)
@@ -303,4 +199,108 @@ func interrupted(ctx context.Context) error {
 	}
 	logf("interrupted; removing the cache staging dir")
 	return errors.New("interrupted; cache entry not built")
+}
+
+// isEntryComplete reports whether entry carries entryCompleteMarker.
+func isEntryComplete(entry string) (bool, error) {
+	_, err := os.Stat(filepath.Join(entry, entryCompleteMarker))
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("checking cache entry %s: %w", entry, err)
+}
+
+func isStagingName(name string) bool {
+	return strings.Contains(name, stagingInfix)
+}
+
+// logf writes fleet-cache's own progress/status output to stderr, keeping
+// stdout free for machine-readable output and for callers (fleet-task)
+// that interleave several tools' output.
+func logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
+// removeStagedNpmrc deletes the .npmrc stageNpmrc may have copied into
+// stagingDir, so a registry token never ends up in a committed entry.
+func removeStagedNpmrc(stagingDir string) error {
+	err := os.Remove(filepath.Join(stagingDir, npmrcName))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing .npmrc from cache staging dir: %w", err)
+	}
+	return nil
+}
+
+func shortHash(h string) string {
+	if len(h) > 8 {
+		return h[:8]
+	}
+	return h
+}
+
+// stageEntryInputs creates stagingDir and copies package-lock.json,
+// package.json and, if present, .npmrc (taken from lockPath's directory)
+// into it.
+//
+// `npm ci` requires both package files in its working directory (it
+// validates the lockfile against the manifest) -- copying the lockfile alone
+// fails with an ENOENT reading package.json. The staged inputs are re-keyed
+// (cacheKey on the staging dir) to make sure they still match wantKey (the
+// lockfile or .npmrc could have changed since they were keyed), so an entry
+// is never filed under the wrong key.
+// A package.json declaring workspaces is rejected up front: the workspace
+// packages aren't in the staging dir, so `npm ci` there can't work.
+func stageEntryInputs(stagingDir, lockPath, wantKey string) error {
+	srcDir := filepath.Dir(lockPath)
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		return fmt.Errorf("creating cache staging dir %s: %w", stagingDir, err)
+	}
+	stagedLock := filepath.Join(stagingDir, lockfileName)
+	if err := copyFile(lockPath, stagedLock, 0o644); err != nil {
+		return fmt.Errorf("copying package-lock.json into cache: %w", err)
+	}
+	stagedPkg := filepath.Join(stagingDir, "package.json")
+	if err := copyFile(filepath.Join(srcDir, "package.json"), stagedPkg, 0o644); err != nil {
+		return fmt.Errorf("copying package.json into cache: %w", err)
+	}
+	if err := checkNoWorkspaces(stagedPkg, srcDir); err != nil {
+		return err
+	}
+	if err := stageNpmrc(srcDir, stagingDir); err != nil {
+		return err
+	}
+	if _, got, err := cacheKey(stagingDir); err != nil || got != wantKey {
+		return fmt.Errorf("package-lock.json or .npmrc changed while staging the cache entry; rerun")
+	}
+	return nil
+}
+
+// stageNpmrc copies <srcDir>/.npmrc into stagingDir with mode 0600 (it may
+// hold a token) if it exists. Anything other than a regular file (or a
+// symlink to one) under that name is an error rather than silently ignored,
+// since npm would otherwise run without the config the project expects.
+func stageNpmrc(srcDir, stagingDir string) error {
+	src := filepath.Join(srcDir, npmrcName)
+	info, err := os.Stat(src)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("checking %s: %w", src, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", src)
+	}
+	if err := copyFile(src, filepath.Join(stagingDir, npmrcName), 0o600); err != nil {
+		return fmt.Errorf("copying .npmrc into cache: %w", err)
+	}
+	return nil
+}
+
+// stagingPath returns this process's staging dir for entry.
+func stagingPath(entry string) string {
+	return fmt.Sprintf("%s%s%d", entry, stagingInfix, os.Getpid())
 }

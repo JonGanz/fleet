@@ -19,19 +19,10 @@ func TestCheckTicketMatchesActive(t *testing.T) {
 	}
 }
 
-func TestParsePairLabel(t *testing.T) {
-	repo, run, ok := parsePairLabel("backend:api")
-	if !ok || repo != "backend" || run != "api" {
-		t.Errorf("parsePairLabel(backend:api) = %q, %q, %v", repo, run, ok)
-	}
-	if _, _, ok := parsePairLabel("no-colon"); ok {
-		t.Error("parsePairLabel(no-colon) should fail")
-	}
-	if _, _, ok := parsePairLabel(":api"); ok {
-		t.Error("parsePairLabel(:api) should fail (empty repo)")
-	}
-	if _, _, ok := parsePairLabel("backend:"); ok {
-		t.Error("parsePairLabel(backend:) should fail (empty run name)")
+func TestLabelsFor(t *testing.T) {
+	got := labelsFor([]string{"backend-api", "orphan"}, map[string]string{"backend-api": "backend:api"})
+	if want := []string{"backend:api", ""}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 
@@ -47,6 +38,34 @@ func TestNamesToWindowNames(t *testing.T) {
 
 	if _, err := namesToWindowNames([]string{"bad"}); err == nil {
 		t.Error("expected error for malformed name")
+	}
+}
+
+func TestNewStopReportEncodesEmptyArrays(t *testing.T) {
+	b, err := json.Marshal(newStopReport())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"stopped", "stopped_targets", "not_running", "not_running_targets", "failed", "failed_targets"} {
+		if !strings.Contains(string(b), `"`+f+`":[]`) {
+			t.Errorf("%s not an empty array in %s", f, b)
+		}
+	}
+}
+
+func TestParsePairLabel(t *testing.T) {
+	repo, run, ok := parsePairLabel("backend:api")
+	if !ok || repo != "backend" || run != "api" {
+		t.Errorf("parsePairLabel(backend:api) = %q, %q, %v", repo, run, ok)
+	}
+	if _, _, ok := parsePairLabel("no-colon"); ok {
+		t.Error("parsePairLabel(no-colon) should fail")
+	}
+	if _, _, ok := parsePairLabel(":api"); ok {
+		t.Error("parsePairLabel(:api) should fail (empty repo)")
+	}
+	if _, _, ok := parsePairLabel("backend:"); ok {
+		t.Error("parsePairLabel(backend:) should fail (empty run name)")
 	}
 }
 
@@ -84,24 +103,5 @@ func TestWindowsNamed(t *testing.T) {
 	}
 	if got := windowsNamed(ws, "z"); len(got) != 0 {
 		t.Errorf("got %v", got)
-	}
-}
-
-func TestLabelsFor(t *testing.T) {
-	got := labelsFor([]string{"backend-api", "orphan"}, map[string]string{"backend-api": "backend:api"})
-	if want := []string{"backend:api", ""}; !reflect.DeepEqual(got, want) {
-		t.Errorf("got %v, want %v", got, want)
-	}
-}
-
-func TestNewStopReportEncodesEmptyArrays(t *testing.T) {
-	b, err := json.Marshal(newStopReport())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, f := range []string{"stopped", "stopped_targets", "not_running", "not_running_targets", "failed", "failed_targets"} {
-		if !strings.Contains(string(b), `"`+f+`":[]`) {
-			t.Errorf("%s not an empty array in %s", f, b)
-		}
 	}
 }

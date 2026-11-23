@@ -13,33 +13,41 @@ import (
 	"strings"
 )
 
-// WindowsPath translates a WSL-side path to its win32 form via
-// `wslpath -w` (e.g. /mnt/c/x -> C:\x). It does not resolve symlinks
-// itself on every WSL version; callers that may hold a symlink resolve it
-// first.
-func WindowsPath(dir string) (string, error) {
-	out, err := exec.Command("wslpath", "-w", dir).Output()
-	if err != nil {
-		return "", fmt.Errorf("wslpath -w %s: %w", dir, err)
+// CheckSameDrive verifies every non-empty win32 path in labeled (label ->
+// path) is on the same drive letter, returning an error naming the
+// mismatched pair if not. NTFS hardlinks (used to populate node_modules
+// from the Windows-native cache) fail across volumes, so windows_base,
+// windows_worktree_root and the Windows cache root must all live on one
+// drive. Labels are checked in sorted order so the outcome (and message)
+// never depends on map iteration. A path with no drive letter (a
+// \\wsl.localhost\... UNC path, i.e. something inside the WSL filesystem,
+// or a relative path) is an error of its own rather than compared as "":
+// it is not on an NTFS volume at all.
+func CheckSameDrive(labeled map[string]string) error {
+	labels := make([]string, 0, len(labeled))
+	for label, winPath := range labeled {
+		if winPath != "" {
+			labels = append(labels, label)
+		}
 	}
-	return strings.TrimSpace(string(out)), nil
-}
+	sort.Strings(labels)
 
-// WSLPath translates a win32-form path to its WSL-visible form via
-// `wslpath -u` (e.g. `C:\Users\jon\AppData\Local` -> `/mnt/c/Users/jon/AppData/Local`).
-func WSLPath(winPath string) (string, error) {
-	out, err := exec.Command("wslpath", "-u", winPath).Output()
-	if err != nil {
-		return "", fmt.Errorf("wslpath -u %s: %w", winPath, err)
+	var firstLabel, firstDrive string
+	for _, label := range labels {
+		winPath := labeled[label]
+		d := DriveLetter(winPath)
+		if d == "" {
+			return fmt.Errorf("%s (%s) is not on a Windows drive (no drive letter; a UNC or relative path?); it must be on a local NTFS drive such as C:, the same one as the other Windows-side fleet paths, for hardlinking to work", label, winPath)
+		}
+		if firstDrive == "" {
+			firstLabel, firstDrive = label, d
+			continue
+		}
+		if d != firstDrive {
+			return fmt.Errorf("%s (%s) and %s (%s) must be on the same drive for hardlinking to work", firstLabel, firstDrive, label, d)
+		}
 	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// PSQuote returns s as a PowerShell single-quoted (verbatim) string literal
-// for embedding in a -Command string: the only character special inside one
-// is the single quote itself, which is escaped by doubling it.
-func PSQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	return nil
 }
 
 // CommandScript builds the PowerShell -Command script that runs args as a
@@ -80,39 +88,31 @@ func DriveLetter(winPath string) string {
 	return ""
 }
 
-// CheckSameDrive verifies every non-empty win32 path in labeled (label ->
-// path) is on the same drive letter, returning an error naming the
-// mismatched pair if not. NTFS hardlinks (used to populate node_modules
-// from the Windows-native cache) fail across volumes, so windows_base,
-// windows_worktree_root and the Windows cache root must all live on one
-// drive. Labels are checked in sorted order so the outcome (and message)
-// never depends on map iteration. A path with no drive letter (a
-// \\wsl.localhost\... UNC path, i.e. something inside the WSL filesystem,
-// or a relative path) is an error of its own rather than compared as "":
-// it is not on an NTFS volume at all.
-func CheckSameDrive(labeled map[string]string) error {
-	labels := make([]string, 0, len(labeled))
-	for label, winPath := range labeled {
-		if winPath != "" {
-			labels = append(labels, label)
-		}
-	}
-	sort.Strings(labels)
+// PSQuote returns s as a PowerShell single-quoted (verbatim) string literal
+// for embedding in a -Command string: the only character special inside one
+// is the single quote itself, which is escaped by doubling it.
+func PSQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
 
-	var firstLabel, firstDrive string
-	for _, label := range labels {
-		winPath := labeled[label]
-		d := DriveLetter(winPath)
-		if d == "" {
-			return fmt.Errorf("%s (%s) is not on a Windows drive (no drive letter; a UNC or relative path?); it must be on a local NTFS drive such as C:, the same one as the other Windows-side fleet paths, for hardlinking to work", label, winPath)
-		}
-		if firstDrive == "" {
-			firstLabel, firstDrive = label, d
-			continue
-		}
-		if d != firstDrive {
-			return fmt.Errorf("%s (%s) and %s (%s) must be on the same drive for hardlinking to work", firstLabel, firstDrive, label, d)
-		}
+// WindowsPath translates a WSL-side path to its win32 form via
+// `wslpath -w` (e.g. /mnt/c/x -> C:\x). It does not resolve symlinks
+// itself on every WSL version; callers that may hold a symlink resolve it
+// first.
+func WindowsPath(dir string) (string, error) {
+	out, err := exec.Command("wslpath", "-w", dir).Output()
+	if err != nil {
+		return "", fmt.Errorf("wslpath -w %s: %w", dir, err)
 	}
-	return nil
+	return strings.TrimSpace(string(out)), nil
+}
+
+// WSLPath translates a win32-form path to its WSL-visible form via
+// `wslpath -u` (e.g. `C:\Users\jon\AppData\Local` -> `/mnt/c/Users/jon/AppData/Local`).
+func WSLPath(winPath string) (string, error) {
+	out, err := exec.Command("wslpath", "-u", winPath).Output()
+	if err != nil {
+		return "", fmt.Errorf("wslpath -u %s: %w", winPath, err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }

@@ -56,11 +56,6 @@ type repoStatus struct {
 	Unpushed *int
 }
 
-// unknownChanges is a report for a worktree that couldn't be checked.
-func unknownChanges(reason string) changeReport {
-	return changeReport{State: changesUnknown, Files: []fileChange{}, Reason: reason}
-}
-
 // checkRemovable is the guard `rm` and `edit --remove` run over every repo
 // they are about to remove, before removing any. Clean worktrees, and ones
 // whose directory is already gone (nothing left to lose), pass silently.
@@ -196,31 +191,6 @@ func inspectRepoStatus(cfg *config.ReposConfig, r taskstate.Repo) repoStatus {
 	return st
 }
 
-// resolveRecordedPatches maps a state entry's applied patch names to files
-// under <config dir>/patches/<repo>/. problem is non-empty when the patches
-// can't be excluded: the list is unknown (null, older state file) or a file
-// is gone. An empty list is fine: there is nothing to exclude.
-func resolveRecordedPatches(repo string, names []string) (paths []string, problem string) {
-	if names == nil {
-		return nil, "applied patches unknown (task predates patch tracking), so their changes are included"
-	}
-	dir, err := xdg.PatchesDir(repo)
-	if err != nil {
-		return nil, fmt.Sprintf("patches dir: %v; patch changes are included", err)
-	}
-	for _, name := range names {
-		if name == "" || filepath.Base(name) != name {
-			return nil, fmt.Sprintf("recorded patch name %q is not a plain file name; patch changes are included", name)
-		}
-		p := filepath.Join(dir, name)
-		if _, err := os.Stat(p); err != nil {
-			return nil, fmt.Sprintf("recorded patch %s no longer exists, so patch changes are included", p)
-		}
-		paths = append(paths, p)
-	}
-	return paths, ""
-}
-
 // parseNameStatus parses `git diff-tree -r --name-status -z` output:
 // alternating status and path fields (a rename/copy status is followed by
 // two paths; the destination is reported).
@@ -278,6 +248,40 @@ func parsePorcelainLines(data string) []fileChange {
 	return files
 }
 
+// reportFromFiles builds a clean/dirty report from a list of changes.
+func reportFromFiles(files []fileChange, patchesExcluded, approximate bool, reason string) changeReport {
+	state := changesClean
+	if len(files) > 0 {
+		state = changesDirty
+	}
+	return changeReport{State: state, Files: files, PatchesExcluded: patchesExcluded, Approximate: approximate, Reason: reason}
+}
+
+// resolveRecordedPatches maps a state entry's applied patch names to files
+// under <config dir>/patches/<repo>/. problem is non-empty when the patches
+// can't be excluded: the list is unknown (null, older state file) or a file
+// is gone. An empty list is fine: there is nothing to exclude.
+func resolveRecordedPatches(repo string, names []string) (paths []string, problem string) {
+	if names == nil {
+		return nil, "applied patches unknown (task predates patch tracking), so their changes are included"
+	}
+	dir, err := xdg.PatchesDir(repo)
+	if err != nil {
+		return nil, fmt.Sprintf("patches dir: %v; patch changes are included", err)
+	}
+	for _, name := range names {
+		if name == "" || filepath.Base(name) != name {
+			return nil, fmt.Sprintf("recorded patch name %q is not a plain file name; patch changes are included", name)
+		}
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err != nil {
+			return nil, fmt.Sprintf("recorded patch %s no longer exists, so patch changes are included", p)
+		}
+		paths = append(paths, p)
+	}
+	return paths, ""
+}
+
 // subtractPatchedFiles drops changes to files any of patchFiles touches
 // (the windows-runtime approximation). It reports whether every patch could
 // be read; if not, nothing is dropped.
@@ -301,11 +305,7 @@ func subtractPatchedFiles(files []fileChange, patchFiles []string) ([]fileChange
 	return kept, true
 }
 
-// reportFromFiles builds a clean/dirty report from a list of changes.
-func reportFromFiles(files []fileChange, patchesExcluded, approximate bool, reason string) changeReport {
-	state := changesClean
-	if len(files) > 0 {
-		state = changesDirty
-	}
-	return changeReport{State: state, Files: files, PatchesExcluded: patchesExcluded, Approximate: approximate, Reason: reason}
+// unknownChanges is a report for a worktree that couldn't be checked.
+func unknownChanges(reason string) changeReport {
+	return changeReport{State: changesUnknown, Files: []fileChange{}, Reason: reason}
 }

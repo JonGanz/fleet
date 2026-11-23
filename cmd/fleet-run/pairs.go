@@ -19,17 +19,6 @@ type RunPair struct {
 	Branch      string // from the task state; passed to hooks as FLEET_BRANCH
 }
 
-// Label returns the "repo:run-name" string used both as the fzf candidate
-// line and as the accepted positional-argument form for `fleet-run stop`.
-func (p RunPair) Label() string {
-	return p.Repo + ":" + p.RunName
-}
-
-// WindowName returns the tmux window name this pair would run in.
-func (p RunPair) WindowName() string {
-	return windowName(p.Repo, p.RunName)
-}
-
 // availablePairs derives the list of repo:run-name pairs available for a
 // task: only repos that (a) appear in the task's worktree list and (b) have
 // a matching entry in repos.yaml are included, and only that repo's
@@ -76,4 +65,15 @@ func findPairByLabel(pairs []RunPair, label string) (RunPair, bool) {
 // repo:run-name argument.
 func pairNotFoundError(label string) error {
 	return fmt.Errorf("no such repo:run-name %q available for this task (check repos.yaml `run` entries and the task's worktrees)", label)
+}
+
+// Label returns the "repo:run-name" string used both as the fzf candidate
+// line and as the accepted positional-argument form for `fleet-run stop`.
+func (p RunPair) Label() string {
+	return p.Repo + ":" + p.RunName
+}
+
+// WindowName returns the tmux window name this pair would run in.
+func (p RunPair) WindowName() string {
+	return windowName(p.Repo, p.RunName)
 }

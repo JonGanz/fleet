@@ -13,29 +13,6 @@ import (
 	"github.com/JonGanz/fleet/internal/taskstate"
 )
 
-func TestDecideUnlock(t *testing.T) {
-	const maxAge = time.Minute
-	cases := []struct {
-		name                  string
-		havePid, alive, force bool
-		age                   time.Duration
-		wantRemove            bool
-	}{
-		{name: "dead owner", havePid: true, wantRemove: true},
-		{name: "live owner", havePid: true, alive: true},
-		{name: "live owner forced", havePid: true, alive: true, force: true, wantRemove: true},
-		{name: "no pid, young", age: time.Second},
-		{name: "no pid, old", age: 2 * time.Minute, wantRemove: true},
-		{name: "no pid, young, forced", age: time.Second, force: true, wantRemove: true},
-	}
-	for _, c := range cases {
-		d := decideUnlock(c.havePid, c.alive, c.age, maxAge, c.force)
-		if d.Remove != c.wantRemove || (!d.Remove && d.Refusal == "") {
-			t.Errorf("%s: got %+v", c.name, d)
-		}
-	}
-}
-
 // deadPid returns the pid of a process that has exited.
 func deadPid(t *testing.T) int {
 	t.Helper()
@@ -114,6 +91,29 @@ func TestCmdUnlock(t *testing.T) {
 	}
 	if matches, _ := filepath.Glob(lockPath + "*"); len(matches) != 0 {
 		t.Errorf("leftovers: %v", matches)
+	}
+}
+
+func TestDecideUnlock(t *testing.T) {
+	const maxAge = time.Minute
+	cases := []struct {
+		name                  string
+		havePid, alive, force bool
+		age                   time.Duration
+		wantRemove            bool
+	}{
+		{name: "dead owner", havePid: true, wantRemove: true},
+		{name: "live owner", havePid: true, alive: true},
+		{name: "live owner forced", havePid: true, alive: true, force: true, wantRemove: true},
+		{name: "no pid, young", age: time.Second},
+		{name: "no pid, old", age: 2 * time.Minute, wantRemove: true},
+		{name: "no pid, young, forced", age: time.Second, force: true, wantRemove: true},
+	}
+	for _, c := range cases {
+		d := decideUnlock(c.havePid, c.alive, c.age, maxAge, c.force)
+		if d.Remove != c.wantRemove || (!d.Remove && d.Refusal == "") {
+			t.Errorf("%s: got %+v", c.name, d)
+		}
 	}
 }
 

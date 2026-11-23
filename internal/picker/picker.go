@@ -36,53 +36,6 @@ type Options struct {
 	CursorFallback bool
 }
 
-// Run runs the picker described by opts and returns the confirmed items. It
-// returns (nil, nil) without showing anything when there are no items,
-// (nil, error) if the user cancels (esc/q/ctrl-c), and a usage error when
-// no picker may be shown.
-func Run(opts Options) ([]string, error) {
-	if len(opts.Items) == 0 {
-		return nil, nil
-	}
-	// Backstop: callers check cli.InteractiveAllowed first so they can name
-	// the missing flag, but no picker may ever open without a terminal.
-	if !cli.InteractiveAllowed() {
-		return nil, cli.Usagef("a selection is required (%s) and no terminal is available for a picker; pass it as flags/arguments (see --help)", selectTitleOr(opts.Title, "picker"))
-	}
-	var preselected map[string]bool
-	if opts.Preselected {
-		preselected = make(map[string]bool, len(opts.Items))
-		for _, it := range opts.Items {
-			preselected[it] = true
-		}
-	}
-	m := newSelectModel(opts.Title, opts.Items, opts.Multi, preselected, opts.CursorFallback)
-
-	// Render/read against the controlling terminal directly rather than
-	// os.Stdin/os.Stdout: callers like fleet-task's `jump` are meant to be
-	// run as `cd $(fleet-task jump)`, which redirects stdout into the command
-	// substitution pipe. If the picker rendered there, the UI would be
-	// invisible and its frames would leak into the captured selection.
-	// Using /dev/tty for the UI (like fzf does) keeps stdout free for the
-	// caller to print only the final chosen value.
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open /dev/tty (a controlling terminal is required for interactive selection): %w", err)
-	}
-	defer tty.Close()
-
-	p := tea.NewProgram(m, tea.WithInput(tty), tea.WithOutput(tty))
-	result, err := p.Run()
-	if err != nil {
-		return nil, fmt.Errorf("select: %w", err)
-	}
-	final := result.(selectModel)
-	if final.cancelled {
-		return nil, fmt.Errorf("selection cancelled")
-	}
-	return final.confirmed, nil
-}
-
 var (
 	selectCursorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
 	selectCheckedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("36"))
@@ -138,8 +91,51 @@ func newSelectModel(title string, items []string, multi bool, preselected map[st
 	return m
 }
 
-func (m selectModel) Init() tea.Cmd {
-	return nil
+// Run runs the picker described by opts and returns the confirmed items. It
+// returns (nil, nil) without showing anything when there are no items,
+// (nil, error) if the user cancels (esc/q/ctrl-c), and a usage error when
+// no picker may be shown.
+func Run(opts Options) ([]string, error) {
+	if len(opts.Items) == 0 {
+		return nil, nil
+	}
+	// Backstop: callers check cli.InteractiveAllowed first so they can name
+	// the missing flag, but no picker may ever open without a terminal.
+	if !cli.InteractiveAllowed() {
+		return nil, cli.Usagef("a selection is required (%s) and no terminal is available for a picker; pass it as flags/arguments (see --help)", selectTitleOr(opts.Title, "picker"))
+	}
+	var preselected map[string]bool
+	if opts.Preselected {
+		preselected = make(map[string]bool, len(opts.Items))
+		for _, it := range opts.Items {
+			preselected[it] = true
+		}
+	}
+	m := newSelectModel(opts.Title, opts.Items, opts.Multi, preselected, opts.CursorFallback)
+
+	// Render/read against the controlling terminal directly rather than
+	// os.Stdin/os.Stdout: callers like fleet-task's `jump` are meant to be
+	// run as `cd $(fleet-task jump)`, which redirects stdout into the command
+	// substitution pipe. If the picker rendered there, the UI would be
+	// invisible and its frames would leak into the captured selection.
+	// Using /dev/tty for the UI (like fzf does) keeps stdout free for the
+	// caller to print only the final chosen value.
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open /dev/tty (a controlling terminal is required for interactive selection): %w", err)
+	}
+	defer tty.Close()
+
+	p := tea.NewProgram(m, tea.WithInput(tty), tea.WithOutput(tty))
+	result, err := p.Run()
+	if err != nil {
+		return nil, fmt.Errorf("select: %w", err)
+	}
+	final := result.(selectModel)
+	if final.cancelled {
+		return nil, fmt.Errorf("selection cancelled")
+	}
+	return final.confirmed, nil
 }
 
 func (m *selectModel) applyFilter() {
@@ -155,6 +151,32 @@ func (m *selectModel) applyFilter() {
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
+}
+
+func (m selectModel) Init() tea.Cmd {
+	return nil
+}
+
+// selection returns the checked items (multi mode) or, if nothing is
+// checked yet and cursorFallback is enabled, the item currently under the
+// cursor — mirroring fzf's behavior where a bare enter picks the
+// highlighted line.
+func (m selectModel) selection() []string {
+	if m.multi {
+		var out []string
+		for _, item := range m.items {
+			if m.checked[item] {
+				out = append(out, item)
+			}
+		}
+		if len(out) > 0 || !m.cursorFallback {
+			return out
+		}
+	}
+	if len(m.filtered) == 0 {
+		return nil
+	}
+	return []string{m.items[m.filtered[m.cursor]]}
 }
 
 func (m selectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -268,28 +290,6 @@ func (m selectModel) updateNormal(msg tea.KeyMsg) selectModel {
 		m.filtering = true
 	}
 	return m
-}
-
-// selection returns the checked items (multi mode) or, if nothing is
-// checked yet and cursorFallback is enabled, the item currently under the
-// cursor — mirroring fzf's behavior where a bare enter picks the
-// highlighted line.
-func (m selectModel) selection() []string {
-	if m.multi {
-		var out []string
-		for _, item := range m.items {
-			if m.checked[item] {
-				out = append(out, item)
-			}
-		}
-		if len(out) > 0 || !m.cursorFallback {
-			return out
-		}
-	}
-	if len(m.filtered) == 0 {
-		return nil
-	}
-	return []string{m.items[m.filtered[m.cursor]]}
 }
 
 func (m selectModel) View() string {

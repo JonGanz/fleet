@@ -7,13 +7,12 @@ import (
 	"github.com/JonGanz/fleet/internal/config"
 )
 
-func TestWindowsMkdirScript(t *testing.T) {
-	s := windowsMkdirScript(`C:\x`)
-	if !strings.Contains(s, "$ErrorActionPreference='Stop'") || !strings.Contains(s, "catch") || !strings.Contains(s, "exit 1") {
-		t.Errorf("mkdir script must fail non-zero on cmdlet errors:\n%s", s)
+func TestStderrSuffix(t *testing.T) {
+	if got := stderrSuffix("  \n"); got != "" {
+		t.Errorf("blank: %q", got)
 	}
-	if strings.Contains(s, "$LASTEXITCODE") {
-		t.Errorf("mkdir script must not rely on $LASTEXITCODE after a cmdlet:\n%s", s)
+	if got := stderrSuffix("fatal: nope\n"); got != ": fatal: nope" {
+		t.Errorf("got %q", got)
 	}
 }
 
@@ -30,11 +29,12 @@ func TestWindowsGitRealPath(t *testing.T) {
 	}
 }
 
-func TestStderrSuffix(t *testing.T) {
-	if got := stderrSuffix("  \n"); got != "" {
-		t.Errorf("blank: %q", got)
+func TestWindowsMkdirScript(t *testing.T) {
+	s := windowsMkdirScript(`C:\x`)
+	if !strings.Contains(s, "$ErrorActionPreference='Stop'") || !strings.Contains(s, "catch") || !strings.Contains(s, "exit 1") {
+		t.Errorf("mkdir script must fail non-zero on cmdlet errors:\n%s", s)
 	}
-	if got := stderrSuffix("fatal: nope\n"); got != ": fatal: nope" {
-		t.Errorf("got %q", got)
+	if strings.Contains(s, "$LASTEXITCODE") {
+		t.Errorf("mkdir script must not rely on $LASTEXITCODE after a cmdlet:\n%s", s)
 	}
 }

@@ -138,32 +138,6 @@ func addWorktree(r gitRunner, base, worktreePath, branch, defaultBranch string) 
 	return nil
 }
 
-// args returns git's arguments (after any -C) for the plan, with every
-// option before the path so git never mistakes the path for an option's
-// value.
-func (p worktreeAddPlan) args(worktreePath string) []string {
-	switch p.Mode {
-	case worktreeAttach:
-		return []string{"worktree", "add", worktreePath, p.Branch}
-	case worktreeTrack:
-		return []string{"worktree", "add", "--track", "-b", p.Branch, worktreePath, p.StartPoint}
-	default:
-		return []string{"worktree", "add", "--no-track", "-b", p.Branch, worktreePath, p.StartPoint}
-	}
-}
-
-// describe renders the plan for error messages.
-func (p worktreeAddPlan) describe() string {
-	switch p.Mode {
-	case worktreeAttach:
-		return fmt.Sprintf("attaching existing local branch %s", p.Branch)
-	case worktreeTrack:
-		return fmt.Sprintf("creating branch %s tracking %s", p.Branch, p.StartPoint)
-	default:
-		return fmt.Sprintf("creating branch %s from %s", p.Branch, p.StartPoint)
-	}
-}
-
 // decideAdoption decides what to do about what InspectWorktreePath found at
 // worktreePath before creating a worktree on branch there: nothing there
 // means create it (false, nil); a registered worktree of base on that very
@@ -328,22 +302,6 @@ func planBaseSetup(info baseInfo, repoName, base, origin string) (baseSetup, err
 	return baseSetup{}, nil
 }
 
-// resolveExistingGit is gitForExisting without the warning: known is false
-// when it fell back to running git in the worktree itself because repos.yaml
-// has no usable entry (no base) for repoName.
-func resolveExistingGit(cfg *config.ReposConfig, repoName, worktreePath string) (r gitRunner, base string, known bool, err error) {
-	if repo := cfg.FindRepo(repoName); repo != nil {
-		r, base, err := gitFor(cfg, repo)
-		if err != nil {
-			return nil, "", false, err
-		}
-		if base != "" {
-			return r, base, true, nil
-		}
-	}
-	return linuxGit{cfg: cfg}, worktreePath, false, nil
-}
-
 // planWorktreeAdd chooses how to create a ticket's worktree on branch:
 // attach the local branch if it exists (a rerun, or a repo re-added by
 // `edit`); else, if origin/<branch> exists (someone pushed it), create the
@@ -376,4 +334,46 @@ func planWorktreeAdd(branch, defaultBranch string, refExists func(ref string) (b
 		return worktreeAddPlan{}, fmt.Errorf("branch %s exists neither locally nor on origin, and default_branch origin/%s does not exist to create it from; check default_branch in repos.yaml", branch, defaultBranch)
 	}
 	return worktreeAddPlan{Mode: worktreeCreate, Branch: branch, StartPoint: "origin/" + defaultBranch}, nil
+}
+
+// resolveExistingGit is gitForExisting without the warning: known is false
+// when it fell back to running git in the worktree itself because repos.yaml
+// has no usable entry (no base) for repoName.
+func resolveExistingGit(cfg *config.ReposConfig, repoName, worktreePath string) (r gitRunner, base string, known bool, err error) {
+	if repo := cfg.FindRepo(repoName); repo != nil {
+		r, base, err := gitFor(cfg, repo)
+		if err != nil {
+			return nil, "", false, err
+		}
+		if base != "" {
+			return r, base, true, nil
+		}
+	}
+	return linuxGit{cfg: cfg}, worktreePath, false, nil
+}
+
+// args returns git's arguments (after any -C) for the plan, with every
+// option before the path so git never mistakes the path for an option's
+// value.
+func (p worktreeAddPlan) args(worktreePath string) []string {
+	switch p.Mode {
+	case worktreeAttach:
+		return []string{"worktree", "add", worktreePath, p.Branch}
+	case worktreeTrack:
+		return []string{"worktree", "add", "--track", "-b", p.Branch, worktreePath, p.StartPoint}
+	default:
+		return []string{"worktree", "add", "--no-track", "-b", p.Branch, worktreePath, p.StartPoint}
+	}
+}
+
+// describe renders the plan for error messages.
+func (p worktreeAddPlan) describe() string {
+	switch p.Mode {
+	case worktreeAttach:
+		return fmt.Sprintf("attaching existing local branch %s", p.Branch)
+	case worktreeTrack:
+		return fmt.Sprintf("creating branch %s tracking %s", p.Branch, p.StartPoint)
+	default:
+		return fmt.Sprintf("creating branch %s from %s", p.Branch, p.StartPoint)
+	}
 }

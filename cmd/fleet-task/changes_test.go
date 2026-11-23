@@ -104,6 +104,18 @@ func TestChangesExcludePatches(t *testing.T) {
 	}
 }
 
+func TestChangesPatchCommittedOver(t *testing.T) {
+	r, _ := changesFixture(t)
+	gitT(t, r.WorktreePath, "commit", "-q", "-am", "keep the patch")
+	st := inspectRepoStatus(nil, r)
+	if st.Changes.State != changesClean || st.Changes.PatchesExcluded || !strings.Contains(st.Changes.Reason, "no longer applies") {
+		t.Errorf("committed patch: %+v", st.Changes)
+	}
+	if st.Unpushed == nil || *st.Unpushed != 1 {
+		t.Errorf("unpushed = %v, want 1", st.Unpushed)
+	}
+}
+
 func TestChangesPatchFileDeletedFallsBack(t *testing.T) {
 	r, patchPath := changesFixture(t)
 	if err := os.Remove(patchPath); err != nil {
@@ -118,18 +130,6 @@ func TestChangesPatchFileDeletedFallsBack(t *testing.T) {
 	}
 }
 
-func TestChangesPatchCommittedOver(t *testing.T) {
-	r, _ := changesFixture(t)
-	gitT(t, r.WorktreePath, "commit", "-q", "-am", "keep the patch")
-	st := inspectRepoStatus(nil, r)
-	if st.Changes.State != changesClean || st.Changes.PatchesExcluded || !strings.Contains(st.Changes.Reason, "no longer applies") {
-		t.Errorf("committed patch: %+v", st.Changes)
-	}
-	if st.Unpushed == nil || *st.Unpushed != 1 {
-		t.Errorf("unpushed = %v, want 1", st.Unpushed)
-	}
-}
-
 func TestChangesUnknownPatchesAndMissingWorktree(t *testing.T) {
 	r, _ := changesFixture(t)
 	r.Patches = nil
@@ -141,6 +141,65 @@ func TestChangesUnknownPatchesAndMissingWorktree(t *testing.T) {
 	r.WorktreePath = filepath.Join(t.TempDir(), "gone")
 	if rep := changesOf(t, r); rep.State != changesUnknown || rep.Reason == "" {
 		t.Errorf("missing worktree: %+v", rep)
+	}
+}
+
+func TestDescribeChangeProblemCaps(t *testing.T) {
+	var files []fileChange
+	for i := 0; i < maxListedChanges+5; i++ {
+		files = append(files, fileChange{"M", "f" + string(rune('a'+i))})
+	}
+	s := describeChangeProblem("r", changeReport{State: changesDirty, Files: files, PatchesExcluded: true})
+	if !strings.Contains(s, "and 5 more") || strings.Count(s, "\n") != maxListedChanges+1 {
+		t.Errorf("not capped:\n%s", s)
+	}
+	if s := describeChangeProblem("r", unknownChanges("boom")); !strings.Contains(s, "could not check") {
+		t.Errorf("unknown: %s", s)
+	}
+}
+
+func TestFormatters(t *testing.T) {
+	if formatChanges(changeReport{State: changesDirty, Files: make([]fileChange, 3)}) != "3 changed" {
+		t.Error("dirty")
+	}
+	if formatChanges(changeReport{State: changesDirty, Files: make([]fileChange, 1), Approximate: true}) != "~1 changed" {
+		t.Error("approximate")
+	}
+	n := 2
+	if formatUnpushed(nil) != "?" || formatUnpushed(&n) != "2" {
+		t.Error("unpushed")
+	}
+	if formatRepoChangeCounts(0, 0) != "clean" || formatRepoChangeCounts(1, 2) != "1 dirty, 2 unknown" {
+		t.Error("counts")
+	}
+}
+
+func TestParseNameStatus(t *testing.T) {
+	got := parseNameStatus("M\x00a.txt\x00A\x00dir/new file\x00R100\x00old\x00new\x00")
+	want := []fileChange{{"M", "a.txt"}, {"A", "dir/new file"}, {"R", "new"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseNameStatus = %v", got)
+	}
+	if got := parseNameStatus(""); len(got) != 0 {
+		t.Errorf("empty: %v", got)
+	}
+}
+
+func TestParsePorcelainLines(t *testing.T) {
+	got := parsePorcelainLines(" M a.txt\r\n?? new.txt\nM  staged.txt\nR  old.txt -> renamed.txt\n?? \"sp ace\\303\\251.txt\"\n")
+	want := []fileChange{{"M", "a.txt"}, {"A", "new.txt"}, {"M", "staged.txt"}, {"R", "renamed.txt"}, {"A", "sp aceé.txt"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parsePorcelainLines = %v\nwant %v", got, want)
+	}
+}
+
+func TestRmCleanWorktreeNeedsNoForce(t *testing.T) {
+	r, _ := changesFixture(t)
+	if err := cmdRm("T-1", false, branchAuto, false); err != nil {
+		t.Fatalf("rm of a clean (patched) worktree: %v", err)
+	}
+	if _, err := os.Stat(r.WorktreePath); !os.IsNotExist(err) {
+		t.Errorf("worktree still there: %v", err)
 	}
 }
 
@@ -174,35 +233,6 @@ func TestRmRefusesDirtyWithoutTerminal(t *testing.T) {
 	}
 }
 
-func TestRmCleanWorktreeNeedsNoForce(t *testing.T) {
-	r, _ := changesFixture(t)
-	if err := cmdRm("T-1", false, branchAuto, false); err != nil {
-		t.Fatalf("rm of a clean (patched) worktree: %v", err)
-	}
-	if _, err := os.Stat(r.WorktreePath); !os.IsNotExist(err) {
-		t.Errorf("worktree still there: %v", err)
-	}
-}
-
-func TestParseNameStatus(t *testing.T) {
-	got := parseNameStatus("M\x00a.txt\x00A\x00dir/new file\x00R100\x00old\x00new\x00")
-	want := []fileChange{{"M", "a.txt"}, {"A", "dir/new file"}, {"R", "new"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("parseNameStatus = %v", got)
-	}
-	if got := parseNameStatus(""); len(got) != 0 {
-		t.Errorf("empty: %v", got)
-	}
-}
-
-func TestParsePorcelainLines(t *testing.T) {
-	got := parsePorcelainLines(" M a.txt\r\n?? new.txt\nM  staged.txt\nR  old.txt -> renamed.txt\n?? \"sp ace\\303\\251.txt\"\n")
-	want := []fileChange{{"M", "a.txt"}, {"A", "new.txt"}, {"M", "staged.txt"}, {"R", "renamed.txt"}, {"A", "sp aceé.txt"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("parsePorcelainLines = %v\nwant %v", got, want)
-	}
-}
-
 func TestSubtractPatchedFiles(t *testing.T) {
 	patch := filepath.Join(t.TempDir(), "p.patch")
 	writeFileT(t, patch, "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n")
@@ -213,35 +243,5 @@ func TestSubtractPatchedFiles(t *testing.T) {
 	}
 	if kept, ok := subtractPatchedFiles(files, []string{patch + ".missing"}); ok || len(kept) != 2 {
 		t.Errorf("unreadable patch must subtract nothing: %v, %v", kept, ok)
-	}
-}
-
-func TestDescribeChangeProblemCaps(t *testing.T) {
-	var files []fileChange
-	for i := 0; i < maxListedChanges+5; i++ {
-		files = append(files, fileChange{"M", "f" + string(rune('a'+i))})
-	}
-	s := describeChangeProblem("r", changeReport{State: changesDirty, Files: files, PatchesExcluded: true})
-	if !strings.Contains(s, "and 5 more") || strings.Count(s, "\n") != maxListedChanges+1 {
-		t.Errorf("not capped:\n%s", s)
-	}
-	if s := describeChangeProblem("r", unknownChanges("boom")); !strings.Contains(s, "could not check") {
-		t.Errorf("unknown: %s", s)
-	}
-}
-
-func TestFormatters(t *testing.T) {
-	if formatChanges(changeReport{State: changesDirty, Files: make([]fileChange, 3)}) != "3 changed" {
-		t.Error("dirty")
-	}
-	if formatChanges(changeReport{State: changesDirty, Files: make([]fileChange, 1), Approximate: true}) != "~1 changed" {
-		t.Error("approximate")
-	}
-	n := 2
-	if formatUnpushed(nil) != "?" || formatUnpushed(&n) != "2" {
-		t.Error("unpushed")
-	}
-	if formatRepoChangeCounts(0, 0) != "clean" || formatRepoChangeCounts(1, 2) != "1 dirty, 2 unknown" {
-		t.Error("counts")
 	}
 }

@@ -21,135 +21,14 @@ type tmuxWindow struct {
 	Name string
 }
 
-// runTmux runs `tmux <args...>` with its output sent to stderr (so tmux's own
-// error messages surface directly, while stdout stays reserved for results
-// such as --json output) and returns an error if it exits non-zero.
-func runTmux(args ...string) error {
-	cmd := tmuxCommand(args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-// tmuxCommand builds an exec.Cmd for tmux, honouring FLEET_TMUX_SOCKET. Every
-// tmux invocation must go through here.
-func tmuxCommand(args ...string) *exec.Cmd {
-	return exec.Command("tmux", tmuxsock.Args(args...)...)
-}
-
-// tmuxOutput runs `tmux <args...>` and returns its captured stdout.
-func tmuxOutput(args ...string) (string, error) {
-	cmd := tmuxCommand(args...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	return out.String(), err
-}
-
-// tmuxOutputQuiet is tmuxOutput with stderr discarded rather than inherited,
-// for calls whose failure is an expected, silently-handled outcome (e.g.
-// reading a session option that may simply not be set yet) -- callers that
-// swallow the error shouldn't still leak tmux's raw error text to the
-// terminal.
-func tmuxOutputQuiet(args ...string) (string, error) {
-	cmd := tmuxCommand(args...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	err := cmd.Run()
-	return out.String(), err
-}
-
-// sessionExists reports whether the fleet tmux session already exists.
-func sessionExists(session string) bool {
-	return tmuxCommand(hasSessionArgs(session)...).Run() == nil
-}
-
-// listWindows returns the windows currently in the session. Returns an
-// empty slice (not an error) if the session doesn't exist yet.
-func listWindows(session string) ([]tmuxWindow, error) {
-	if !sessionExists(session) {
-		return nil, nil
-	}
-	out, err := tmuxOutput(listWindowsArgs(session)...)
+// capturePane returns a window's pane content (plus up to historyLines of
+// scrollback) as text.
+func capturePane(pane PaneInfo, historyLines int) (string, error) {
+	out, err := tmuxOutput(capturePaneArgs(pane.WindowID, historyLines)...)
 	if err != nil {
-		return nil, fmt.Errorf("list windows in session %q: %w", session, err)
+		return "", fmt.Errorf("capture window %q: %w", pane.Window, err)
 	}
-	return parseWindowLines(out)
-}
-
-// parseWindowLines parses listWindowsArgs output ("@N<tab>name" lines).
-func parseWindowLines(out string) ([]tmuxWindow, error) {
-	var windows []tmuxWindow
-	for _, line := range splitNonEmptyLines(out) {
-		id, name, ok := strings.Cut(line, "\t")
-		if !ok || !strings.HasPrefix(id, "@") {
-			return nil, fmt.Errorf("unexpected tmux window line %q", line)
-		}
-		windows = append(windows, tmuxWindow{ID: id, Name: name})
-	}
-	return windows, nil
-}
-
-// windowNames returns the names of windows, in order.
-func windowNames(windows []tmuxWindow) []string {
-	names := make([]string, len(windows))
-	for i, w := range windows {
-		names[i] = w.Name
-	}
-	return names
-}
-
-// splitNonEmptyLines splits tmux's newline-delimited output, dropping any
-// trailing blank line.
-func splitNonEmptyLines(s string) []string {
-	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	var out []string
-	for _, l := range lines {
-		if l != "" {
-			out = append(out, l)
-		}
-	}
-	return out
-}
-
-// nextFreeWindowIndex returns the lowest window index in session that isn't
-// already in use, so new-window can be given an explicit "=<session>:<index>"
-// target rather than relying on tmux's own (client-attachment-relative)
-// placement rules.
-func nextFreeWindowIndex(session string) (int, error) {
-	out, err := tmuxOutput(listWindowIndicesArgs(session)...)
-	if err != nil {
-		return 0, fmt.Errorf("list window indices in session %q: %w", session, err)
-	}
-	used := make(map[int]bool)
-	for _, l := range splitNonEmptyLines(out) {
-		i, err := strconv.Atoi(l)
-		if err != nil {
-			return 0, fmt.Errorf("parse window index %q in session %q: %w", l, session, err)
-		}
-		used[i] = true
-	}
-	for i := 0; ; i++ {
-		if !used[i] {
-			return i, nil
-		}
-	}
-}
-
-// windowsWorktreeWinPath resolves a runtime: windows repo's worktree dir to
-// its win32 form. dir may be a symlink into /mnt/c/... (fleet-task creates
-// one at the normal WSL worktree location for runtime: windows repos, whose
-// real git worktree lives on an NTFS volume). wslpath may do pure
-// syntactic translation without resolving symlinks (it depends on the WSL
-// version), in which case the symlink's own (WSL ext4-side) path would map to
-// a \\wsl.localhost\... UNC path instead of the correct C:\... location.
-// Resolving it first is a no-op for any windows-runtime worktree that isn't a symlink.
-func windowsWorktreeWinPath(dir string) (string, error) {
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolved
-	}
-	return wsl.WindowsPath(dir)
+	return out, nil
 }
 
 // checkWorktreeDir verifies the worktree directory exists (following
@@ -167,6 +46,57 @@ func checkWorktreeDir(dir string) error {
 		return fmt.Errorf("worktree path %s is not a directory", dir)
 	}
 	return nil
+}
+
+// getSessionOption reads a tmux user option's value. found is false if the
+// option isn't set or no tmux server is running (tmux exits non-zero in
+// both cases). A real exec failure -- e.g. the tmux binary isn't installed
+// -- is returned as an error instead of being mistaken for "nothing active".
+func getSessionOption(name string) (value string, found bool, err error) {
+	out, err := tmuxOutputQuiet(showSessionOptionArgs(name)...)
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("run tmux: %w", err)
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return "", false, nil
+	}
+	return out, true, nil
+}
+
+// killWindow kills a single window by id.
+func killWindow(windowID string) error {
+	return runTmux(killWindowArgs(windowID)...)
+}
+
+// listPanes returns every pane in the session with its live/dead state.
+// Returns nil (not an error) if the session doesn't exist.
+func listPanes(session string) ([]PaneInfo, error) {
+	if !sessionExists(session) {
+		return nil, nil
+	}
+	out, err := tmuxOutput(listPanesArgs(session)...)
+	if err != nil {
+		return nil, fmt.Errorf("list panes in session %q: %w", session, err)
+	}
+	return parsePaneLines(out)
+}
+
+// listWindows returns the windows currently in the session. Returns an
+// empty slice (not an error) if the session doesn't exist yet.
+func listWindows(session string) ([]tmuxWindow, error) {
+	if !sessionExists(session) {
+		return nil, nil
+	}
+	out, err := tmuxOutput(listWindowsArgs(session)...)
+	if err != nil {
+		return nil, fmt.Errorf("list windows in session %q: %w", session, err)
+	}
+	return parseWindowLines(out)
 }
 
 // newWindow creates a tmux window for the given pair. For linux-runtime
@@ -209,6 +139,30 @@ func newWindow(session, configFile, name string, p RunPair) error {
 	return runTmux(newWindowArgsLinux(session, name, p.WorktreeDir, p.Cmd, index)...)
 }
 
+// nextFreeWindowIndex returns the lowest window index in session that isn't
+// already in use, so new-window can be given an explicit "=<session>:<index>"
+// target rather than relying on tmux's own (client-attachment-relative)
+// placement rules.
+func nextFreeWindowIndex(session string) (int, error) {
+	out, err := tmuxOutput(listWindowIndicesArgs(session)...)
+	if err != nil {
+		return 0, fmt.Errorf("list window indices in session %q: %w", session, err)
+	}
+	used := make(map[int]bool)
+	for _, l := range splitNonEmptyLines(out) {
+		i, err := strconv.Atoi(l)
+		if err != nil {
+			return 0, fmt.Errorf("parse window index %q in session %q: %w", l, session, err)
+		}
+		used[i] = true
+	}
+	for i := 0; ; i++ {
+		if !used[i] {
+			return i, nil
+		}
+	}
+}
+
 // pairLaunchDir checks p's worktree dir exists and, for a windows-runtime
 // pair, returns its win32-form path ("" for linux pairs, which use the WSL
 // path directly).
@@ -220,6 +174,19 @@ func pairLaunchDir(p RunPair) (winDir string, err error) {
 		return "", nil
 	}
 	return windowsWorktreeWinPath(p.WorktreeDir)
+}
+
+// parseWindowLines parses listWindowsArgs output ("@N<tab>name" lines).
+func parseWindowLines(out string) ([]tmuxWindow, error) {
+	var windows []tmuxWindow
+	for _, line := range splitNonEmptyLines(out) {
+		id, name, ok := strings.Cut(line, "\t")
+		if !ok || !strings.HasPrefix(id, "@") {
+			return nil, fmt.Errorf("unexpected tmux window line %q", line)
+		}
+		windows = append(windows, tmuxWindow{ID: id, Name: name})
+	}
+	return windows, nil
 }
 
 // respawnWindow restarts the pane of an existing window (dead, kept by
@@ -236,32 +203,24 @@ func respawnWindow(windowID string, p RunPair) error {
 	return runTmux(respawnPaneArgsLinux(windowID, p.WorktreeDir, p.Cmd)...)
 }
 
-// listPanes returns every pane in the session with its live/dead state.
-// Returns nil (not an error) if the session doesn't exist.
-func listPanes(session string) ([]PaneInfo, error) {
-	if !sessionExists(session) {
-		return nil, nil
-	}
-	out, err := tmuxOutput(listPanesArgs(session)...)
-	if err != nil {
-		return nil, fmt.Errorf("list panes in session %q: %w", session, err)
-	}
-	return parsePaneLines(out)
+// runTmux runs `tmux <args...>` with its output sent to stderr (so tmux's own
+// error messages surface directly, while stdout stays reserved for results
+// such as --json output) and returns an error if it exits non-zero.
+func runTmux(args ...string) error {
+	cmd := tmuxCommand(args...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
-// capturePane returns a window's pane content (plus up to historyLines of
-// scrollback) as text.
-func capturePane(pane PaneInfo, historyLines int) (string, error) {
-	out, err := tmuxOutput(capturePaneArgs(pane.WindowID, historyLines)...)
-	if err != nil {
-		return "", fmt.Errorf("capture window %q: %w", pane.Window, err)
-	}
-	return out, nil
+// serverRunning reports whether a tmux server is currently running.
+func serverRunning() bool {
+	return tmuxCommand("list-sessions").Run() == nil
 }
 
-// killWindow kills a single window by id.
-func killWindow(windowID string) error {
-	return runTmux(killWindowArgs(windowID)...)
+// sessionExists reports whether the fleet tmux session already exists.
+func sessionExists(session string) bool {
+	return tmuxCommand(hasSessionArgs(session)...).Run() == nil
 }
 
 // setSessionOption sets the given tmux user option (global scope -- see
@@ -270,33 +229,74 @@ func setSessionOption(name, value string) error {
 	return runTmux(setSessionOptionArgs(name, value)...)
 }
 
+// splitNonEmptyLines splits tmux's newline-delimited output, dropping any
+// trailing blank line.
+func splitNonEmptyLines(s string) []string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	var out []string
+	for _, l := range lines {
+		if l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// tmuxCommand builds an exec.Cmd for tmux, honouring FLEET_TMUX_SOCKET. Every
+// tmux invocation must go through here.
+func tmuxCommand(args ...string) *exec.Cmd {
+	return exec.Command("tmux", tmuxsock.Args(args...)...)
+}
+
+// tmuxOutput runs `tmux <args...>` and returns its captured stdout.
+func tmuxOutput(args ...string) (string, error) {
+	cmd := tmuxCommand(args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	return out.String(), err
+}
+
+// tmuxOutputQuiet is tmuxOutput with stderr discarded rather than inherited,
+// for calls whose failure is an expected, silently-handled outcome (e.g.
+// reading a session option that may simply not be set yet) -- callers that
+// swallow the error shouldn't still leak tmux's raw error text to the
+// terminal.
+func tmuxOutputQuiet(args ...string) (string, error) {
+	cmd := tmuxCommand(args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	return out.String(), err
+}
+
 // unsetSessionOption clears a tmux user option. Unsetting an option that
 // was never set is not an error.
 func unsetSessionOption(name string) error {
 	return runTmux(unsetSessionOptionArgs(name)...)
 }
 
-// getSessionOption reads a tmux user option's value. found is false if the
-// option isn't set or no tmux server is running (tmux exits non-zero in
-// both cases). A real exec failure -- e.g. the tmux binary isn't installed
-// -- is returned as an error instead of being mistaken for "nothing active".
-func getSessionOption(name string) (value string, found bool, err error) {
-	out, err := tmuxOutputQuiet(showSessionOptionArgs(name)...)
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return "", false, nil
-		}
-		return "", false, fmt.Errorf("run tmux: %w", err)
+// windowNames returns the names of windows, in order.
+func windowNames(windows []tmuxWindow) []string {
+	names := make([]string, len(windows))
+	for i, w := range windows {
+		names[i] = w.Name
 	}
-	out = strings.TrimSpace(out)
-	if out == "" {
-		return "", false, nil
-	}
-	return out, true, nil
+	return names
 }
 
-// serverRunning reports whether a tmux server is currently running.
-func serverRunning() bool {
-	return tmuxCommand("list-sessions").Run() == nil
+// windowsWorktreeWinPath resolves a runtime: windows repo's worktree dir to
+// its win32 form. dir may be a symlink into /mnt/c/... (fleet-task creates
+// one at the normal WSL worktree location for runtime: windows repos, whose
+// real git worktree lives on an NTFS volume). wslpath may do pure
+// syntactic translation without resolving symlinks (it depends on the WSL
+// version), in which case the symlink's own (WSL ext4-side) path would map to
+// a \\wsl.localhost\... UNC path instead of the correct C:\... location.
+// Resolving it first is a no-op for any windows-runtime worktree that isn't a symlink.
+func windowsWorktreeWinPath(dir string) (string, error) {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	return wsl.WindowsPath(dir)
 }

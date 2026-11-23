@@ -1,11 +1,6 @@
 # Improvements backlog
 
-Decisions in progress, feature ideas not started, paths never exercised end to end, and deliberate
-decisions.
-
-## Decided, in progress
-- **Function order:** sort functions alphabetically within every file (methods grouped under their
-  type), as a dedicated pass after the restructure; no CI enforcement.
+Feature ideas not started, paths never exercised end to end, and deliberate decisions.
 
 ## Feature ideas (not started)
 - `fleet-task doctor` / `validate`: dependencies, config, orphans (worktree without state, state

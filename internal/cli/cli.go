@@ -42,52 +42,11 @@ var (
 	stderr io.Writer = os.Stderr
 )
 
-// SetProgram sets the program name that prefixes every diagnostic line
-// ("fleet-task", "fleet-run", "fleet-cache"). Each main calls it first.
-func SetProgram(name string) {
-	mu.Lock()
-	defer mu.Unlock()
-	program = name
-}
-
-// Program returns the name set by SetProgram ("fleet" if never set).
-func Program() string {
-	mu.Lock()
-	defer mu.Unlock()
-	return program
-}
-
-// SetStderr redirects diagnostics to w and returns a function restoring the
-// previous writer. Meant for tests.
-func SetStderr(w io.Writer) (restore func()) {
-	mu.Lock()
-	defer mu.Unlock()
-	old := stderr
-	stderr = w
-	return func() {
-		mu.Lock()
-		defer mu.Unlock()
-		stderr = old
-	}
-}
-
-// Errorf prints a "<program>: error: <msg>" line to stderr without aborting,
-// for failures reported while the rest of the work is still attempted (and
-// by Report for the error a command returns).
-func Errorf(format string, args ...any) {
-	diagnostic(nil, "error", format, args...)
-}
-
-// FErrorf is Errorf writing to w instead of stderr, for code that is handed
-// its own stderr writer.
-func FErrorf(w io.Writer, format string, args ...any) {
-	diagnostic(w, "error", format, args...)
-}
-
-// Warnf prints a "<program>: warning: <msg>" line to stderr, for non-fatal
-// problems.
-func Warnf(format string, args ...any) {
-	diagnostic(nil, "warning", format, args...)
+// UsageError marks a failure caused by how the command was invoked: bad
+// flags or arguments, unknown names, or a value that would need a prompt
+// when no prompt may be shown. It maps to exit code 2.
+type UsageError struct {
+	Msg string
 }
 
 // diagnostic writes one "<program>: <kind>: <msg>" line to w (stderr when w
@@ -103,25 +62,11 @@ func diagnostic(w io.Writer, kind, format string, args ...any) {
 	fmt.Fprintf(w, "%s: %s: %s\n", program, kind, msg)
 }
 
-// UsageError marks a failure caused by how the command was invoked: bad
-// flags or arguments, unknown names, or a value that would need a prompt
-// when no prompt may be shown. It maps to exit code 2.
-type UsageError struct {
-	Msg string
-}
-
-// Error returns the message.
-func (e *UsageError) Error() string { return e.Msg }
-
-// Usagef builds a *UsageError from a format string.
-func Usagef(format string, args ...any) error {
-	return &UsageError{Msg: fmt.Sprintf(format, args...)}
-}
-
-// IsUsage reports whether err is (or wraps) a *UsageError.
-func IsUsage(err error) bool {
-	var ue *UsageError
-	return errors.As(err, &ue)
+// Errorf prints a "<program>: error: <msg>" line to stderr without aborting,
+// for failures reported while the rest of the work is still attempted (and
+// by Report for the error a command returns).
+func Errorf(format string, args ...any) {
+	diagnostic(nil, "error", format, args...)
 }
 
 // ExitCode maps an error returned by a command to the process exit code:
@@ -138,14 +83,10 @@ func ExitCode(err error) int {
 	}
 }
 
-// Report prints err as an error line (unless it is nil or flag.ErrHelp) and
-// returns the exit code for it; mains end with os.Exit(cli.Report(err)).
-func Report(err error) int {
-	code := ExitCode(err)
-	if code != ExitOK {
-		Errorf("%v", err)
-	}
-	return code
+// FErrorf is Errorf writing to w instead of stderr, for code that is handed
+// its own stderr writer.
+func FErrorf(w io.Writer, format string, args ...any) {
+	diagnostic(w, "error", format, args...)
 }
 
 // InteractiveAllowed reports whether pickers and prompts may be shown: stdin
@@ -165,12 +106,34 @@ func interactiveFrom(stdinIsTerminal bool, noInput string) bool {
 	return stdinIsTerminal && noInput != "1"
 }
 
-// Version returns the version to report for a binary whose
-// -ldflags "-X main.version=<v>" value is stamped (pass "dev" or "" when it
-// was not stamped). See resolveVersion for the fallbacks.
-func Version(stamped string) string {
-	info, ok := debug.ReadBuildInfo()
-	return resolveVersion(stamped, info, ok)
+// IsUsage reports whether err is (or wraps) a *UsageError.
+func IsUsage(err error) bool {
+	var ue *UsageError
+	return errors.As(err, &ue)
+}
+
+// PrintJSON writes v to stdout as indented JSON followed by a newline.
+func PrintJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+// Program returns the name set by SetProgram ("fleet" if never set).
+func Program() string {
+	mu.Lock()
+	defer mu.Unlock()
+	return program
+}
+
+// Report prints err as an error line (unless it is nil or flag.ErrHelp) and
+// returns the exit code for it; mains end with os.Exit(cli.Report(err)).
+func Report(err error) int {
+	code := ExitCode(err)
+	if code != ExitOK {
+		Errorf("%v", err)
+	}
+	return code
 }
 
 // resolveVersion is Version's pure core: the stamped value unless it is
@@ -209,9 +172,46 @@ func resolveVersion(stamped string, info *debug.BuildInfo, ok bool) string {
 	return revision
 }
 
-// PrintJSON writes v to stdout as indented JSON followed by a newline.
-func PrintJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
+// SetProgram sets the program name that prefixes every diagnostic line
+// ("fleet-task", "fleet-run", "fleet-cache"). Each main calls it first.
+func SetProgram(name string) {
+	mu.Lock()
+	defer mu.Unlock()
+	program = name
+}
+
+// SetStderr redirects diagnostics to w and returns a function restoring the
+// previous writer. Meant for tests.
+func SetStderr(w io.Writer) (restore func()) {
+	mu.Lock()
+	defer mu.Unlock()
+	old := stderr
+	stderr = w
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		stderr = old
+	}
+}
+
+// Error returns the message.
+func (e *UsageError) Error() string { return e.Msg }
+
+// Usagef builds a *UsageError from a format string.
+func Usagef(format string, args ...any) error {
+	return &UsageError{Msg: fmt.Sprintf(format, args...)}
+}
+
+// Version returns the version to report for a binary whose
+// -ldflags "-X main.version=<v>" value is stamped (pass "dev" or "" when it
+// was not stamped). See resolveVersion for the fallbacks.
+func Version(stamped string) string {
+	info, ok := debug.ReadBuildInfo()
+	return resolveVersion(stamped, info, ok)
+}
+
+// Warnf prints a "<program>: warning: <msg>" line to stderr, for non-fatal
+// problems.
+func Warnf(format string, args ...any) {
+	diagnostic(nil, "warning", format, args...)
 }

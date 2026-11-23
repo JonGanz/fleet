@@ -19,6 +19,32 @@ import (
 // between. A variable so tests can shorten it.
 var staleLockAge = time.Minute
 
+// lockHeldError explains who holds a live lock and how to clear it if that
+// owner is actually gone (e.g. pid reuse): `fleet-task unlock`, never a raw
+// rm, so the owner check happens again first.
+func lockHeldError(lockPath, contents string) error {
+	owner := "an unknown process"
+	if pid, ok := parseLockPid(contents); ok {
+		owner = fmt.Sprintf("pid %d", pid)
+	}
+	ticket := ticketOfLock(lockPath)
+	return fmt.Errorf("task is locked by another fleet-task (%s, lock file %s); wait for it to finish, or if no other fleet-task is running, run `fleet-task unlock %s`", owner, lockPath, ticket)
+}
+
+// lockIsStale decides whether a lock file can be taken over. A live owner
+// pid never makes it stale, however old (commands hold the lock for their
+// whole run, which can be many minutes); a dead owner always does. A lock
+// with no parseable pid (the owner died between creating the file and
+// writing its pid) is stale once older than maxAge. alive is injected so
+// this stays a pure, testable function.
+func lockIsStale(contents string, mtime, now time.Time, maxAge time.Duration, alive func(pid int) bool) bool {
+	pid, ok := parseLockPid(contents)
+	if !ok {
+		return now.Sub(mtime) > maxAge
+	}
+	return !alive(pid)
+}
+
 // lockTicket takes the advisory lock for one ticket's state file (path is
 // <tasks dir>/<ticket>.json) and holds it until the returned unlock is
 // called. Mutating commands (new, edit, rm, mv) take it *before* reading the
@@ -70,32 +96,6 @@ func lockTicket(path string) (unlock func(), err error) {
 		}
 	}
 	return nil, fmt.Errorf("could not take lock %s: another fleet-task took it first; retry", lockPath)
-}
-
-// lockHeldError explains who holds a live lock and how to clear it if that
-// owner is actually gone (e.g. pid reuse): `fleet-task unlock`, never a raw
-// rm, so the owner check happens again first.
-func lockHeldError(lockPath, contents string) error {
-	owner := "an unknown process"
-	if pid, ok := parseLockPid(contents); ok {
-		owner = fmt.Sprintf("pid %d", pid)
-	}
-	ticket := ticketOfLock(lockPath)
-	return fmt.Errorf("task is locked by another fleet-task (%s, lock file %s); wait for it to finish, or if no other fleet-task is running, run `fleet-task unlock %s`", owner, lockPath, ticket)
-}
-
-// lockIsStale decides whether a lock file can be taken over. A live owner
-// pid never makes it stale, however old (commands hold the lock for their
-// whole run, which can be many minutes); a dead owner always does. A lock
-// with no parseable pid (the owner died between creating the file and
-// writing its pid) is stale once older than maxAge. alive is injected so
-// this stays a pure, testable function.
-func lockIsStale(contents string, mtime, now time.Time, maxAge time.Duration, alive func(pid int) bool) bool {
-	pid, ok := parseLockPid(contents)
-	if !ok {
-		return now.Sub(mtime) > maxAge
-	}
-	return !alive(pid)
 }
 
 // parseLockPid extracts the owner pid from a lock file's contents.

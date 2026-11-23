@@ -19,91 +19,6 @@ func refExistsT(t *testing.T, base, ref string) bool {
 	return ok
 }
 
-func TestEnsureBaseFreshThenIdempotent(t *testing.T) {
-	requireGit(t)
-	origin := makeOrigin(t)
-	base := filepath.Join(t.TempDir(), "bases", "r")
-
-	for i := 0; i < 2; i++ {
-		if err := ensureBase(linuxGit{}, "r", origin, base); err != nil {
-			t.Fatalf("ensureBase run %d: %v", i, err)
-		}
-	}
-	if got := gitT(t, base, "rev-parse", "--is-bare-repository"); got != "true" {
-		t.Errorf("base not bare: %s", got)
-	}
-	if got := gitT(t, base, "config", "remote.origin.url"); got != origin {
-		t.Errorf("origin url = %s", got)
-	}
-	if !refExistsT(t, base, "refs/remotes/origin/main") {
-		t.Error("origin/main not fetched")
-	}
-	if heads := gitT(t, base, "for-each-ref", "refs/heads"); heads != "" {
-		t.Errorf("base should have no local branches, has %q", heads)
-	}
-}
-
-func TestEnsureBaseCompletesInterruptedSetup(t *testing.T) {
-	requireGit(t)
-	origin := makeOrigin(t)
-
-	// Killed between `init --bare` and `remote add`.
-	base := filepath.Join(t.TempDir(), "r")
-	gitT(t, filepath.Dir(base), "init", "-q", "--bare", base)
-	if err := ensureBase(linuxGit{}, "r", origin, base); err != nil {
-		t.Fatalf("ensureBase on init-only base: %v", err)
-	}
-	if !refExistsT(t, base, "refs/remotes/origin/main") {
-		t.Error("origin/main not fetched after completing setup")
-	}
-
-	// Killed right after mkdir: an empty directory.
-	empty := filepath.Join(t.TempDir(), "r2")
-	if err := os.Mkdir(empty, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := ensureBase(linuxGit{}, "r", origin, empty); err != nil {
-		t.Fatalf("ensureBase on empty dir: %v", err)
-	}
-	if !refExistsT(t, empty, "refs/remotes/origin/main") {
-		t.Error("origin/main not fetched into formerly empty dir")
-	}
-}
-
-func TestEnsureBaseRefusesForeignDirectory(t *testing.T) {
-	requireGit(t)
-	origin := makeOrigin(t)
-	base := filepath.Join(t.TempDir(), "r")
-	writeFileT(t, filepath.Join(base, "notes.txt"), "mine")
-	err := ensureBase(linuxGit{}, "r", origin, base)
-	if err == nil || !strings.Contains(err.Error(), "not a git repository") {
-		t.Fatalf("want refusal, got %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(base, "notes.txt")); err != nil {
-		t.Errorf("user file touched: %v", err)
-	}
-}
-
-func TestEnsureBaseFetchPrunes(t *testing.T) {
-	requireGit(t)
-	origin := makeOrigin(t)
-	gitT(t, origin, "branch", "gone")
-	base := filepath.Join(t.TempDir(), "r")
-	if err := ensureBase(linuxGit{}, "r", origin, base); err != nil {
-		t.Fatal(err)
-	}
-	if !refExistsT(t, base, "refs/remotes/origin/gone") {
-		t.Fatal("setup: origin/gone not fetched")
-	}
-	gitT(t, origin, "branch", "-D", "gone")
-	if err := ensureBase(linuxGit{}, "r", origin, base); err != nil {
-		t.Fatal(err)
-	}
-	if refExistsT(t, base, "refs/remotes/origin/gone") {
-		t.Error("deleted remote branch not pruned")
-	}
-}
-
 func TestAddWorktreeModes(t *testing.T) {
 	requireGit(t)
 	origin := makeOrigin(t)
@@ -159,6 +74,91 @@ func TestAddWorktreeModes(t *testing.T) {
 	err := addWorktree(g, base, filepath.Join(wt, "T-3", "r"), "T-3", "mian")
 	if err == nil || !strings.Contains(err.Error(), "origin/mian") {
 		t.Errorf("typo'd default: %v", err)
+	}
+}
+
+func TestEnsureBaseCompletesInterruptedSetup(t *testing.T) {
+	requireGit(t)
+	origin := makeOrigin(t)
+
+	// Killed between `init --bare` and `remote add`.
+	base := filepath.Join(t.TempDir(), "r")
+	gitT(t, filepath.Dir(base), "init", "-q", "--bare", base)
+	if err := ensureBase(linuxGit{}, "r", origin, base); err != nil {
+		t.Fatalf("ensureBase on init-only base: %v", err)
+	}
+	if !refExistsT(t, base, "refs/remotes/origin/main") {
+		t.Error("origin/main not fetched after completing setup")
+	}
+
+	// Killed right after mkdir: an empty directory.
+	empty := filepath.Join(t.TempDir(), "r2")
+	if err := os.Mkdir(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBase(linuxGit{}, "r", origin, empty); err != nil {
+		t.Fatalf("ensureBase on empty dir: %v", err)
+	}
+	if !refExistsT(t, empty, "refs/remotes/origin/main") {
+		t.Error("origin/main not fetched into formerly empty dir")
+	}
+}
+
+func TestEnsureBaseFetchPrunes(t *testing.T) {
+	requireGit(t)
+	origin := makeOrigin(t)
+	gitT(t, origin, "branch", "gone")
+	base := filepath.Join(t.TempDir(), "r")
+	if err := ensureBase(linuxGit{}, "r", origin, base); err != nil {
+		t.Fatal(err)
+	}
+	if !refExistsT(t, base, "refs/remotes/origin/gone") {
+		t.Fatal("setup: origin/gone not fetched")
+	}
+	gitT(t, origin, "branch", "-D", "gone")
+	if err := ensureBase(linuxGit{}, "r", origin, base); err != nil {
+		t.Fatal(err)
+	}
+	if refExistsT(t, base, "refs/remotes/origin/gone") {
+		t.Error("deleted remote branch not pruned")
+	}
+}
+
+func TestEnsureBaseFreshThenIdempotent(t *testing.T) {
+	requireGit(t)
+	origin := makeOrigin(t)
+	base := filepath.Join(t.TempDir(), "bases", "r")
+
+	for i := 0; i < 2; i++ {
+		if err := ensureBase(linuxGit{}, "r", origin, base); err != nil {
+			t.Fatalf("ensureBase run %d: %v", i, err)
+		}
+	}
+	if got := gitT(t, base, "rev-parse", "--is-bare-repository"); got != "true" {
+		t.Errorf("base not bare: %s", got)
+	}
+	if got := gitT(t, base, "config", "remote.origin.url"); got != origin {
+		t.Errorf("origin url = %s", got)
+	}
+	if !refExistsT(t, base, "refs/remotes/origin/main") {
+		t.Error("origin/main not fetched")
+	}
+	if heads := gitT(t, base, "for-each-ref", "refs/heads"); heads != "" {
+		t.Errorf("base should have no local branches, has %q", heads)
+	}
+}
+
+func TestEnsureBaseRefusesForeignDirectory(t *testing.T) {
+	requireGit(t)
+	origin := makeOrigin(t)
+	base := filepath.Join(t.TempDir(), "r")
+	writeFileT(t, filepath.Join(base, "notes.txt"), "mine")
+	err := ensureBase(linuxGit{}, "r", origin, base)
+	if err == nil || !strings.Contains(err.Error(), "not a git repository") {
+		t.Fatalf("want refusal, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "notes.txt")); err != nil {
+		t.Errorf("user file touched: %v", err)
 	}
 }
 

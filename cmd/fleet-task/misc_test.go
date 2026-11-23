@@ -12,6 +12,22 @@ import (
 	"github.com/JonGanz/fleet/internal/taskstate"
 )
 
+// captureStdout runs f with os.Stdout redirected and returns what it wrote.
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	f()
+	w.Close()
+	data, _ := io.ReadAll(r)
+	return string(data)
+}
+
 func TestGitEnvDisablesPromptsHeadless(t *testing.T) {
 	t.Setenv("FLEET_NO_INPUT", "1")
 	if !slices.Contains(gitEnv(), "GIT_TERMINAL_PROMPT=0") {
@@ -20,6 +36,24 @@ func TestGitEnvDisablesPromptsHeadless(t *testing.T) {
 	env := gitEnv("GIT_INDEX_FILE=/x")
 	if env[len(env)-1] != "GIT_INDEX_FILE=/x" {
 		t.Error("extra entries must come last so they win")
+	}
+}
+
+func TestMvUsageErrors(t *testing.T) {
+	t.Setenv("FLEET_STATE_DIR", t.TempDir())
+	t.Setenv("FLEET_REPOS_FILE", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("FLEET_TMUX_SOCKET", "fleet-task-test-none")
+	for _, ticket := range []string{"A-1", "B-1"} {
+		tf, _ := taskFile(ticket)
+		if err := taskstate.Write(tf, &taskstate.State{Ticket: ticket, Repos: []taskstate.Repo{{Repo: "r", WorktreePath: "/nonexistent/" + ticket + "/r"}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cmdMv("A-1", "A-1", false); err == nil || !cli.IsUsage(err) {
+		t.Errorf("same name: %v", err)
+	}
+	if err := cmdMv("A-1", "B-1", false); err == nil || !cli.IsUsage(err) || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("existing target: %v", err)
 	}
 }
 
@@ -49,15 +83,6 @@ func TestReplaceSymlink(t *testing.T) {
 	}
 }
 
-func TestWindowsDirIsEmptyScript(t *testing.T) {
-	s := windowsDirIsEmptyScript(`C:\it's`)
-	for _, want := range []string{"$ErrorActionPreference='Stop'", "-Force", "-LiteralPath 'C:\\it''s'", "exit 3", "catch", "exit 1"} {
-		if !strings.Contains(s, want) {
-			t.Errorf("script missing %q:\n%s", want, s)
-		}
-	}
-}
-
 func TestRunHelpAndVersion(t *testing.T) {
 	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}, {"version"}, {"--version"}} {
 		stdout := captureStdout(t, func() {
@@ -69,22 +94,6 @@ func TestRunHelpAndVersion(t *testing.T) {
 			t.Errorf("run(%v) printed %q on stdout", args, stdout)
 		}
 	}
-}
-
-// captureStdout runs f with os.Stdout redirected and returns what it wrote.
-func captureStdout(t *testing.T, f func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := os.Stdout
-	os.Stdout = w
-	defer func() { os.Stdout = old }()
-	f()
-	w.Close()
-	data, _ := io.ReadAll(r)
-	return string(data)
 }
 
 func TestUnknownTicketIsUsageError(t *testing.T) {
@@ -102,20 +111,11 @@ func TestUnknownTicketIsUsageError(t *testing.T) {
 	}
 }
 
-func TestMvUsageErrors(t *testing.T) {
-	t.Setenv("FLEET_STATE_DIR", t.TempDir())
-	t.Setenv("FLEET_REPOS_FILE", filepath.Join(t.TempDir(), "missing.yaml"))
-	t.Setenv("FLEET_TMUX_SOCKET", "fleet-task-test-none")
-	for _, ticket := range []string{"A-1", "B-1"} {
-		tf, _ := taskFile(ticket)
-		if err := taskstate.Write(tf, &taskstate.State{Ticket: ticket, Repos: []taskstate.Repo{{Repo: "r", WorktreePath: "/nonexistent/" + ticket + "/r"}}}); err != nil {
-			t.Fatal(err)
+func TestWindowsDirIsEmptyScript(t *testing.T) {
+	s := windowsDirIsEmptyScript(`C:\it's`)
+	for _, want := range []string{"$ErrorActionPreference='Stop'", "-Force", "-LiteralPath 'C:\\it''s'", "exit 3", "catch", "exit 1"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("script missing %q:\n%s", want, s)
 		}
-	}
-	if err := cmdMv("A-1", "A-1", false); err == nil || !cli.IsUsage(err) {
-		t.Errorf("same name: %v", err)
-	}
-	if err := cmdMv("A-1", "B-1", false); err == nil || !cli.IsUsage(err) || !strings.Contains(err.Error(), "already exists") {
-		t.Errorf("existing target: %v", err)
 	}
 }

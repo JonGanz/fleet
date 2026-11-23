@@ -14,11 +14,6 @@ import (
 // see cli.Version for the fallback.
 var version = "dev"
 
-func main() {
-	cli.SetProgram("fleet-run")
-	os.Exit(cli.Report(run(os.Args[1:])))
-}
-
 const (
 	attachUsage = `Usage: fleet-run attach [repo:run-name]
 
@@ -80,6 +75,47 @@ Flags:`
 
 const ticketFlagHelp = "ticket id (a picker opens if omitted and more than one task exists; without a terminal that is an error instead)"
 
+// ignoreHelp turns flag.ErrHelp (usage already printed) into a clean exit.
+func ignoreHelp(err error) error {
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
+	return err
+}
+
+func main() {
+	cli.SetProgram("fleet-run")
+	os.Exit(cli.Report(run(os.Args[1:])))
+}
+
+// printUsage writes the top-level usage to w: stdout when help was asked
+// for, stderr when shown because of a usage error.
+func printUsage(w io.Writer) {
+	fmt.Fprintln(w, `fleet-run - manage tmux windows for running fleet task apps
+
+Only one ticket's windows are ever live at once. "start" for a different
+ticket than whatever's currently active stops everything first; starting the
+same ticket that's already active just adds any missing windows.
+
+Usage:
+  fleet-run start [--ticket <id>] [--all] [repo:run-name ...] [--json]
+  fleet-run restart [--ticket <id>] [--all] [repo:run-name ...] [--json]
+  fleet-run stop [--ticket <id>] [--all] [repo:run-name ...] [--json]
+  fleet-run status [--json]
+  fleet-run targets [--ticket <id>] [--json]
+  fleet-run logs <repo:run-name> [-n|--lines <N>] [--json]
+  fleet-run attach [repo:run-name]
+  fleet-run version
+
+Without a terminal on stdin (or with FLEET_NO_INPUT=1) no picker is ever
+opened: a command that would need one exits 2 naming the missing flag.
+Exit codes: 0 ok, 1 operation failed, 2 usage error or input required.
+
+Set FLEET_TMUX_SOCKET to use a private tmux server (tmux -L <name>).
+
+Run 'fleet-run <command> --help' for a command's flags. See README.md for details.`)
+}
+
 func run(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr)
@@ -115,42 +151,6 @@ func run(args []string) error {
 		printUsage(os.Stderr)
 		return cli.Usagef("unknown command %q", cmd)
 	}
-}
-
-// ignoreHelp turns flag.ErrHelp (usage already printed) into a clean exit.
-func ignoreHelp(err error) error {
-	if errors.Is(err, flag.ErrHelp) {
-		return nil
-	}
-	return err
-}
-
-// printUsage writes the top-level usage to w: stdout when help was asked
-// for, stderr when shown because of a usage error.
-func printUsage(w io.Writer) {
-	fmt.Fprintln(w, `fleet-run - manage tmux windows for running fleet task apps
-
-Only one ticket's windows are ever live at once. "start" for a different
-ticket than whatever's currently active stops everything first; starting the
-same ticket that's already active just adds any missing windows.
-
-Usage:
-  fleet-run start [--ticket <id>] [--all] [repo:run-name ...] [--json]
-  fleet-run restart [--ticket <id>] [--all] [repo:run-name ...] [--json]
-  fleet-run stop [--ticket <id>] [--all] [repo:run-name ...] [--json]
-  fleet-run status [--json]
-  fleet-run targets [--ticket <id>] [--json]
-  fleet-run logs <repo:run-name> [-n|--lines <N>] [--json]
-  fleet-run attach [repo:run-name]
-  fleet-run version
-
-Without a terminal on stdin (or with FLEET_NO_INPUT=1) no picker is ever
-opened: a command that would need one exits 2 naming the missing flag.
-Exit codes: 0 ok, 1 operation failed, 2 usage error or input required.
-
-Set FLEET_TMUX_SOCKET to use a private tmux server (tmux -L <name>).
-
-Run 'fleet-run <command> --help' for a command's flags. See README.md for details.`)
 }
 
 func runAttachCmd(rest []string) error {

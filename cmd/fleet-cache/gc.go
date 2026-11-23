@@ -13,145 +13,6 @@ import (
 	"github.com/JonGanz/fleet/internal/xdg"
 )
 
-// referencedKeys walks each root directory recursively looking for
-// package-lock.json files, computes the cache key of each directory holding
-// one (cacheKey: the lockfile plus that directory's .npmrc, exactly as
-// ensure keys it), and returns the set of keys still "referenced" by
-// something on disk.
-//
-// Every root must exist and be a readable directory, and any unreadable
-// path under it is an error: silently skipping them would leave lockfiles
-// unseen, and gc --force would then delete cache entries that are still in
-// use (e.g. a typo'd root deleting the whole cache). Symlinked directories
-// (including a symlinked root, and the WSL-side symlinks fleet-task creates
-// for windows-runtime worktrees) are followed once each.
-func referencedKeys(roots []string) (map[string]bool, error) {
-	referenced := make(map[string]bool)
-	visited := make(map[string]bool)
-	for _, root := range roots {
-		real, err := filepath.EvalSymlinks(root)
-		if err != nil {
-			return nil, fmt.Errorf("--roots %s: %w", root, err)
-		}
-		fi, err := os.Stat(real)
-		if err != nil {
-			return nil, fmt.Errorf("--roots %s: %w", root, err)
-		}
-		if !fi.IsDir() {
-			return nil, fmt.Errorf("--roots %s: not a directory", root)
-		}
-		if err := walkLockfiles(real, visited, referenced); err != nil {
-			return nil, err
-		}
-	}
-	return referenced, nil
-}
-
-func walkLockfiles(dir string, visited, referenced map[string]bool) error {
-	if visited[dir] {
-		return nil
-	}
-	visited[dir] = true
-	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil // vanished mid-scan
-			}
-			return fmt.Errorf("scanning %s: %w", path, err)
-		}
-		if d.IsDir() && d.Name() == "node_modules" {
-			return filepath.SkipDir
-		}
-		// keyDir is the directory whose cacheKey a lockfile here references:
-		// normally the lockfile's own directory, which is what ensure is run
-		// on (its .npmrc sits beside it).
-		name, isDir, keyDir := d.Name(), d.IsDir(), filepath.Dir(path)
-		if d.Type()&fs.ModeSymlink != 0 {
-			if name == "node_modules" {
-				return nil
-			}
-			real, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				return nil // dangling symlink
-			}
-			target, err := os.Stat(real)
-			if err != nil {
-				return nil
-			}
-			if target.IsDir() {
-				return walkLockfiles(real, visited, referenced)
-			}
-			// A file symlink counts under its target's name, as before. One
-			// named package-lock.json is keyed where it sits, like any
-			// lockfile; one named otherwise has no package-lock.json beside
-			// it, so it is keyed in its target's directory.
-			name, isDir = target.Name(), false
-			if d.Name() != lockfileName {
-				keyDir = filepath.Dir(real)
-			}
-		}
-		if !isDir && name == lockfileName {
-			_, key, err := cacheKey(keyDir)
-			if err != nil {
-				return fmt.Errorf("computing cache key: %w", err)
-			}
-			referenced[key] = true
-		}
-		return nil
-	})
-}
-
-// unreferencedEntries lists the cache entry keys present under
-// <node-cache dir> that are not in the referenced set. Staging dirs
-// (<key>.tmp-<pid>) are not entries and are handled by staleStagingDirs.
-func unreferencedEntries(nodeCache string, referenced map[string]bool) ([]string, error) {
-	items, err := os.ReadDir(nodeCache)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	var stale []string
-	for _, item := range items {
-		if !item.IsDir() || isStagingName(item.Name()) {
-			continue
-		}
-		if !referenced[item.Name()] {
-			stale = append(stale, item.Name())
-		}
-	}
-	return stale, nil
-}
-
-// staleStagingDirs lists staging dirs under nodeCache last modified more
-// than maxAge before now -- leftovers of a killed `ensure`. Younger ones may
-// belong to a live `ensure` and are never flagged.
-func staleStagingDirs(nodeCache string, now time.Time, maxAge time.Duration) ([]string, error) {
-	items, err := os.ReadDir(nodeCache)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var stale []string
-	for _, item := range items {
-		if !item.IsDir() || !isStagingName(item.Name()) {
-			continue
-		}
-		info, err := item.Info()
-		if err != nil {
-			continue
-		}
-		if now.Sub(info.ModTime()) > maxAge {
-			stale = append(stale, item.Name())
-		}
-	}
-	return stale, nil
-}
-
 // gcItem is one stale thing gc found.
 type gcItem struct {
 	Name    string `json:"name"`
@@ -257,6 +118,50 @@ func printGCReport(w io.Writer, r *gcReport, asJSON bool, label string, hadRoots
 	return nil
 }
 
+// referencedKeys walks each root directory recursively looking for
+// package-lock.json files, computes the cache key of each directory holding
+// one (cacheKey: the lockfile plus that directory's .npmrc, exactly as
+// ensure keys it), and returns the set of keys still "referenced" by
+// something on disk.
+//
+// Every root must exist and be a readable directory, and any unreadable
+// path under it is an error: silently skipping them would leave lockfiles
+// unseen, and gc --force would then delete cache entries that are still in
+// use (e.g. a typo'd root deleting the whole cache). Symlinked directories
+// (including a symlinked root, and the WSL-side symlinks fleet-task creates
+// for windows-runtime worktrees) are followed once each.
+func referencedKeys(roots []string) (map[string]bool, error) {
+	referenced := make(map[string]bool)
+	visited := make(map[string]bool)
+	for _, root := range roots {
+		real, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return nil, fmt.Errorf("--roots %s: %w", root, err)
+		}
+		fi, err := os.Stat(real)
+		if err != nil {
+			return nil, fmt.Errorf("--roots %s: %w", root, err)
+		}
+		if !fi.IsDir() {
+			return nil, fmt.Errorf("--roots %s: not a directory", root)
+		}
+		if err := walkLockfiles(real, visited, referenced); err != nil {
+			return nil, err
+		}
+	}
+	return referenced, nil
+}
+
+func runGC(roots []string, force, asJSON bool, cacheRootFlag string) error {
+	root, err := xdg.CacheDir(cacheRootFlag)
+	if err != nil {
+		return err
+	}
+	return runGCCommon(nodeCacheDir(root), "", roots, force, asJSON,
+		os.RemoveAll,
+		func(p string) (string, error) { return p, nil })
+}
+
 // runGCCommon runs gcStale and prints the report (even a partial one on a
 // removal error).
 func runGCCommon(nodeCache, label string, roots []string, force, asJSON bool,
@@ -271,12 +176,107 @@ func runGCCommon(nodeCache, label string, roots []string, force, asJSON bool,
 	return err
 }
 
-func runGC(roots []string, force, asJSON bool, cacheRootFlag string) error {
-	root, err := xdg.CacheDir(cacheRootFlag)
+// staleStagingDirs lists staging dirs under nodeCache last modified more
+// than maxAge before now -- leftovers of a killed `ensure`. Younger ones may
+// belong to a live `ensure` and are never flagged.
+func staleStagingDirs(nodeCache string, now time.Time, maxAge time.Duration) ([]string, error) {
+	items, err := os.ReadDir(nodeCache)
 	if err != nil {
-		return err
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	return runGCCommon(nodeCacheDir(root), "", roots, force, asJSON,
-		os.RemoveAll,
-		func(p string) (string, error) { return p, nil })
+	var stale []string
+	for _, item := range items {
+		if !item.IsDir() || !isStagingName(item.Name()) {
+			continue
+		}
+		info, err := item.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) > maxAge {
+			stale = append(stale, item.Name())
+		}
+	}
+	return stale, nil
+}
+
+// unreferencedEntries lists the cache entry keys present under
+// <node-cache dir> that are not in the referenced set. Staging dirs
+// (<key>.tmp-<pid>) are not entries and are handled by staleStagingDirs.
+func unreferencedEntries(nodeCache string, referenced map[string]bool) ([]string, error) {
+	items, err := os.ReadDir(nodeCache)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var stale []string
+	for _, item := range items {
+		if !item.IsDir() || isStagingName(item.Name()) {
+			continue
+		}
+		if !referenced[item.Name()] {
+			stale = append(stale, item.Name())
+		}
+	}
+	return stale, nil
+}
+
+func walkLockfiles(dir string, visited, referenced map[string]bool) error {
+	if visited[dir] {
+		return nil
+	}
+	visited[dir] = true
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // vanished mid-scan
+			}
+			return fmt.Errorf("scanning %s: %w", path, err)
+		}
+		if d.IsDir() && d.Name() == "node_modules" {
+			return filepath.SkipDir
+		}
+		// keyDir is the directory whose cacheKey a lockfile here references:
+		// normally the lockfile's own directory, which is what ensure is run
+		// on (its .npmrc sits beside it).
+		name, isDir, keyDir := d.Name(), d.IsDir(), filepath.Dir(path)
+		if d.Type()&fs.ModeSymlink != 0 {
+			if name == "node_modules" {
+				return nil
+			}
+			real, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return nil // dangling symlink
+			}
+			target, err := os.Stat(real)
+			if err != nil {
+				return nil
+			}
+			if target.IsDir() {
+				return walkLockfiles(real, visited, referenced)
+			}
+			// A file symlink counts under its target's name, as before. One
+			// named package-lock.json is keyed where it sits, like any
+			// lockfile; one named otherwise has no package-lock.json beside
+			// it, so it is keyed in its target's directory.
+			name, isDir = target.Name(), false
+			if d.Name() != lockfileName {
+				keyDir = filepath.Dir(real)
+			}
+		}
+		if !isDir && name == lockfileName {
+			_, key, err := cacheKey(keyDir)
+			if err != nil {
+				return fmt.Errorf("computing cache key: %w", err)
+			}
+			referenced[key] = true
+		}
+		return nil
+	})
 }

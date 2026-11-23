@@ -13,30 +13,6 @@ import (
 	"github.com/JonGanz/fleet/internal/xdg"
 )
 
-// requireTaskExists returns noTaskError if tf (ticket's state file) is
-// missing.
-func requireTaskExists(ticket, tf string) error {
-	if _, err := os.Stat(tf); os.IsNotExist(err) {
-		return noTaskError(ticket)
-	}
-	return nil
-}
-
-// requireNotActive refuses to proceed if ticket is the one fleet-run
-// currently has live. Tearing down or renaming a worktree out from under a
-// still-running app is what produces the "Directory not empty" mess
-// selfHealWorktreeRemove papers over (a live dev server can be writing into
-// its own untracked cache dir at the exact moment git deletes it), and
-// renaming a live ticket would desync fleet-run's tmux @fleet_task_ticket
-// option from the new filename. action completes the sentence "...before
-// <action>", e.g. "removing it".
-func requireNotActive(ticket, action string) error {
-	if active, found := activeFleetTicket(); found && active == ticket {
-		return fmt.Errorf("%s is currently active in fleet-run; run `fleet-run stop --ticket %s` (or `fleet-run stop --all`) before %s", ticket, ticket, action)
-	}
-	return nil
-}
-
 // loadConfig locates and parses repos.yaml, returning its path alongside the
 // parsed config for use in error messages.
 func loadConfig() (*config.ReposConfig, string, error) {
@@ -135,6 +111,30 @@ func removeDirIfEmpty(dir string) (removed bool, leftovers []string, err error) 
 		return false, nil, err
 	}
 	return true, nil, nil
+}
+
+// requireNotActive refuses to proceed if ticket is the one fleet-run
+// currently has live. Tearing down or renaming a worktree out from under a
+// still-running app is what produces the "Directory not empty" mess
+// selfHealWorktreeRemove papers over (a live dev server can be writing into
+// its own untracked cache dir at the exact moment git deletes it), and
+// renaming a live ticket would desync fleet-run's tmux @fleet_task_ticket
+// option from the new filename. action completes the sentence "...before
+// <action>", e.g. "removing it".
+func requireNotActive(ticket, action string) error {
+	if active, found := activeFleetTicket(); found && active == ticket {
+		return fmt.Errorf("%s is currently active in fleet-run; run `fleet-run stop --ticket %s` (or `fleet-run stop --all`) before %s", ticket, ticket, action)
+	}
+	return nil
+}
+
+// requireTaskExists returns noTaskError if tf (ticket's state file) is
+// missing.
+func requireTaskExists(ticket, tf string) error {
+	if _, err := os.Stat(tf); os.IsNotExist(err) {
+		return noTaskError(ticket)
+	}
+	return nil
 }
 
 // uniqueStrings returns items without duplicates, keeping first-seen order.

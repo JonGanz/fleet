@@ -37,14 +37,6 @@ type TimeoutError struct {
 	Err error
 }
 
-// Error says the child was killed and after how long.
-func (e *TimeoutError) Error() string {
-	return fmt.Sprintf("killed after the %s timeout", e.Timeout)
-}
-
-// Unwrap returns Wait's error.
-func (e *TimeoutError) Unwrap() error { return e.Err }
-
 // IsTimeout reports whether err is (or wraps) a *TimeoutError.
 func IsTimeout(err error) bool {
 	var te *TimeoutError
@@ -99,3 +91,11 @@ func Run(cmd *exec.Cmd, opts Options) error {
 	}
 	return err
 }
+
+// Error says the child was killed and after how long.
+func (e *TimeoutError) Error() string {
+	return fmt.Sprintf("killed after the %s timeout", e.Timeout)
+}
+
+// Unwrap returns Wait's error.
+func (e *TimeoutError) Unwrap() error { return e.Err }

@@ -24,14 +24,6 @@ func activeTicket() (ticket string, found bool, err error) {
 	return getSessionOption(activeTicketOption)
 }
 
-// setActiveTicket records ts as the active ticket.
-func setActiveTicket(ts *taskstate.State) error {
-	if err := setSessionOption(activeTicketOption, ts.Ticket); err != nil {
-		return err
-	}
-	return setSessionOption(activeDescriptionOption, ts.Description)
-}
-
 // clearActiveTicket removes the active-ticket record, for when every window
 // in the session has been stopped and nothing is running anymore. The
 // options are global (-g) and live only as long as the tmux server; if
@@ -46,4 +38,12 @@ func clearActiveTicket() error {
 		return err
 	}
 	return unsetSessionOption(activeDescriptionOption)
+}
+
+// setActiveTicket records ts as the active ticket.
+func setActiveTicket(ts *taskstate.State) error {
+	if err := setSessionOption(activeTicketOption, ts.Ticket); err != nil {
+		return err
+	}
+	return setSessionOption(activeDescriptionOption, ts.Description)
 }

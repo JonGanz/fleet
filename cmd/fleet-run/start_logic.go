@@ -32,17 +32,6 @@ type StartReport struct {
 	Results      []StartResult `json:"results"`
 }
 
-// failedCount returns how many results failed.
-func (r StartReport) failedCount() int {
-	n := 0
-	for _, res := range r.Results {
-		if res.Status == startStatusFailed {
-			n++
-		}
-	}
-	return n
-}
-
 // existingWindowStatus decides what start does with a target whose window
 // already exists: respawn a dead pane; leave a live one alone, unless
 // restart (`fleet-run restart`) asks for it to be respawned too.
@@ -55,15 +44,6 @@ func existingWindowStatus(pane PaneInfo, restart bool) string {
 	default:
 		return startStatusAlreadyRunning
 	}
-}
-
-// launched reports whether the target's app was (re)started by this run.
-func (r StartResult) launched() bool {
-	switch r.Status {
-	case startStatusRespawned, startStatusRestarted, startStatusStarted:
-		return true
-	}
-	return false
 }
 
 // resolveStartTargets picks the pairs to start without a picker: every pair
@@ -96,4 +76,24 @@ func resolveStartTargets(pairs []RunPair, all bool, labels []string) (selected [
 		selected = append(selected, pair)
 	}
 	return selected, false, nil
+}
+
+// failedCount returns how many results failed.
+func (r StartReport) failedCount() int {
+	n := 0
+	for _, res := range r.Results {
+		if res.Status == startStatusFailed {
+			n++
+		}
+	}
+	return n
+}
+
+// launched reports whether the target's app was (re)started by this run.
+func (r StartResult) launched() bool {
+	switch r.Status {
+	case startStatusRespawned, startStatusRestarted, startStatusStarted:
+		return true
+	}
+	return false
 }

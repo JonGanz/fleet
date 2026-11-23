@@ -29,6 +29,60 @@ func fleetEnv(t *testing.T, reposYAML string) string {
 	return cfgDir
 }
 
+func TestMvFinishesInterruptedRename(t *testing.T) {
+	requireGit(t)
+	origin := makeOrigin(t)
+	bases := t.TempDir()
+	fleetEnv(t, `
+defaults:
+  default_branch: main
+  base_root: `+bases+`
+repos:
+  - name: a
+    origin: `+origin+`
+`)
+	if err := cmdNew(newOpts{Ticket: "OLD-1", Repos: []string{"a"}, NoPatches: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdMv("OLD-1", "NEW-1", false); err != nil {
+		t.Fatalf("mv: %v", err)
+	}
+
+	// Recreate the crash window: new state written, old state not yet
+	// removed (it already carries the moved paths).
+	newFile, _ := taskFile("NEW-1")
+	oldFile, _ := taskFile("OLD-1")
+	st, err := taskstate.Read(newFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Ticket = "OLD-1"
+	if err := taskstate.Write(oldFile, st); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmdMv("OLD-1", "NEW-1", false); err != nil {
+		t.Fatalf("rerun should finish the rename, got %v", err)
+	}
+	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		t.Errorf("old state file should be gone: %v", err)
+	}
+
+	// A genuinely different task at the target stays an error.
+	st.Ticket = "OLD-1"
+	if err := taskstate.Write(oldFile, st); err != nil {
+		t.Fatal(err)
+	}
+	other, _ := taskstate.Read(newFile)
+	other.Ticket = "SOMETHING-ELSE"
+	if err := taskstate.Write(newFile, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdMv("OLD-1", "NEW-1", false); err == nil || !cli.IsUsage(err) {
+		t.Errorf("foreign target task: want usage error, got %v", err)
+	}
+}
+
 func TestNewWritesStatePerRepo(t *testing.T) {
 	requireGit(t)
 	origin := makeOrigin(t)
@@ -83,59 +137,5 @@ repos:
 	// The task exists now: a second new is a usage error.
 	if err := cmdNew(newOpts{Ticket: "T-1", Repos: []string{"a"}, NoPatches: true}); err == nil || !cli.IsUsage(err) {
 		t.Errorf("new on existing task: %v", err)
-	}
-}
-
-func TestMvFinishesInterruptedRename(t *testing.T) {
-	requireGit(t)
-	origin := makeOrigin(t)
-	bases := t.TempDir()
-	fleetEnv(t, `
-defaults:
-  default_branch: main
-  base_root: `+bases+`
-repos:
-  - name: a
-    origin: `+origin+`
-`)
-	if err := cmdNew(newOpts{Ticket: "OLD-1", Repos: []string{"a"}, NoPatches: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmdMv("OLD-1", "NEW-1", false); err != nil {
-		t.Fatalf("mv: %v", err)
-	}
-
-	// Recreate the crash window: new state written, old state not yet
-	// removed (it already carries the moved paths).
-	newFile, _ := taskFile("NEW-1")
-	oldFile, _ := taskFile("OLD-1")
-	st, err := taskstate.Read(newFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st.Ticket = "OLD-1"
-	if err := taskstate.Write(oldFile, st); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := cmdMv("OLD-1", "NEW-1", false); err != nil {
-		t.Fatalf("rerun should finish the rename, got %v", err)
-	}
-	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
-		t.Errorf("old state file should be gone: %v", err)
-	}
-
-	// A genuinely different task at the target stays an error.
-	st.Ticket = "OLD-1"
-	if err := taskstate.Write(oldFile, st); err != nil {
-		t.Fatal(err)
-	}
-	other, _ := taskstate.Read(newFile)
-	other.Ticket = "SOMETHING-ELSE"
-	if err := taskstate.Write(newFile, other); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmdMv("OLD-1", "NEW-1", false); err == nil || !cli.IsUsage(err) {
-		t.Errorf("foreign target task: want usage error, got %v", err)
 	}
 }

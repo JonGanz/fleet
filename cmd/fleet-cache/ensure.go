@@ -12,13 +12,6 @@ import (
 	"github.com/JonGanz/fleet/internal/xdg"
 )
 
-// markerPath returns the path of the marker file `ensure` writes into a
-// target node_modules recording which cache key last populated it. (The
-// file name predates keys covering more than the lockfile hash.)
-func markerPath(targetNodeModules string) string {
-	return filepath.Join(targetNodeModules, ".fleet-cache-hash")
-}
-
 // alreadyLinked reports whether targetNodeModules's marker matches key --
 // i.e. a previous `ensure` call already populated it from this exact cache
 // entry, so it's safe to skip re-linking and leave whatever the user has
@@ -28,11 +21,25 @@ func alreadyLinked(targetNodeModules, key string) bool {
 	return err == nil && strings.TrimSpace(string(data)) == key
 }
 
-// writeMarker records key as the cache entry that populated
-// targetNodeModules, so a future `ensure` call can detect nothing's changed
-// and skip the destructive rebuild.
-func writeMarker(targetNodeModules, key string) error {
-	return os.WriteFile(markerPath(targetNodeModules), []byte(key), 0o644)
+// checkSameDevice errors clearly if the cache root and the target dir are on
+// different filesystems, before any expensive `npm ci` runs: hardlinks can't
+// cross devices (EXDEV).
+func checkSameDevice(root, dir string) error {
+	same, err := sameDevice(nearestExisting(root), dir)
+	if err != nil {
+		return nil // can't tell; the per-file EXDEV check still applies
+	}
+	if !same {
+		return fmt.Errorf("cache root %s and %s are on different filesystems, so node_modules can't be hardlinked; point --cache-root (or $FLEET_CACHE_DIR) at the same filesystem as the worktree", root, dir)
+	}
+	return nil
+}
+
+// markerPath returns the path of the marker file `ensure` writes into a
+// target node_modules recording which cache key last populated it. (The
+// file name predates keys covering more than the lockfile hash.)
+func markerPath(targetNodeModules string) string {
+	return filepath.Join(targetNodeModules, ".fleet-cache-hash")
 }
 
 // nearestExisting returns path or its closest existing ancestor.
@@ -51,20 +58,6 @@ func nearestExisting(path string) string {
 		}
 		p = parent
 	}
-}
-
-// checkSameDevice errors clearly if the cache root and the target dir are on
-// different filesystems, before any expensive `npm ci` runs: hardlinks can't
-// cross devices (EXDEV).
-func checkSameDevice(root, dir string) error {
-	same, err := sameDevice(nearestExisting(root), dir)
-	if err != nil {
-		return nil // can't tell; the per-file EXDEV check still applies
-	}
-	if !same {
-		return fmt.Errorf("cache root %s and %s are on different filesystems, so node_modules can't be hardlinked; point --cache-root (or $FLEET_CACHE_DIR) at the same filesystem as the worktree", root, dir)
-	}
-	return nil
 }
 
 // runEnsure implements `fleet-cache ensure <dir> [--force] [--cache-root <dir>]`.
@@ -143,4 +136,11 @@ func runEnsure(dir string, force bool, cacheRootFlag string) error {
 
 	logf("linked node_modules from cache %s", shortHash(key))
 	return nil
+}
+
+// writeMarker records key as the cache entry that populated
+// targetNodeModules, so a future `ensure` call can detect nothing's changed
+// and skip the destructive rebuild.
+func writeMarker(targetNodeModules, key string) error {
+	return os.WriteFile(markerPath(targetNodeModules), []byte(key), 0o644)
 }

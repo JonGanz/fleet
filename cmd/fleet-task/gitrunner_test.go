@@ -15,6 +15,36 @@ func refSet(refs ...string) func(string) (bool, error) {
 	return func(ref string) (bool, error) { return set[ref], nil }
 }
 
+func TestPlanBaseSetup(t *testing.T) {
+	const url = "git@example.com:o/r.git"
+	cases := []struct {
+		name    string
+		info    baseInfo
+		origin  string
+		want    baseSetup
+		wantErr bool
+		warn    bool
+	}{
+		{"missing", baseInfo{}, url, baseSetup{Init: true, AddOrigin: true}, false, false},
+		{"missing no origin", baseInfo{}, "", baseSetup{}, true, false},
+		{"empty dir", baseInfo{Exists: true, Empty: true}, url, baseSetup{Init: true, AddOrigin: true}, false, false},
+		{"non-empty non-repo", baseInfo{Exists: true}, url, baseSetup{}, true, false},
+		{"repo without origin", baseInfo{Exists: true, IsRepo: true}, url, baseSetup{AddOrigin: true}, false, false},
+		{"repo ok", baseInfo{Exists: true, IsRepo: true, OriginURL: url}, url, baseSetup{}, false, false},
+		{"repo other origin", baseInfo{Exists: true, IsRepo: true, OriginURL: "https://x/y"}, url, baseSetup{}, false, true},
+	}
+	for _, c := range cases {
+		got, err := planBaseSetup(c.info, "r", "/base", c.origin)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: err = %v, wantErr %v", c.name, err, c.wantErr)
+			continue
+		}
+		if got.Init != c.want.Init || got.AddOrigin != c.want.AddOrigin || (got.Warning != "") != c.warn {
+			t.Errorf("%s: got %+v", c.name, got)
+		}
+	}
+}
+
 func TestPlanWorktreeAdd(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -68,36 +98,6 @@ func TestWorktreeAddPlanArgs(t *testing.T) {
 	for _, c := range cases {
 		if got := c.plan.args("/wt"); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s: args = %v, want %v", c.plan.Mode, got, c.want)
-		}
-	}
-}
-
-func TestPlanBaseSetup(t *testing.T) {
-	const url = "git@example.com:o/r.git"
-	cases := []struct {
-		name    string
-		info    baseInfo
-		origin  string
-		want    baseSetup
-		wantErr bool
-		warn    bool
-	}{
-		{"missing", baseInfo{}, url, baseSetup{Init: true, AddOrigin: true}, false, false},
-		{"missing no origin", baseInfo{}, "", baseSetup{}, true, false},
-		{"empty dir", baseInfo{Exists: true, Empty: true}, url, baseSetup{Init: true, AddOrigin: true}, false, false},
-		{"non-empty non-repo", baseInfo{Exists: true}, url, baseSetup{}, true, false},
-		{"repo without origin", baseInfo{Exists: true, IsRepo: true}, url, baseSetup{AddOrigin: true}, false, false},
-		{"repo ok", baseInfo{Exists: true, IsRepo: true, OriginURL: url}, url, baseSetup{}, false, false},
-		{"repo other origin", baseInfo{Exists: true, IsRepo: true, OriginURL: "https://x/y"}, url, baseSetup{}, false, true},
-	}
-	for _, c := range cases {
-		got, err := planBaseSetup(c.info, "r", "/base", c.origin)
-		if (err != nil) != c.wantErr {
-			t.Errorf("%s: err = %v, wantErr %v", c.name, err, c.wantErr)
-			continue
-		}
-		if got.Init != c.want.Init || got.AddOrigin != c.want.AddOrigin || (got.Warning != "") != c.warn {
-			t.Errorf("%s: got %+v", c.name, got)
 		}
 	}
 }

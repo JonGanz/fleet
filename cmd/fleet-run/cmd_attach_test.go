@@ -7,6 +7,13 @@ import (
 	"github.com/JonGanz/fleet/internal/cli"
 )
 
+func TestEnvWithout(t *testing.T) {
+	got := envWithout([]string{"A=1", "TMUX=/x,1,0", "TMUX_PANE=%1", "B=2"}, "TMUX")
+	if want := []string{"A=1", "TMUX_PANE=%1", "B=2"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestInsideServer(t *testing.T) {
 	cases := []struct {
 		env, socket string
@@ -21,13 +28,6 @@ func TestInsideServer(t *testing.T) {
 		if got := insideServer(c.env, c.socket); got != c.want {
 			t.Errorf("insideServer(%q, %q) = %v, want %v", c.env, c.socket, got, c.want)
 		}
-	}
-}
-
-func TestEnvWithout(t *testing.T) {
-	got := envWithout([]string{"A=1", "TMUX=/x,1,0", "TMUX_PANE=%1", "B=2"}, "TMUX")
-	if want := []string{"A=1", "TMUX_PANE=%1", "B=2"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("got %v, want %v", got, want)
 	}
 }
 

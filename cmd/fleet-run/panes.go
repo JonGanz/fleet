@@ -22,6 +22,9 @@ type PaneInfo struct {
 	ExitStatus *int `json:"exit_status,omitempty"`
 }
 
+// paneFormat is the -F format parsed by parsePaneLines.
+const paneFormat = "#{window_id}\t#{window_name}\t#{pane_dead}\t#{pane_pid}\t#{pane_dead_status}"
+
 // findPane returns the pane for window, if any.
 func findPane(panes []PaneInfo, window string) (PaneInfo, bool) {
 	for _, p := range panes {
@@ -42,9 +45,6 @@ func labelPanes(panes []PaneInfo, labels map[string]string) []PaneInfo {
 	}
 	return out
 }
-
-// paneFormat is the -F format parsed by parsePaneLines.
-const paneFormat = "#{window_id}\t#{window_name}\t#{pane_dead}\t#{pane_pid}\t#{pane_dead_status}"
 
 // parsePaneLine parses one line of listPanesArgs output. The window name is
 // everything between the id and the last three tab-separated fields, so a

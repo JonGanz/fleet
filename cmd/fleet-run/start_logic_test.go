@@ -6,13 +6,6 @@ import (
 	"github.com/JonGanz/fleet/internal/cli"
 )
 
-func testPairs() []RunPair {
-	return []RunPair{
-		{Repo: "backend", RunName: "api", Cmd: "npm start", Runtime: "linux", WorktreeDir: "/wt/backend"},
-		{Repo: "web", RunName: "dev", Cmd: "npm run dev", Runtime: "linux", WorktreeDir: "/wt/web"},
-	}
-}
-
 func isUsage(err error) bool {
 	return cli.IsUsage(err)
 }
@@ -32,14 +25,10 @@ func TestExistingWindowStatus(t *testing.T) {
 	}
 }
 
-func TestStartResultLaunched(t *testing.T) {
-	for status, want := range map[string]bool{
-		startStatusStarted: true, startStatusRespawned: true, startStatusRestarted: true,
-		startStatusAlreadyRunning: false, startStatusFailed: false,
-	} {
-		if got := (StartResult{Status: status}).launched(); got != want {
-			t.Errorf("launched(%s) = %v, want %v", status, got, want)
-		}
+func testPairs() []RunPair {
+	return []RunPair{
+		{Repo: "backend", RunName: "api", Cmd: "npm start", Runtime: "linux", WorktreeDir: "/wt/backend"},
+		{Repo: "web", RunName: "dev", Cmd: "npm run dev", Runtime: "linux", WorktreeDir: "/wt/web"},
 	}
 }
 
@@ -87,5 +76,16 @@ func TestStartReportFailedCount(t *testing.T) {
 	r := StartReport{Results: []StartResult{{Status: startStatusStarted}, {Status: startStatusFailed}, {Status: startStatusRespawned}}}
 	if r.failedCount() != 1 {
 		t.Errorf("failedCount = %d", r.failedCount())
+	}
+}
+
+func TestStartResultLaunched(t *testing.T) {
+	for status, want := range map[string]bool{
+		startStatusStarted: true, startStatusRespawned: true, startStatusRestarted: true,
+		startStatusAlreadyRunning: false, startStatusFailed: false,
+	} {
+		if got := (StartResult{Status: status}).launched(); got != want {
+			t.Errorf("launched(%s) = %v, want %v", status, got, want)
+		}
 	}
 }

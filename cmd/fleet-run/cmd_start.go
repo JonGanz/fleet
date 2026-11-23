@@ -24,33 +24,19 @@ type startOpts struct {
 	ticket  string
 }
 
-// runStart implements `fleet-run start [--ticket <id>] [--all]
-// [repo:run-name ...] [--json]`. Only one ticket's windows are ever meant to
-// be live in the session at once, so starting a different ticket than
-// whatever's currently active tears down every existing window first.
-// Starting the *same* ticket that's already active stays additive (only
-// missing windows get created; dead panes get respawned).
-func runStart(opts startOpts) error {
-	if opts.all && len(opts.targets) > 0 {
-		return cli.Usagef("--all and explicit repo:run-name targets are mutually exclusive")
+// finishStart prints report (with asJSON) and turns failures into an error.
+func finishStart(report StartReport, asJSON bool) error {
+	failed := report.failedCount()
+	report.OK = failed == 0
+	if asJSON {
+		if err := cli.PrintJSON(report); err != nil {
+			return err
+		}
 	}
-	if !opts.all && len(opts.targets) == 0 && !cli.InteractiveAllowed() {
-		return inputRequiredError("no targets given; pass repo:run-name ... or --all (see `fleet-run targets`)")
+	if failed > 0 {
+		return fmt.Errorf("%d of %d selected targets failed to start", failed, len(report.Results))
 	}
-	cfg, ts, err := loadStartContext(opts.ticket)
-	if err != nil {
-		return err
-	}
-	return startFlow(cfg, ts, opts)
-}
-
-// requireSession returns the configured tmux session name, erroring if it's
-// missing. Called before any picker so misconfiguration fails fast.
-func requireSession(cfg *config.ReposConfig) (string, error) {
-	if cfg.Tmux.SessionName == "" {
-		return "", fmt.Errorf("repos.yaml tmux.session_name is required")
-	}
-	return cfg.Tmux.SessionName, nil
+	return nil
 }
 
 // loadStartContext loads repos.yaml and resolves the task state to operate
@@ -109,6 +95,62 @@ func pickTicketIfAmbiguous(tasksDirPath string) (string, error) {
 		return "", fmt.Errorf("select ticket: %w", err)
 	}
 	return chosen, nil
+}
+
+// requireSession returns the configured tmux session name, erroring if it's
+// missing. Called before any picker so misconfiguration fails fast.
+func requireSession(cfg *config.ReposConfig) (string, error) {
+	if cfg.Tmux.SessionName == "" {
+		return "", fmt.Errorf("repos.yaml tmux.session_name is required")
+	}
+	return cfg.Tmux.SessionName, nil
+}
+
+// runStart implements `fleet-run start [--ticket <id>] [--all]
+// [repo:run-name ...] [--json]`. Only one ticket's windows are ever meant to
+// be live in the session at once, so starting a different ticket than
+// whatever's currently active tears down every existing window first.
+// Starting the *same* ticket that's already active stays additive (only
+// missing windows get created; dead panes get respawned).
+func runStart(opts startOpts) error {
+	if opts.all && len(opts.targets) > 0 {
+		return cli.Usagef("--all and explicit repo:run-name targets are mutually exclusive")
+	}
+	if !opts.all && len(opts.targets) == 0 && !cli.InteractiveAllowed() {
+		return inputRequiredError("no targets given; pass repo:run-name ... or --all (see `fleet-run targets`)")
+	}
+	cfg, ts, err := loadStartContext(opts.ticket)
+	if err != nil {
+		return err
+	}
+	return startFlow(cfg, ts, opts)
+}
+
+// selectStartTargets returns the pairs to start: explicit labels or --all
+// without a picker, else the interactive multiselect (runStart has already
+// refused the no-terminal case).
+func selectStartTargets(pairs []RunPair, opts startOpts) ([]RunPair, error) {
+	selected, needPicker, err := resolveStartTargets(pairs, opts.all, opts.targets)
+	if err != nil || !needPicker {
+		return selected, err
+	}
+	if !cli.InteractiveAllowed() {
+		return nil, inputRequiredError("no targets given; pass repo:run-name ... or --all (see `fleet-run targets`)")
+	}
+	labels := make([]string, len(pairs))
+	for i, p := range pairs {
+		labels[i] = p.Label()
+	}
+	chosen, err := selectMulti(labels)
+	if err != nil {
+		return nil, err
+	}
+	for _, label := range chosen {
+		if pair, ok := findPairByLabel(pairs, label); ok {
+			selected = append(selected, pair)
+		}
+	}
+	return selected, nil
 }
 
 // startFlow resolves which targets to start (explicit, --all, or the
@@ -200,48 +242,6 @@ func startFlow(cfg *config.ReposConfig, ts *taskstate.State, opts startOpts) err
 		report.Results = append(report.Results, res)
 	}
 	return finishStart(report, opts.asJSON)
-}
-
-// finishStart prints report (with asJSON) and turns failures into an error.
-func finishStart(report StartReport, asJSON bool) error {
-	failed := report.failedCount()
-	report.OK = failed == 0
-	if asJSON {
-		if err := cli.PrintJSON(report); err != nil {
-			return err
-		}
-	}
-	if failed > 0 {
-		return fmt.Errorf("%d of %d selected targets failed to start", failed, len(report.Results))
-	}
-	return nil
-}
-
-// selectStartTargets returns the pairs to start: explicit labels or --all
-// without a picker, else the interactive multiselect (runStart has already
-// refused the no-terminal case).
-func selectStartTargets(pairs []RunPair, opts startOpts) ([]RunPair, error) {
-	selected, needPicker, err := resolveStartTargets(pairs, opts.all, opts.targets)
-	if err != nil || !needPicker {
-		return selected, err
-	}
-	if !cli.InteractiveAllowed() {
-		return nil, inputRequiredError("no targets given; pass repo:run-name ... or --all (see `fleet-run targets`)")
-	}
-	labels := make([]string, len(pairs))
-	for i, p := range pairs {
-		labels[i] = p.Label()
-	}
-	chosen, err := selectMulti(labels)
-	if err != nil {
-		return nil, err
-	}
-	for _, label := range chosen {
-		if pair, ok := findPairByLabel(pairs, label); ok {
-			selected = append(selected, pair)
-		}
-	}
-	return selected, nil
 }
 
 // startOne creates pair's window, respawns it if its pane is dead (or alive

@@ -12,6 +12,161 @@ import (
 	"time"
 )
 
+func fakeCache(t *testing.T) (nodeCache string, hashes []string) {
+	t.Helper()
+	nodeCache = filepath.Join(t.TempDir(), "node-cache")
+	for _, h := range []string{"aaa", "bbb"} {
+		if err := os.MkdirAll(filepath.Join(nodeCache, h, "node_modules"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		hashes = append(hashes, h)
+	}
+	return
+}
+
+func identity(p string) (string, error) { return p, nil }
+
+func TestGCAndEnsureAgreeOnKeys(t *testing.T) {
+	root := t.TempDir()
+	withNpmrc := filepath.Join(root, "T-1", "web")
+	without := filepath.Join(root, "T-2", "web")
+	for _, dir := range []string{withNpmrc, without} {
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{"same":"lockfile"}`), 0o644)
+	}
+	os.WriteFile(filepath.Join(withNpmrc, ".npmrc"), []byte("legacy-peer-deps=true\n"), 0o600)
+
+	// What ensure / ensure-windows would name each entry and marker.
+	_, keyWith, err := cacheKey(withNpmrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, keyWithout, err := cacheKey(without)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyWith == keyWithout {
+		t.Fatal("same lockfile with and without .npmrc must not share a key")
+	}
+
+	referenced, err := referencedKeys([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(referenced, map[string]bool{keyWith: true, keyWithout: true}) {
+		t.Fatalf("referencedKeys = %v, want exactly ensure's keys %s and %s", referenced, keyWith, keyWithout)
+	}
+}
+
+func TestGCReportsOldStyleEntriesStale(t *testing.T) {
+	root := t.TempDir()
+	wt := filepath.Join(root, "T-1", "web")
+	os.MkdirAll(wt, 0o755)
+	os.WriteFile(filepath.Join(wt, "package-lock.json"), []byte(`{"lock":1}`), 0o644)
+	_, key, err := cacheKey(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// v1 entries were named by the bare lockfile hash.
+	oldKey, err := hashFile(filepath.Join(wt, "package-lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nc := filepath.Join(t.TempDir(), "node-cache")
+	for _, name := range []string{key, oldKey} {
+		os.MkdirAll(filepath.Join(nc, name, "node_modules"), 0o755)
+	}
+	r, err := gcStale(nc, []string{root}, false, time.Now(), os.RemoveAll, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Stale) != 1 || r.Stale[0].Name != oldKey || r.Stale[0].Kind != "entry" {
+		t.Fatalf("stale = %+v, want only the old-style entry %s", r.Stale, oldKey)
+	}
+}
+
+func TestGCStaleDryRunVsForce(t *testing.T) {
+	nc, _ := fakeCache(t)
+	root := t.TempDir()
+	var removed []string
+	rm := func(p string) error { removed = append(removed, filepath.Base(p)); return os.RemoveAll(p) }
+
+	// no force: report only
+	r, err := gcStale(nc, []string{root}, false, time.Now(), rm, identity)
+	if err != nil || !r.DryRun || len(r.Stale) != 2 || len(removed) != 0 {
+		t.Fatalf("dry run: %+v %v %v", r, err, removed)
+	}
+	// force but no roots: still report only
+	r, err = gcStale(nc, nil, true, time.Now(), rm, identity)
+	if err != nil || !r.DryRun || len(removed) != 0 {
+		t.Fatalf("no roots: %+v %v %v", r, err, removed)
+	}
+	// force with roots: deletes
+	r, err = gcStale(nc, []string{root}, true, time.Now(), rm, identity)
+	if err != nil || r.DryRun || len(removed) != 2 || !r.Stale[0].Removed {
+		t.Fatalf("force: %+v %v %v", r, err, removed)
+	}
+}
+
+func TestGCStaleMissingRootDeletesNothing(t *testing.T) {
+	nc, _ := fakeCache(t)
+	removed := 0
+	_, err := gcStale(nc, []string{filepath.Join(t.TempDir(), "typo")}, true, time.Now(),
+		func(string) error { removed++; return nil }, identity)
+	if err == nil {
+		t.Fatal("expected error for missing root")
+	}
+	if removed != 0 {
+		t.Fatalf("removed %d entries despite error", removed)
+	}
+	if _, err := os.Stat(filepath.Join(nc, "aaa")); err != nil {
+		t.Fatalf("entry should still exist: %v", err)
+	}
+}
+
+func TestGCStaleStagingDirs(t *testing.T) {
+	nc, _ := fakeCache(t)
+	fresh := filepath.Join(nc, "ccc.tmp-111")
+	old := filepath.Join(nc, "ddd.tmp-222")
+	os.MkdirAll(fresh, 0o755)
+	os.MkdirAll(old, 0o755)
+	past := time.Now().Add(-48 * time.Hour)
+	os.Chtimes(old, past, past)
+
+	// everything referenced except staging dirs
+	r, err := gcStale(nc, []string{t.TempDir()}, false, time.Now(), os.RemoveAll, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	for _, it := range r.Stale {
+		kinds = append(kinds, it.Kind+":"+it.Name)
+	}
+	if !reflect.DeepEqual(kinds, []string{"entry:aaa", "entry:bbb", "staging:ddd.tmp-222"}) {
+		t.Fatalf("stale = %v (fresh staging dir must not be flagged, old one must)", kinds)
+	}
+	entries, _ := unreferencedEntries(nc, map[string]bool{"aaa": true, "bbb": true})
+	if len(entries) != 0 {
+		t.Fatalf("staging dirs must not count as entries: %v", entries)
+	}
+}
+
+func TestPrintGCReportJSON(t *testing.T) {
+	r := &gcReport{NodeCache: "/nc", DryRun: true, Stale: []gcItem{}}
+	var buf bytes.Buffer
+	if err := printGCReport(&buf, r, true, "", true); err != nil {
+		t.Fatal(err)
+	}
+	var back gcReport
+	if err := json.Unmarshal(buf.Bytes(), &back); err != nil || !back.DryRun || back.NodeCache != "/nc" {
+		t.Fatalf("bad json %q: %v", buf.String(), err)
+	}
+	if !strings.Contains(buf.String(), `"stale": []`) {
+		t.Errorf("empty stale should be [] not null: %s", buf.String())
+	}
+}
+
 func TestReferencedKeysAndUnreferencedEntries(t *testing.T) {
 	// Fake cache root with three entries: two that will be "referenced" by
 	// lockfiles under a fake worktree root, and one stale entry.
@@ -91,159 +246,6 @@ func TestReferencedKeysAndUnreferencedEntries(t *testing.T) {
 	}
 }
 
-func TestUnreferencedEntriesEmptyCache(t *testing.T) {
-	dir := t.TempDir()
-	stale, err := unreferencedEntries(filepath.Join(dir, "does-not-exist"), map[string]bool{})
-	if err != nil {
-		t.Fatalf("unreferencedEntries: %v", err)
-	}
-	if len(stale) != 0 {
-		t.Fatalf("expected no entries for missing cache dir, got %v", stale)
-	}
-}
-
-// writeAndKey writes content as the package-lock.json of a fresh dir with
-// no .npmrc and returns that dir's cache key.
-func writeAndKey(t *testing.T, content []byte) (string, error) {
-	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), content, 0o644); err != nil {
-		return "", err
-	}
-	_, key, err := cacheKey(dir)
-	return key, err
-}
-
-func TestReferencedKeysMissingRootErrors(t *testing.T) {
-	if _, err := referencedKeys([]string{filepath.Join(t.TempDir(), "typo")}); err == nil {
-		t.Fatal("missing root should error")
-	}
-	f := filepath.Join(t.TempDir(), "file")
-	os.WriteFile(f, nil, 0o644)
-	if _, err := referencedKeys([]string{f}); err == nil {
-		t.Fatal("non-directory root should error")
-	}
-}
-
-func TestReferencedKeysFollowsSymlinks(t *testing.T) {
-	real := t.TempDir()
-	os.MkdirAll(filepath.Join(real, "wt"), 0o755)
-	os.WriteFile(filepath.Join(real, "wt", "package-lock.json"), []byte("{}"), 0o644)
-	_, want, _ := cacheKey(filepath.Join(real, "wt"))
-
-	// symlinked root
-	link := filepath.Join(t.TempDir(), "root")
-	os.Symlink(real, link)
-	got, err := referencedKeys([]string{link})
-	if err != nil || !got[want] {
-		t.Fatalf("symlinked root: %v %v", got, err)
-	}
-
-	// symlinked directory inside a root, plus a cycle back to the root
-	root := t.TempDir()
-	os.Symlink(filepath.Join(real, "wt"), filepath.Join(root, "ticket"))
-	os.Symlink(root, filepath.Join(root, "loop"))
-	got, err = referencedKeys([]string{root})
-	if err != nil || !got[want] {
-		t.Fatalf("symlinked subdir: %v %v", got, err)
-	}
-}
-
-func fakeCache(t *testing.T) (nodeCache string, hashes []string) {
-	t.Helper()
-	nodeCache = filepath.Join(t.TempDir(), "node-cache")
-	for _, h := range []string{"aaa", "bbb"} {
-		if err := os.MkdirAll(filepath.Join(nodeCache, h, "node_modules"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		hashes = append(hashes, h)
-	}
-	return
-}
-
-func identity(p string) (string, error) { return p, nil }
-
-func TestGCStaleMissingRootDeletesNothing(t *testing.T) {
-	nc, _ := fakeCache(t)
-	removed := 0
-	_, err := gcStale(nc, []string{filepath.Join(t.TempDir(), "typo")}, true, time.Now(),
-		func(string) error { removed++; return nil }, identity)
-	if err == nil {
-		t.Fatal("expected error for missing root")
-	}
-	if removed != 0 {
-		t.Fatalf("removed %d entries despite error", removed)
-	}
-	if _, err := os.Stat(filepath.Join(nc, "aaa")); err != nil {
-		t.Fatalf("entry should still exist: %v", err)
-	}
-}
-
-func TestGCStaleDryRunVsForce(t *testing.T) {
-	nc, _ := fakeCache(t)
-	root := t.TempDir()
-	var removed []string
-	rm := func(p string) error { removed = append(removed, filepath.Base(p)); return os.RemoveAll(p) }
-
-	// no force: report only
-	r, err := gcStale(nc, []string{root}, false, time.Now(), rm, identity)
-	if err != nil || !r.DryRun || len(r.Stale) != 2 || len(removed) != 0 {
-		t.Fatalf("dry run: %+v %v %v", r, err, removed)
-	}
-	// force but no roots: still report only
-	r, err = gcStale(nc, nil, true, time.Now(), rm, identity)
-	if err != nil || !r.DryRun || len(removed) != 0 {
-		t.Fatalf("no roots: %+v %v %v", r, err, removed)
-	}
-	// force with roots: deletes
-	r, err = gcStale(nc, []string{root}, true, time.Now(), rm, identity)
-	if err != nil || r.DryRun || len(removed) != 2 || !r.Stale[0].Removed {
-		t.Fatalf("force: %+v %v %v", r, err, removed)
-	}
-}
-
-func TestGCStaleStagingDirs(t *testing.T) {
-	nc, _ := fakeCache(t)
-	fresh := filepath.Join(nc, "ccc.tmp-111")
-	old := filepath.Join(nc, "ddd.tmp-222")
-	os.MkdirAll(fresh, 0o755)
-	os.MkdirAll(old, 0o755)
-	past := time.Now().Add(-48 * time.Hour)
-	os.Chtimes(old, past, past)
-
-	// everything referenced except staging dirs
-	r, err := gcStale(nc, []string{t.TempDir()}, false, time.Now(), os.RemoveAll, identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var kinds []string
-	for _, it := range r.Stale {
-		kinds = append(kinds, it.Kind+":"+it.Name)
-	}
-	if !reflect.DeepEqual(kinds, []string{"entry:aaa", "entry:bbb", "staging:ddd.tmp-222"}) {
-		t.Fatalf("stale = %v (fresh staging dir must not be flagged, old one must)", kinds)
-	}
-	entries, _ := unreferencedEntries(nc, map[string]bool{"aaa": true, "bbb": true})
-	if len(entries) != 0 {
-		t.Fatalf("staging dirs must not count as entries: %v", entries)
-	}
-}
-
-func TestPrintGCReportJSON(t *testing.T) {
-	r := &gcReport{NodeCache: "/nc", DryRun: true, Stale: []gcItem{}}
-	var buf bytes.Buffer
-	if err := printGCReport(&buf, r, true, "", true); err != nil {
-		t.Fatal(err)
-	}
-	var back gcReport
-	if err := json.Unmarshal(buf.Bytes(), &back); err != nil || !back.DryRun || back.NodeCache != "/nc" {
-		t.Fatalf("bad json %q: %v", buf.String(), err)
-	}
-	if !strings.Contains(buf.String(), `"stale": []`) {
-		t.Errorf("empty stale should be [] not null: %s", buf.String())
-	}
-}
-
 func TestReferencedKeysFileSymlinks(t *testing.T) {
 	real := t.TempDir()
 	lock := filepath.Join(real, "package-lock.json")
@@ -272,63 +274,38 @@ func TestReferencedKeysFileSymlinks(t *testing.T) {
 	}
 }
 
-func TestGCAndEnsureAgreeOnKeys(t *testing.T) {
+func TestReferencedKeysFollowsSymlinks(t *testing.T) {
+	real := t.TempDir()
+	os.MkdirAll(filepath.Join(real, "wt"), 0o755)
+	os.WriteFile(filepath.Join(real, "wt", "package-lock.json"), []byte("{}"), 0o644)
+	_, want, _ := cacheKey(filepath.Join(real, "wt"))
+
+	// symlinked root
+	link := filepath.Join(t.TempDir(), "root")
+	os.Symlink(real, link)
+	got, err := referencedKeys([]string{link})
+	if err != nil || !got[want] {
+		t.Fatalf("symlinked root: %v %v", got, err)
+	}
+
+	// symlinked directory inside a root, plus a cycle back to the root
 	root := t.TempDir()
-	withNpmrc := filepath.Join(root, "T-1", "web")
-	without := filepath.Join(root, "T-2", "web")
-	for _, dir := range []string{withNpmrc, without} {
-		os.MkdirAll(dir, 0o755)
-		os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{"same":"lockfile"}`), 0o644)
-	}
-	os.WriteFile(filepath.Join(withNpmrc, ".npmrc"), []byte("legacy-peer-deps=true\n"), 0o600)
-
-	// What ensure / ensure-windows would name each entry and marker.
-	_, keyWith, err := cacheKey(withNpmrc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, keyWithout, err := cacheKey(without)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if keyWith == keyWithout {
-		t.Fatal("same lockfile with and without .npmrc must not share a key")
-	}
-
-	referenced, err := referencedKeys([]string{root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(referenced, map[string]bool{keyWith: true, keyWithout: true}) {
-		t.Fatalf("referencedKeys = %v, want exactly ensure's keys %s and %s", referenced, keyWith, keyWithout)
+	os.Symlink(filepath.Join(real, "wt"), filepath.Join(root, "ticket"))
+	os.Symlink(root, filepath.Join(root, "loop"))
+	got, err = referencedKeys([]string{root})
+	if err != nil || !got[want] {
+		t.Fatalf("symlinked subdir: %v %v", got, err)
 	}
 }
 
-func TestGCReportsOldStyleEntriesStale(t *testing.T) {
-	root := t.TempDir()
-	wt := filepath.Join(root, "T-1", "web")
-	os.MkdirAll(wt, 0o755)
-	os.WriteFile(filepath.Join(wt, "package-lock.json"), []byte(`{"lock":1}`), 0o644)
-	_, key, err := cacheKey(wt)
-	if err != nil {
-		t.Fatal(err)
+func TestReferencedKeysMissingRootErrors(t *testing.T) {
+	if _, err := referencedKeys([]string{filepath.Join(t.TempDir(), "typo")}); err == nil {
+		t.Fatal("missing root should error")
 	}
-	// v1 entries were named by the bare lockfile hash.
-	oldKey, err := hashFile(filepath.Join(wt, "package-lock.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	nc := filepath.Join(t.TempDir(), "node-cache")
-	for _, name := range []string{key, oldKey} {
-		os.MkdirAll(filepath.Join(nc, name, "node_modules"), 0o755)
-	}
-	r, err := gcStale(nc, []string{root}, false, time.Now(), os.RemoveAll, identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(r.Stale) != 1 || r.Stale[0].Name != oldKey || r.Stale[0].Kind != "entry" {
-		t.Fatalf("stale = %+v, want only the old-style entry %s", r.Stale, oldKey)
+	f := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(f, nil, 0o644)
+	if _, err := referencedKeys([]string{f}); err == nil {
+		t.Fatal("non-directory root should error")
 	}
 }
 
@@ -348,4 +325,27 @@ func TestReferencedKeysOtherNamedFileSymlink(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, map[string]bool{want: true}) {
 		t.Fatalf("referencedKeys = %v, %v; want {%s}", got, err, want)
 	}
+}
+
+func TestUnreferencedEntriesEmptyCache(t *testing.T) {
+	dir := t.TempDir()
+	stale, err := unreferencedEntries(filepath.Join(dir, "does-not-exist"), map[string]bool{})
+	if err != nil {
+		t.Fatalf("unreferencedEntries: %v", err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("expected no entries for missing cache dir, got %v", stale)
+	}
+}
+
+// writeAndKey writes content as the package-lock.json of a fresh dir with
+// no .npmrc and returns that dir's cache key.
+func writeAndKey(t *testing.T, content []byte) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), content, 0o644); err != nil {
+		return "", err
+	}
+	_, key, err := cacheKey(dir)
+	return key, err
 }

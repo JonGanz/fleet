@@ -9,58 +9,6 @@ import (
 	"testing"
 )
 
-func TestInteractiveFrom(t *testing.T) {
-	cases := []struct {
-		tty     bool
-		noInput string
-		want    bool
-	}{
-		{true, "", true},
-		{true, "0", true},
-		{true, "1", false},
-		{false, "", false},
-	}
-	for _, c := range cases {
-		if got := interactiveFrom(c.tty, c.noInput); got != c.want {
-			t.Errorf("interactiveFrom(%v, %q) = %v, want %v", c.tty, c.noInput, got, c.want)
-		}
-	}
-}
-
-func TestInteractiveAllowedHonorsNoInputEnv(t *testing.T) {
-	t.Setenv("FLEET_NO_INPUT", "1")
-	if InteractiveAllowed() {
-		t.Error("FLEET_NO_INPUT=1 must disable interaction")
-	}
-}
-
-func TestIsUsageWrapped(t *testing.T) {
-	if !IsUsage(fmt.Errorf("context: %w", Usagef("missing %s", "x"))) {
-		t.Error("wrapped usage error not detected")
-	}
-	if IsUsage(errors.New("plain")) {
-		t.Error("plain error misclassified as usage error")
-	}
-}
-
-func TestExitCode(t *testing.T) {
-	cases := []struct {
-		err  error
-		want int
-	}{
-		{nil, ExitOK},
-		{flag.ErrHelp, ExitOK},
-		{errors.New("boom"), ExitFailure},
-		{Usagef("bad"), ExitUsage},
-		{fmt.Errorf("wrapped: %w", Usagef("pass --all")), ExitUsage},
-	}
-	for _, c := range cases {
-		if got := ExitCode(c.err); got != c.want {
-			t.Errorf("ExitCode(%v) = %d, want %d", c.err, got, c.want)
-		}
-	}
-}
-
 func TestDiagnosticPrefix(t *testing.T) {
 	var buf bytes.Buffer
 	restore := SetStderr(&buf)
@@ -89,6 +37,58 @@ func TestDiagnosticPrefix(t *testing.T) {
 	FErrorf(&own, "x")
 	if own.String() != "fleet-test: error: x\n" {
 		t.Errorf("FErrorf wrote %q", own.String())
+	}
+}
+
+func TestExitCode(t *testing.T) {
+	cases := []struct {
+		err  error
+		want int
+	}{
+		{nil, ExitOK},
+		{flag.ErrHelp, ExitOK},
+		{errors.New("boom"), ExitFailure},
+		{Usagef("bad"), ExitUsage},
+		{fmt.Errorf("wrapped: %w", Usagef("pass --all")), ExitUsage},
+	}
+	for _, c := range cases {
+		if got := ExitCode(c.err); got != c.want {
+			t.Errorf("ExitCode(%v) = %d, want %d", c.err, got, c.want)
+		}
+	}
+}
+
+func TestInteractiveAllowedHonorsNoInputEnv(t *testing.T) {
+	t.Setenv("FLEET_NO_INPUT", "1")
+	if InteractiveAllowed() {
+		t.Error("FLEET_NO_INPUT=1 must disable interaction")
+	}
+}
+
+func TestInteractiveFrom(t *testing.T) {
+	cases := []struct {
+		tty     bool
+		noInput string
+		want    bool
+	}{
+		{true, "", true},
+		{true, "0", true},
+		{true, "1", false},
+		{false, "", false},
+	}
+	for _, c := range cases {
+		if got := interactiveFrom(c.tty, c.noInput); got != c.want {
+			t.Errorf("interactiveFrom(%v, %q) = %v, want %v", c.tty, c.noInput, got, c.want)
+		}
+	}
+}
+
+func TestIsUsageWrapped(t *testing.T) {
+	if !IsUsage(fmt.Errorf("context: %w", Usagef("missing %s", "x"))) {
+		t.Error("wrapped usage error not detected")
+	}
+	if IsUsage(errors.New("plain")) {
+		t.Error("plain error misclassified as usage error")
 	}
 }
 

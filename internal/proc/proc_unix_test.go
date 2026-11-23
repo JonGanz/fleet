@@ -13,6 +13,19 @@ import (
 	"time"
 )
 
+func TestRunNoTimeout(t *testing.T) {
+	if err := Run(exec.Command("/bin/sh", "-c", "exit 0"), Options{Timeout: time.Minute, NewGroup: true}); err != nil {
+		t.Errorf("clean exit: %v", err)
+	}
+	err := Run(exec.Command("/bin/sh", "-c", "exit 3"), Options{})
+	if err == nil || IsTimeout(err) || !strings.Contains(err.Error(), "exit status 3") {
+		t.Errorf("failing exit: %v", err)
+	}
+	if err := Run(exec.Command(filepath.Join(t.TempDir(), "missing")), Options{NewGroup: true}); err == nil {
+		t.Error("missing binary: want a start error")
+	}
+}
+
 // TestRunTimeoutKillsGroup: a child that started a background grandchild is
 // killed by the timeout, grandchild included.
 func TestRunTimeoutKillsGroup(t *testing.T) {
@@ -42,18 +55,5 @@ func TestRunTimeoutKillsGroup(t *testing.T) {
 			t.Fatalf("grandchild %d still alive after the group kill", pid)
 		}
 		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-func TestRunNoTimeout(t *testing.T) {
-	if err := Run(exec.Command("/bin/sh", "-c", "exit 0"), Options{Timeout: time.Minute, NewGroup: true}); err != nil {
-		t.Errorf("clean exit: %v", err)
-	}
-	err := Run(exec.Command("/bin/sh", "-c", "exit 3"), Options{})
-	if err == nil || IsTimeout(err) || !strings.Contains(err.Error(), "exit status 3") {
-		t.Errorf("failing exit: %v", err)
-	}
-	if err := Run(exec.Command(filepath.Join(t.TempDir(), "missing")), Options{NewGroup: true}); err == nil {
-		t.Error("missing binary: want a start error")
 	}
 }

@@ -32,6 +32,38 @@ repos:
         cmd: "npm run dev"
 `
 
+const defaultsFixtureYAML = `
+defaults:
+  default_branch: main
+  base_root: ~/dev/.fleet-base
+  windows_base_root: ~/dev/.fleet-base-windows
+
+windows_worktree_root: ~/dev/.fleet-worktrees-windows
+windows_cache_root: ~/dev/.fleet-cache-windows
+
+repos:
+  - name: backend
+    origin: git@github.com:org/backend.git
+    run:
+      - name: api
+        cmd: "npm run start:dev"
+
+  - name: admin-ui
+    origin: git@github.com:org/admin-ui.git
+    base: ~/dev/.fleet-base/admin-ui-custom
+    default_branch: develop
+    run:
+      - name: dev
+        cmd: "npm run dev"
+
+  - name: room-launcher
+    origin: git@github.com:org/room-launcher.git
+    runtime: windows
+    run:
+      - name: dev
+        cmd: "npm run dev"
+`
+
 func TestParseReposConfig(t *testing.T) {
 	cfg, err := parseReposConfig([]byte(reposYAMLFixture))
 	if err != nil {
@@ -87,37 +119,13 @@ func TestParseReposConfig(t *testing.T) {
 	}
 }
 
-const defaultsFixtureYAML = `
-defaults:
-  default_branch: main
-  base_root: ~/dev/.fleet-base
-  windows_base_root: ~/dev/.fleet-base-windows
-
-windows_worktree_root: ~/dev/.fleet-worktrees-windows
-windows_cache_root: ~/dev/.fleet-cache-windows
-
-repos:
-  - name: backend
-    origin: git@github.com:org/backend.git
-    run:
-      - name: api
-        cmd: "npm run start:dev"
-
-  - name: admin-ui
-    origin: git@github.com:org/admin-ui.git
-    base: ~/dev/.fleet-base/admin-ui-custom
-    default_branch: develop
-    run:
-      - name: dev
-        cmd: "npm run dev"
-
-  - name: room-launcher
-    origin: git@github.com:org/room-launcher.git
-    runtime: windows
-    run:
-      - name: dev
-        cmd: "npm run dev"
-`
+func TestParseReposConfigAllowsDots(t *testing.T) {
+	// Windows are targeted by id, so dotted names are fine.
+	yml := "tmux:\n  session_name: fleet\nrepos:\n  - name: my.app\n    run:\n      - name: dev.server\n        cmd: x\n"
+	if _, err := parseReposConfig([]byte(yml)); err != nil {
+		t.Errorf("dotted names rejected: %v", err)
+	}
+}
 
 func TestParseReposConfigAppliesDefaults(t *testing.T) {
 	cfg, err := parseReposConfig([]byte(defaultsFixtureYAML))
@@ -166,6 +174,15 @@ func TestParseReposConfigAppliesDefaults(t *testing.T) {
 	}
 }
 
+func TestParseReposConfigRejectsBadSessionName(t *testing.T) {
+	for _, name := range []string{"my.fleet", "a:b"} {
+		yml := "tmux:\n  session_name: \"" + name + "\"\nrepos: []\n"
+		if _, err := parseReposConfig([]byte(yml)); err == nil {
+			t.Errorf("session_name %q should be rejected", name)
+		}
+	}
+}
+
 func TestParseReposConfigRejectsColon(t *testing.T) {
 	for name, y := range map[string]string{
 		"repo": "repos:\n  - name: \"a:b\"\n    run:\n      - {name: x, cmd: y}\n",
@@ -191,22 +208,5 @@ func TestParseReposConfigRejectsWindowNameCollision(t *testing.T) {
 	// Distinct names must still parse.
 	if _, err := parseReposConfig([]byte(reposYAMLFixture)); err != nil {
 		t.Errorf("fixture should be valid: %v", err)
-	}
-}
-
-func TestParseReposConfigRejectsBadSessionName(t *testing.T) {
-	for _, name := range []string{"my.fleet", "a:b"} {
-		yml := "tmux:\n  session_name: \"" + name + "\"\nrepos: []\n"
-		if _, err := parseReposConfig([]byte(yml)); err == nil {
-			t.Errorf("session_name %q should be rejected", name)
-		}
-	}
-}
-
-func TestParseReposConfigAllowsDots(t *testing.T) {
-	// Windows are targeted by id, so dotted names are fine.
-	yml := "tmux:\n  session_name: fleet\nrepos:\n  - name: my.app\n    run:\n      - name: dev.server\n        cmd: x\n"
-	if _, err := parseReposConfig([]byte(yml)); err != nil {
-		t.Errorf("dotted names rejected: %v", err)
 	}
 }

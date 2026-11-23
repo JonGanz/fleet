@@ -26,16 +26,6 @@ func checkTicketMatchesActive(ticket, active string, hasActive bool) error {
 	return nil
 }
 
-// parsePairLabel splits a "repo:run-name" positional argument into its two
-// parts.
-func parsePairLabel(label string) (repo, runName string, ok bool) {
-	repo, runName, found := strings.Cut(label, ":")
-	if !found || repo == "" || runName == "" {
-		return "", "", false
-	}
-	return repo, runName, true
-}
-
 // namesToWindowNames converts a list of "repo:run-name" positional args into
 // their corresponding tmux window names.
 func namesToWindowNames(names []string) ([]string, error) {
@@ -50,20 +40,14 @@ func namesToWindowNames(names []string) ([]string, error) {
 	return out, nil
 }
 
-// windowLabels maps every tmux window name derivable from cfg back to its
-// "repo:run-name" label (the CLI arg form). Config validation guarantees the
-// window names are unique, so the mapping is unambiguous.
-func windowLabels(cfg *config.ReposConfig) map[string]string {
-	m := make(map[string]string)
-	if cfg == nil {
-		return m
+// parsePairLabel splits a "repo:run-name" positional argument into its two
+// parts.
+func parsePairLabel(label string) (repo, runName string, ok bool) {
+	repo, runName, found := strings.Cut(label, ":")
+	if !found || repo == "" || runName == "" {
+		return "", "", false
 	}
-	for _, r := range cfg.Repos {
-		for _, run := range r.Run {
-			m[windowName(r.Name, run.Name)] = r.Name + ":" + run.Name
-		}
-	}
-	return m
+	return repo, runName, true
 }
 
 // pickerItems converts running window names into picker rows, showing the
@@ -109,6 +93,22 @@ func uniqueStrings(ss []string) []string {
 		}
 	}
 	return out
+}
+
+// windowLabels maps every tmux window name derivable from cfg back to its
+// "repo:run-name" label (the CLI arg form). Config validation guarantees the
+// window names are unique, so the mapping is unambiguous.
+func windowLabels(cfg *config.ReposConfig) map[string]string {
+	m := make(map[string]string)
+	if cfg == nil {
+		return m
+	}
+	for _, r := range cfg.Repos {
+		for _, run := range r.Run {
+			m[windowName(r.Name, run.Name)] = r.Name + ":" + run.Name
+		}
+	}
+	return m
 }
 
 // windowsNamed returns every window called name. Normally at most one, but a

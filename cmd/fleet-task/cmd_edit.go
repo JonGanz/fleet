@@ -10,6 +10,22 @@ import (
 	"github.com/JonGanz/fleet/internal/taskstate"
 )
 
+// editOpts holds `fleet-task edit`'s arguments. Giving --add or --remove
+// switches to flag mode: no pickers, and patches for added repos come from
+// --skip-patch/--no-patches (default: all of them).
+type editOpts struct {
+	Ticket      string
+	Add         []string
+	Remove      []string
+	SkipPatches []string
+	NoPatches   bool
+	Force       bool // skip the uncommitted-changes guard on removals
+	// BranchMode says what to do with removed repos' local branches
+	// (branchAuto, branchKeep or branchDelete).
+	BranchMode string
+	JSON       bool
+}
+
 // availableRepoNames returns cfg's repo names that aren't already attached
 // to the task (per attached, its current taskstate.Repo list), preserving
 // repos.yaml's ordering -- the candidate list for `edit`'s add-repo picker.
@@ -25,22 +41,6 @@ func availableRepoNames(cfg *config.ReposConfig, attached []taskstate.Repo) []st
 		}
 	}
 	return available
-}
-
-// editOpts holds `fleet-task edit`'s arguments. Giving --add or --remove
-// switches to flag mode: no pickers, and patches for added repos come from
-// --skip-patch/--no-patches (default: all of them).
-type editOpts struct {
-	Ticket      string
-	Add         []string
-	Remove      []string
-	SkipPatches []string
-	NoPatches   bool
-	Force       bool // skip the uncommitted-changes guard on removals
-	// BranchMode says what to do with removed repos' local branches
-	// (branchAuto, branchKeep or branchDelete).
-	BranchMode string
-	JSON       bool
 }
 
 // cmdEdit lets an already-created task's repo list grow or shrink: repos
@@ -176,22 +176,6 @@ func cmdEdit(o editOpts) error {
 	return nil
 }
 
-// reposNamed returns the entries of repos whose name is in names, in
-// repos' order.
-func reposNamed(repos []taskstate.Repo, names []string) []taskstate.Repo {
-	want := make(map[string]bool, len(names))
-	for _, n := range names {
-		want[n] = true
-	}
-	var picked []taskstate.Repo
-	for _, r := range repos {
-		if want[r.Repo] {
-			picked = append(picked, r)
-		}
-	}
-	return picked
-}
-
 // countEditResults tallies successful adds, successful removals and
 // failures.
 func countEditResults(results []repoResult) (added, removed, failures int) {
@@ -208,34 +192,21 @@ func countEditResults(results []repoResult) (added, removed, failures int) {
 	return added, removed, failures
 }
 
-// selectEditRepos shows the add and remove repo pickers and returns the
-// chosen repo names. An empty selection is a common, valid answer on both
-// (you may only be here to remove a repo and add none, or vice versa), so
-// CursorFallback is off: a bare enter with nothing checked confirms "nothing"
-// rather than whatever repo the cursor happens to be on.
-func selectEditRepos(cfg *config.ReposConfig, ticket string, st *taskstate.State) (toAdd, toRemove []string, err error) {
-	attachedNames := make([]string, len(st.Repos))
-	for i, r := range st.Repos {
-		attachedNames[i] = r.Repo
+// editAddPhase sets up worktrees for the selected repos (same per-repo setup
+// as `new`, using the task's existing description so branch names stay
+// consistent with the repos added at `new` time); addRepos appends each
+// success to st.Repos and persists it immediately. Returns one result per
+// repo attempted.
+func editAddPhase(cfg *config.ReposConfig, st *taskstate.State, tf string, toAdd []string, patchesByRepo map[string][]string) ([]repoResult, error) {
+	if len(toAdd) == 0 {
+		return nil, nil
 	}
-
-	toAdd, err = picker.Run(picker.Options{
-		Title: fmt.Sprintf("%s: select repos to add", ticket),
-		Items: availableRepoNames(cfg, st.Repos),
-		Multi: true,
-	})
+	wtRoot, err := worktreeRoot(cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("add-repo selection: %w", err)
+		return nil, err
 	}
-	toRemove, err = picker.Run(picker.Options{
-		Title: fmt.Sprintf("%s: select repos to remove", ticket),
-		Items: attachedNames,
-		Multi: true,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("remove-repo selection: %w", err)
-	}
-	return toAdd, toRemove, nil
+	results, _, err := addRepos(cfg, st, tf, wtRoot, toAdd, patchesByRepo)
+	return results, err
 }
 
 // editRemovePhase removes the selected repos' worktrees, updating st.Repos
@@ -280,21 +251,50 @@ func editRemovePhase(cfg *config.ReposConfig, ticket, tf string, st *taskstate.S
 	return results, nil
 }
 
-// editAddPhase sets up worktrees for the selected repos (same per-repo setup
-// as `new`, using the task's existing description so branch names stay
-// consistent with the repos added at `new` time); addRepos appends each
-// success to st.Repos and persists it immediately. Returns one result per
-// repo attempted.
-func editAddPhase(cfg *config.ReposConfig, st *taskstate.State, tf string, toAdd []string, patchesByRepo map[string][]string) ([]repoResult, error) {
-	if len(toAdd) == 0 {
-		return nil, nil
+// reposNamed returns the entries of repos whose name is in names, in
+// repos' order.
+func reposNamed(repos []taskstate.Repo, names []string) []taskstate.Repo {
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
 	}
-	wtRoot, err := worktreeRoot(cfg)
+	var picked []taskstate.Repo
+	for _, r := range repos {
+		if want[r.Repo] {
+			picked = append(picked, r)
+		}
+	}
+	return picked
+}
+
+// selectEditRepos shows the add and remove repo pickers and returns the
+// chosen repo names. An empty selection is a common, valid answer on both
+// (you may only be here to remove a repo and add none, or vice versa), so
+// CursorFallback is off: a bare enter with nothing checked confirms "nothing"
+// rather than whatever repo the cursor happens to be on.
+func selectEditRepos(cfg *config.ReposConfig, ticket string, st *taskstate.State) (toAdd, toRemove []string, err error) {
+	attachedNames := make([]string, len(st.Repos))
+	for i, r := range st.Repos {
+		attachedNames[i] = r.Repo
+	}
+
+	toAdd, err = picker.Run(picker.Options{
+		Title: fmt.Sprintf("%s: select repos to add", ticket),
+		Items: availableRepoNames(cfg, st.Repos),
+		Multi: true,
+	})
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("add-repo selection: %w", err)
 	}
-	results, _, err := addRepos(cfg, st, tf, wtRoot, toAdd, patchesByRepo)
-	return results, err
+	toRemove, err = picker.Run(picker.Options{
+		Title: fmt.Sprintf("%s: select repos to remove", ticket),
+		Items: attachedNames,
+		Multi: true,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("remove-repo selection: %w", err)
+	}
+	return toAdd, toRemove, nil
 }
 
 // validateEditFlags checks --add/--remove against repos.yaml and the task:

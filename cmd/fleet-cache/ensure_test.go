@@ -24,6 +24,16 @@ func TestAlreadyLinkedMatchesWrittenMarker(t *testing.T) {
 	}
 }
 
+func TestAlreadyLinkedMissingTargetDir(t *testing.T) {
+	// Target doesn't even exist yet -- reading the marker should just fail
+	// closed (not already linked), not panic.
+	target := filepath.Join(t.TempDir(), "node_modules")
+
+	if alreadyLinked(target, "abc123") {
+		t.Error("alreadyLinked: expected false when target dir doesn't exist")
+	}
+}
+
 func TestAlreadyLinkedNoMarker(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "node_modules")
 	if err := os.MkdirAll(target, 0o755); err != nil {
@@ -32,15 +42,5 @@ func TestAlreadyLinkedNoMarker(t *testing.T) {
 
 	if alreadyLinked(target, "abc123") {
 		t.Error("alreadyLinked: expected false when no marker file exists")
-	}
-}
-
-func TestAlreadyLinkedMissingTargetDir(t *testing.T) {
-	// Target doesn't even exist yet -- reading the marker should just fail
-	// closed (not already linked), not panic.
-	target := filepath.Join(t.TempDir(), "node_modules")
-
-	if alreadyLinked(target, "abc123") {
-		t.Error("alreadyLinked: expected false when target dir doesn't exist")
 	}
 }

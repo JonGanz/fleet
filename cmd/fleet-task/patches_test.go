@@ -47,6 +47,34 @@ const unifiedNoGit = `--- a/one.txt	2026-01-01 00:00:00
 +++ /dev/null
 `
 
+func TestListPatches(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("FLEET_CONFIG_DIR", cfgDir)
+	dir := filepath.Join(cfgDir, "patches", "api")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "b.patch"), []byte(plainGitDiff), 0o644)
+	os.WriteFile(filepath.Join(dir, "a.patch"), []byte(formatPatch), 0o644)
+	os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("ignored"), 0o644)
+
+	got, err := listPatches("api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Name != "a.patch" || got[1].Name != "b.patch" {
+		t.Fatalf("listPatches = %+v, want a.patch then b.patch", got)
+	}
+	if got[1].Summary != "Disable telemetry for local dev" || got[1].Repo != "api" {
+		t.Errorf("b.patch info = %+v", got[1])
+	}
+
+	none, err := listPatches("no-such-repo")
+	if err != nil || len(none) != 0 {
+		t.Errorf("missing patches dir: got %v, %v; want empty, nil", none, err)
+	}
+}
+
 func TestParsePatchFiles(t *testing.T) {
 	cases := map[string][]string{
 		formatPatch:  {"src/config.ts", "renamed.txt"},
@@ -73,34 +101,6 @@ func TestParsePatchSummary(t *testing.T) {
 		if got := parsePatchSummary(content); got != want {
 			t.Errorf("parsePatchSummary(%.30q) = %q, want %q", content, got, want)
 		}
-	}
-}
-
-func TestListPatches(t *testing.T) {
-	cfgDir := t.TempDir()
-	t.Setenv("FLEET_CONFIG_DIR", cfgDir)
-	dir := filepath.Join(cfgDir, "patches", "api")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	os.WriteFile(filepath.Join(dir, "b.patch"), []byte(plainGitDiff), 0o644)
-	os.WriteFile(filepath.Join(dir, "a.patch"), []byte(formatPatch), 0o644)
-	os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("ignored"), 0o644)
-
-	got, err := listPatches("api")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 || got[0].Name != "a.patch" || got[1].Name != "b.patch" {
-		t.Fatalf("listPatches = %+v, want a.patch then b.patch", got)
-	}
-	if got[1].Summary != "Disable telemetry for local dev" || got[1].Repo != "api" {
-		t.Errorf("b.patch info = %+v", got[1])
-	}
-
-	none, err := listPatches("no-such-repo")
-	if err != nil || len(none) != 0 {
-		t.Errorf("missing patches dir: got %v, %v; want empty, nil", none, err)
 	}
 }
 

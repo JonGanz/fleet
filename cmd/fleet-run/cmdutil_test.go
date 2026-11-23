@@ -5,6 +5,21 @@ import (
 	"testing"
 )
 
+func TestParseFlagsDoubleDash(t *testing.T) {
+	fs := newFlagSet("stop")
+	all := fs.Bool("all", false, "")
+	pos, err := parseFlags(fs, "usage", []string{"--", "--all", "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *all {
+		t.Error("--all after -- should be positional")
+	}
+	if want := []string{"--all", "x"}; !reflect.DeepEqual(pos, want) {
+		t.Errorf("pos = %v, want %v", pos, want)
+	}
+}
+
 func TestParseFlagsInterspersed(t *testing.T) {
 	fs := newFlagSet("stop")
 	all := fs.Bool("all", false, "")
@@ -17,21 +32,6 @@ func TestParseFlagsInterspersed(t *testing.T) {
 		t.Errorf("all=%v ticket=%q", *all, *ticket)
 	}
 	if want := []string{"backend:api", "web:dev"}; !reflect.DeepEqual(pos, want) {
-		t.Errorf("pos = %v, want %v", pos, want)
-	}
-}
-
-func TestParseFlagsDoubleDash(t *testing.T) {
-	fs := newFlagSet("stop")
-	all := fs.Bool("all", false, "")
-	pos, err := parseFlags(fs, "usage", []string{"--", "--all", "x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if *all {
-		t.Error("--all after -- should be positional")
-	}
-	if want := []string{"--all", "x"}; !reflect.DeepEqual(pos, want) {
 		t.Errorf("pos = %v, want %v", pos, want)
 	}
 }

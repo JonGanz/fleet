@@ -32,16 +32,6 @@ func alignColumns(rows [][]string) []string {
 	return strings.Split(out, "\n")
 }
 
-// rmEntryLines renders tasks as column-aligned "TICKET  DESCRIPTION" rows
-// for the interactive ticket picker (see pickTicket).
-func rmEntryLines(tasks []*taskstate.State) []string {
-	rows := make([][]string, len(tasks))
-	for i, t := range tasks {
-		rows[i] = []string{t.Ticket, t.Description}
-	}
-	return alignColumns(rows)
-}
-
 // jumpEntryLines renders jump entries as column-aligned
 // "TICKET  REPO  PATH" rows.
 func jumpEntryLines(entries []jumpEntry) []string {
@@ -50,19 +40,6 @@ func jumpEntryLines(entries []jumpEntry) []string {
 		rows[i] = []string{e.Ticket, e.Repo, e.WorktreePath}
 	}
 	return alignColumns(rows)
-}
-
-// selectOneLine shows a single-select picker over lines and returns the
-// chosen one.
-func selectOneLine(lines []string) (string, error) {
-	selected, err := picker.Run(picker.Options{Items: lines, CursorFallback: true})
-	if err != nil {
-		return "", err
-	}
-	if len(selected) == 0 {
-		return "", fmt.Errorf("no selection made")
-	}
-	return selected[0], nil
 }
 
 // pickTicket shows an interactive picker over every existing task, for
@@ -96,4 +73,27 @@ func pickTicket() (string, error) {
 		return "", fmt.Errorf("internal error: selection %q not found", chosen)
 	}
 	return ticket, nil
+}
+
+// rmEntryLines renders tasks as column-aligned "TICKET  DESCRIPTION" rows
+// for the interactive ticket picker (see pickTicket).
+func rmEntryLines(tasks []*taskstate.State) []string {
+	rows := make([][]string, len(tasks))
+	for i, t := range tasks {
+		rows[i] = []string{t.Ticket, t.Description}
+	}
+	return alignColumns(rows)
+}
+
+// selectOneLine shows a single-select picker over lines and returns the
+// chosen one.
+func selectOneLine(lines []string) (string, error) {
+	selected, err := picker.Run(picker.Options{Items: lines, CursorFallback: true})
+	if err != nil {
+		return "", err
+	}
+	if len(selected) == 0 {
+		return "", fmt.Errorf("no selection made")
+	}
+	return selected[0], nil
 }

@@ -10,17 +10,34 @@ import (
 	"time"
 )
 
-func TestListCacheMissingDir(t *testing.T) {
-	r, err := listCache(filepath.Join(t.TempDir(), "node-cache"), time.Now())
-	if err != nil || len(r.Entries) != 0 {
-		t.Fatalf("missing node-cache: %+v %v", r, err)
+func TestFormatSize(t *testing.T) {
+	cases := map[int64]string{
+		0:                "0 B",
+		1023:             "1023 B",
+		1024:             "1.0 KiB",
+		1536:             "1.5 KiB",
+		5 * 1024 * 1024:  "5.0 MiB",
+		3 << 30:          "3.0 GiB",
+		2048 * (1 << 40): "2048.0 TiB",
 	}
-	var buf bytes.Buffer
-	if err := printListReport(&buf, r, true); err != nil {
+	for n, want := range cases {
+		if got := formatSize(n); got != want {
+			t.Errorf("formatSize(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+func TestListCacheIsReadOnly(t *testing.T) {
+	nc := filepath.Join(t.TempDir(), "node-cache")
+	old := filepath.Join(nc, "ddd.tmp-2")
+	os.MkdirAll(old, 0o755)
+	past := time.Now().Add(-48 * time.Hour)
+	os.Chtimes(old, past, past)
+	if _, err := listCache(nc, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(buf.String(), `"entries": []`) {
-		t.Errorf("empty entries should be [] not null: %s", buf.String())
+	if _, err := os.Stat(old); err != nil {
+		t.Fatal("list must not remove anything")
 	}
 }
 
@@ -88,33 +105,16 @@ func TestListCacheKindsAndSizes(t *testing.T) {
 	}
 }
 
-func TestListCacheIsReadOnly(t *testing.T) {
-	nc := filepath.Join(t.TempDir(), "node-cache")
-	old := filepath.Join(nc, "ddd.tmp-2")
-	os.MkdirAll(old, 0o755)
-	past := time.Now().Add(-48 * time.Hour)
-	os.Chtimes(old, past, past)
-	if _, err := listCache(nc, time.Now()); err != nil {
+func TestListCacheMissingDir(t *testing.T) {
+	r, err := listCache(filepath.Join(t.TempDir(), "node-cache"), time.Now())
+	if err != nil || len(r.Entries) != 0 {
+		t.Fatalf("missing node-cache: %+v %v", r, err)
+	}
+	var buf bytes.Buffer
+	if err := printListReport(&buf, r, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(old); err != nil {
-		t.Fatal("list must not remove anything")
-	}
-}
-
-func TestFormatSize(t *testing.T) {
-	cases := map[int64]string{
-		0:                "0 B",
-		1023:             "1023 B",
-		1024:             "1.0 KiB",
-		1536:             "1.5 KiB",
-		5 * 1024 * 1024:  "5.0 MiB",
-		3 << 30:          "3.0 GiB",
-		2048 * (1 << 40): "2048.0 TiB",
-	}
-	for n, want := range cases {
-		if got := formatSize(n); got != want {
-			t.Errorf("formatSize(%d) = %q, want %q", n, got, want)
-		}
+	if !strings.Contains(buf.String(), `"entries": []`) {
+		t.Errorf("empty entries should be [] not null: %s", buf.String())
 	}
 }

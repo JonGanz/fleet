@@ -64,35 +64,37 @@ type TooNewError struct {
 	Version int
 }
 
-// Error explains the mismatch and the remedy.
-func (e *TooNewError) Error() string {
-	return fmt.Sprintf("%s has schema_version %d, but this fleet only understands up to %d; upgrade fleet to use it", e.Path, e.Version, SchemaVersion)
+// List reads every state file in dir (see Read) and returns them sorted by
+// ticket. A file that can't be read -- unparsable, or written by a newer
+// fleet -- is skipped with a warning rather than aborting the listing.
+func List(dir string) ([]*State, error) {
+	files, err := ListFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	tasks := make([]*State, 0, len(files))
+	for _, f := range files {
+		st, err := Read(f)
+		if err != nil {
+			cli.Warnf("skipping %s: %v", f, err)
+			continue
+		}
+		tasks = append(tasks, st)
+	}
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].Ticket < tasks[j].Ticket })
+	return tasks, nil
 }
 
-// Write marshals st to JSON, stamped with SchemaVersion, and writes it to
-// path via a temp file + rename, so readers never see a half-written file.
-// fleet-task callers must hold the ticket's lock for their whole
-// read-modify-write cycle; taking a lock here, around the write alone,
-// would not stop two commands from losing each other's updates.
-func Write(path string, st *State) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
-	}
-
-	data, err := json.MarshalIndent(file{SchemaVersion: SchemaVersion, State: st}, "", "  ")
+// ListFiles globs <dir>/*.json and returns the matching paths, sorted for
+// deterministic output. "What tickets exist" is always derived this way,
+// never from a single aggregate file.
+func ListFiles(dir string) ([]string, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	if err != nil {
-		return fmt.Errorf("marshal task state: %w", err)
+		return nil, err
 	}
-	data = append(data, '\n')
-
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
-	}
-	return nil
+	sort.Strings(matches)
+	return matches, nil
 }
 
 // Parse parses a state file's JSON content already read into memory. A
@@ -114,6 +116,15 @@ func Parse(data []byte) (*State, error) {
 		return nil, &TooNewError{Version: f.SchemaVersion}
 	}
 	return f.State, nil
+}
+
+// Path returns <dir>/<ticket>.json after validating the ticket id (see
+// ValidateTicket), so an id from user input can never escape dir.
+func Path(dir, ticket string) (string, error) {
+	if err := ValidateTicket(ticket); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, ticket+".json"), nil
 }
 
 // Read reads and parses the state file at path. The ticket id is taken from
@@ -141,52 +152,15 @@ func Read(path string) (*State, error) {
 	return st, nil
 }
 
-// ListFiles globs <dir>/*.json and returns the matching paths, sorted for
-// deterministic output. "What tickets exist" is always derived this way,
-// never from a single aggregate file.
-func ListFiles(dir string) ([]string, error) {
-	matches, err := filepath.Glob(filepath.Join(dir, "*.json"))
-	if err != nil {
-		return nil, err
-	}
-	sort.Strings(matches)
-	return matches, nil
-}
-
-// List reads every state file in dir (see Read) and returns them sorted by
-// ticket. A file that can't be read -- unparsable, or written by a newer
-// fleet -- is skipped with a warning rather than aborting the listing.
-func List(dir string) ([]*State, error) {
-	files, err := ListFiles(dir)
-	if err != nil {
-		return nil, err
-	}
-	tasks := make([]*State, 0, len(files))
-	for _, f := range files {
-		st, err := Read(f)
-		if err != nil {
-			cli.Warnf("skipping %s: %v", f, err)
-			continue
-		}
-		tasks = append(tasks, st)
-	}
-	sort.Slice(tasks, func(i, j int) bool { return tasks[i].Ticket < tasks[j].Ticket })
-	return tasks, nil
-}
-
-// Path returns <dir>/<ticket>.json after validating the ticket id (see
-// ValidateTicket), so an id from user input can never escape dir.
-func Path(dir, ticket string) (string, error) {
-	if err := ValidateTicket(ticket); err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, ticket+".json"), nil
-}
-
 // TicketFromPath returns the ticket id a state file path names: its base
 // name without the .json suffix.
 func TicketFromPath(path string) string {
 	return strings.TrimSuffix(filepath.Base(path), ".json")
+}
+
+// Error explains the mismatch and the remedy.
+func (e *TooNewError) Error() string {
+	return fmt.Sprintf("%s has schema_version %d, but this fleet only understands up to %d; upgrade fleet to use it", e.Path, e.Version, SchemaVersion)
 }
 
 // ValidateTicket rejects ticket ids that can't safely become both a JSON
@@ -216,6 +190,32 @@ func ValidateTicket(ticket string) error {
 		if unicode.IsSpace(r) || unicode.IsControl(r) || r == utf8.RuneError {
 			return cli.Usagef("ticket id %q must not contain whitespace, control characters or invalid UTF-8", ticket)
 		}
+	}
+	return nil
+}
+
+// Write marshals st to JSON, stamped with SchemaVersion, and writes it to
+// path via a temp file + rename, so readers never see a half-written file.
+// fleet-task callers must hold the ticket's lock for their whole
+// read-modify-write cycle; taking a lock here, around the write alone,
+// would not stop two commands from losing each other's updates.
+func Write(path string, st *State) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+	}
+
+	data, err := json.MarshalIndent(file{SchemaVersion: SchemaVersion, State: st}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal task state: %w", err)
+	}
+	data = append(data, '\n')
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
 	}
 	return nil
 }

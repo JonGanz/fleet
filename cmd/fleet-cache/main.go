@@ -97,20 +97,6 @@ type stringSliceFlag struct {
 	values []string
 }
 
-func (s *stringSliceFlag) String() string {
-	return strings.Join(s.values, ",")
-}
-
-func (s *stringSliceFlag) Set(v string) error {
-	for _, part := range strings.Split(v, ",") {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			s.values = append(s.values, part)
-		}
-	}
-	return nil
-}
-
 // command describes one subcommand: its flags and positional argument.
 type command struct {
 	name string
@@ -162,6 +148,11 @@ var commands = []command{
 		root := fs.String("cache-root", "", "cache root (any WSL-visible path, including a Windows cache root); overrides $FLEET_CACHE_DIR")
 		return func([]string) error { return runList(stdout, *asJSON, *root) }
 	}},
+}
+
+func main() {
+	cli.SetProgram("fleet-cache")
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 // parseInterspersed parses args allowing flags before or after positional
@@ -249,6 +240,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return usageError(stderr, fmt.Sprintf("unknown command %q", name))
 }
 
+func (s *stringSliceFlag) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			s.values = append(s.values, part)
+		}
+	}
+	return nil
+}
+
+func (s *stringSliceFlag) String() string {
+	return strings.Join(s.values, ",")
+}
+
 // usageError prints msg as an error line, then the usage text, to stderr
 // and returns cli.ExitUsage.
 func usageError(stderr io.Writer, msg string) int {
@@ -256,9 +261,4 @@ func usageError(stderr io.Writer, msg string) int {
 	fmt.Fprintln(stderr)
 	fmt.Fprint(stderr, usage)
 	return cli.ExitUsage
-}
-
-func main() {
-	cli.SetProgram("fleet-cache")
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }

@@ -24,24 +24,6 @@ func TestFormatStatusEmpty(t *testing.T) {
 	}
 }
 
-func TestFormatStatusRunning(t *testing.T) {
-	st := Status{Session: "fleet", ActiveTicket: "A-1", Description: "do it", Windows: []string{"backend-api", "admin-ui-dev"}}
-	txt, err := formatStatus(st, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"A-1", "do it", "backend-api", "admin-ui-dev"} {
-		if !strings.Contains(txt, want) {
-			t.Errorf("text missing %q: %s", want, txt)
-		}
-	}
-	js, _ := formatStatus(st, true)
-	var back Status
-	if err := json.Unmarshal([]byte(js), &back); err != nil || back.ActiveTicket != "A-1" || len(back.Windows) != 2 {
-		t.Errorf("json round trip: %v %+v", err, back)
-	}
-}
-
 func TestFormatStatusMarksDeadPanes(t *testing.T) {
 	code := 3
 	st := Status{
@@ -58,6 +40,24 @@ func TestFormatStatusMarksDeadPanes(t *testing.T) {
 	js, _ := formatStatus(Status{Session: "fleet"}, true)
 	if !strings.Contains(js, `"panes": []`) {
 		t.Errorf("panes should be an empty array, got %s", js)
+	}
+}
+
+func TestFormatStatusRunning(t *testing.T) {
+	st := Status{Session: "fleet", ActiveTicket: "A-1", Description: "do it", Windows: []string{"backend-api", "admin-ui-dev"}}
+	txt, err := formatStatus(st, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"A-1", "do it", "backend-api", "admin-ui-dev"} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("text missing %q: %s", want, txt)
+		}
+	}
+	js, _ := formatStatus(st, true)
+	var back Status
+	if err := json.Unmarshal([]byte(js), &back); err != nil || back.ActiveTicket != "A-1" || len(back.Windows) != 2 {
+		t.Errorf("json round trip: %v %+v", err, back)
 	}
 }
 

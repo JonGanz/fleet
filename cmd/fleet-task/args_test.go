@@ -8,24 +8,6 @@ import (
 	"testing"
 )
 
-func TestParseCmdArgsInterspersed(t *testing.T) {
-	spec := cmdSpec{name: "x", synopsis: "x [a] [b]", maxPos: 2}
-	for _, args := range [][]string{
-		{"--json", "A", "B"},
-		{"A", "--json", "B"},
-		{"A", "B", "--json"},
-	} {
-		var js bool
-		pos, err := parseCmdArgs(spec, args, func(fs *flag.FlagSet) { fs.BoolVar(&js, "json", false, "") })
-		if err != nil {
-			t.Fatalf("%v: %v", args, err)
-		}
-		if !js || !reflect.DeepEqual(pos, []string{"A", "B"}) {
-			t.Errorf("%v: json=%v pos=%v", args, js, pos)
-		}
-	}
-}
-
 func TestParseCmdArgsDoubleDash(t *testing.T) {
 	spec := cmdSpec{name: "x", synopsis: "x [a]", maxPos: 2}
 	var js bool
@@ -58,5 +40,23 @@ func TestParseCmdArgsHelp(t *testing.T) {
 	_, err = parseCmdArgs(spec, []string{"-h"}, nil)
 	if !errors.Is(err, flag.ErrHelp) {
 		t.Errorf("-h: %v", err)
+	}
+}
+
+func TestParseCmdArgsInterspersed(t *testing.T) {
+	spec := cmdSpec{name: "x", synopsis: "x [a] [b]", maxPos: 2}
+	for _, args := range [][]string{
+		{"--json", "A", "B"},
+		{"A", "--json", "B"},
+		{"A", "B", "--json"},
+	} {
+		var js bool
+		pos, err := parseCmdArgs(spec, args, func(fs *flag.FlagSet) { fs.BoolVar(&js, "json", false, "") })
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		if !js || !reflect.DeepEqual(pos, []string{"A", "B"}) {
+			t.Errorf("%v: json=%v pos=%v", args, js, pos)
+		}
 	}
 }

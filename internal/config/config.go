@@ -36,13 +36,6 @@ type RepoConfig struct {
 	Run            []RunConfig `yaml:"run"`
 }
 
-// IsWindows reports whether this repo is runtime: windows: its git
-// operations and run commands go through Windows-native processes via
-// powershell.exe rather than running directly in WSL/Linux.
-func (r *RepoConfig) IsWindows() bool {
-	return r.Runtime == "windows"
-}
-
 // TmuxConfig is the tmux section of repos.yaml (used by fleet-run).
 type TmuxConfig struct {
 	SessionName string `yaml:"session_name"`
@@ -93,31 +86,6 @@ type ReposConfig struct {
 	Repos               []RepoConfig   `yaml:"repos"`
 }
 
-// applyDefaults fills any repo field left blank in repos.yaml with the
-// top-level `defaults` values: default_branch falls back directly, base
-// falls back to <base_root>/<repo-name> when the repo omits `base`, for
-// runtime: windows repos, windows_base falls back to
-// <windows_base_root>/<repo-name> the same way, and branch_template falls
-// back directly (further defaulting to "{ticket}" in fleet-task's
-// branchName if still unset after this, i.e. a plain-ticket branch).
-func (c *ReposConfig) applyDefaults() {
-	for i := range c.Repos {
-		r := &c.Repos[i]
-		if r.DefaultBranch == "" {
-			r.DefaultBranch = c.Defaults.DefaultBranch
-		}
-		if r.BranchTemplate == "" {
-			r.BranchTemplate = c.Defaults.BranchTemplate
-		}
-		if r.Runtime != "windows" && r.Base == "" && c.Defaults.BaseRoot != "" {
-			r.Base = path.Join(c.Defaults.BaseRoot, r.Name)
-		}
-		if r.Runtime == "windows" && r.WindowsBase == "" && c.Defaults.WindowsBaseRoot != "" {
-			r.WindowsBase = path.Join(c.Defaults.WindowsBaseRoot, r.Name)
-		}
-	}
-}
-
 // Load reads, parses and validates repos.yaml from configPath. Errors name
 // the file.
 func Load(configPath string) (*ReposConfig, error) {
@@ -156,6 +124,52 @@ func parse(data []byte) (*ReposConfig, error) {
 	}
 	cfg.applyDefaults()
 	return &cfg, nil
+}
+
+// parseTimeout parses a repos.yaml timeout: a Go duration string, positive
+// and at most MaxTimeout. "0" is rejected rather than read as "no limit": a
+// hung hook or fetch blocking an agent forever is what the limit is for.
+func parseTimeout(field, value string) (time.Duration, error) {
+	d, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("%s %q is not a duration (use a Go duration such as 90s, 5m or 1h30m)", field, value)
+	}
+	if d <= 0 || d > MaxTimeout {
+		return 0, fmt.Errorf("%s %q must be more than 0 and at most %s", field, value, MaxTimeout)
+	}
+	return d, nil
+}
+
+// IsWindows reports whether this repo is runtime: windows: its git
+// operations and run commands go through Windows-native processes via
+// powershell.exe rather than running directly in WSL/Linux.
+func (r *RepoConfig) IsWindows() bool {
+	return r.Runtime == "windows"
+}
+
+// applyDefaults fills any repo field left blank in repos.yaml with the
+// top-level `defaults` values: default_branch falls back directly, base
+// falls back to <base_root>/<repo-name> when the repo omits `base`, for
+// runtime: windows repos, windows_base falls back to
+// <windows_base_root>/<repo-name> the same way, and branch_template falls
+// back directly (further defaulting to "{ticket}" in fleet-task's
+// branchName if still unset after this, i.e. a plain-ticket branch).
+func (c *ReposConfig) applyDefaults() {
+	for i := range c.Repos {
+		r := &c.Repos[i]
+		if r.DefaultBranch == "" {
+			r.DefaultBranch = c.Defaults.DefaultBranch
+		}
+		if r.BranchTemplate == "" {
+			r.BranchTemplate = c.Defaults.BranchTemplate
+		}
+		if r.Runtime != "windows" && r.Base == "" && c.Defaults.BaseRoot != "" {
+			r.Base = path.Join(c.Defaults.BaseRoot, r.Name)
+		}
+		if r.Runtime == "windows" && r.WindowsBase == "" && c.Defaults.WindowsBaseRoot != "" {
+			r.WindowsBase = path.Join(c.Defaults.WindowsBaseRoot, r.Name)
+		}
+	}
 }
 
 // FindRepo returns the RepoConfig with the given name, or nil if not found
@@ -200,33 +214,6 @@ func (c *ReposConfig) RepoNames() []string {
 	return names
 }
 
-// parseTimeout parses a repos.yaml timeout: a Go duration string, positive
-// and at most MaxTimeout. "0" is rejected rather than read as "no limit": a
-// hung hook or fetch blocking an agent forever is what the limit is for.
-func parseTimeout(field, value string) (time.Duration, error) {
-	d, err := time.ParseDuration(strings.TrimSpace(value))
-	if err != nil {
-		return 0, fmt.Errorf("%s %q is not a duration (use a Go duration such as 90s, 5m or 1h30m)", field, value)
-	}
-	if d <= 0 || d > MaxTimeout {
-		return 0, fmt.Errorf("%s %q must be more than 0 and at most %s", field, value, MaxTimeout)
-	}
-	return d, nil
-}
-
-// timeoutOrDefault is the parsed value, or def when it is empty (or, which
-// Load prevents, invalid).
-func timeoutOrDefault(value string, def time.Duration) time.Duration {
-	if value == "" {
-		return def
-	}
-	d, err := parseTimeout("", value)
-	if err != nil {
-		return def
-	}
-	return d
-}
-
 // validate rejects repo entries no fleet tool can use safely: a repo name
 // becomes a directory component (<worktree_root>/<ticket>/<repo>, the
 // patches dir, base_root/<repo>) and a lookup key, so it must be non-empty,
@@ -261,4 +248,17 @@ func (c *ReposConfig) validate() error {
 		}
 	}
 	return nil
+}
+
+// timeoutOrDefault is the parsed value, or def when it is empty (or, which
+// Load prevents, invalid).
+func timeoutOrDefault(value string, def time.Duration) time.Duration {
+	if value == "" {
+		return def
+	}
+	d, err := parseTimeout("", value)
+	if err != nil {
+		return def
+	}
+	return d
 }

@@ -69,21 +69,6 @@ func isPatchBodyStart(line string) bool {
 		strings.HasPrefix(line, "Index: ")
 }
 
-// listPatchPaths returns the sorted paths of <config dir>/patches/<repo>/*.patch.
-// A missing patches dir yields no patches, not an error.
-func listPatchPaths(repo string) ([]string, error) {
-	dir, err := xdg.PatchesDir(repo)
-	if err != nil {
-		return nil, err
-	}
-	matches, err := filepath.Glob(filepath.Join(dir, "*.patch"))
-	if err != nil {
-		return nil, err
-	}
-	sort.Strings(matches)
-	return matches, nil
-}
-
 // listPatches describes every patch available for repo. A patch that can't
 // be read is reported with a warning and skipped rather than failing the
 // whole listing.
@@ -102,6 +87,21 @@ func listPatches(repo string) ([]patchInfo, error) {
 		infos = append(infos, info)
 	}
 	return infos, nil
+}
+
+// listPatchPaths returns the sorted paths of <config dir>/patches/<repo>/*.patch.
+// A missing patches dir yields no patches, not an error.
+func listPatchPaths(repo string) ([]string, error) {
+	dir, err := xdg.PatchesDir(repo)
+	if err != nil {
+		return nil, err
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "*.patch"))
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(matches)
+	return matches, nil
 }
 
 // parsePatchFiles returns the paths a patch touches, in order of first

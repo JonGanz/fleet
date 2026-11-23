@@ -40,14 +40,6 @@ func lastLines(captured string, n int) []string {
 	return lines
 }
 
-// trimTrailingBlank drops whitespace-only lines from the end.
-func trimTrailingBlank(lines []string) []string {
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return lines
-}
-
 // runLogs implements `fleet-run logs <repo:run-name> [--lines N] [--json]`.
 // Works on dead panes too (kept by remain-on-exit), which is how a crashed
 // app's output is read.
@@ -94,4 +86,12 @@ func runLogs(label string, lines int, asJSON bool) error {
 		fmt.Println(l)
 	}
 	return nil
+}
+
+// trimTrailingBlank drops whitespace-only lines from the end.
+func trimTrailingBlank(lines []string) []string {
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
