@@ -14,6 +14,9 @@ type TaskRepo struct {
 	Repo         string `json:"repo"`
 	Branch       string `json:"branch"`
 	WorktreePath string `json:"worktree_path"`
+	// Patches lists the patch filenames applied when the worktree was
+	// created. nil (JSON null) means unknown: the task predates this field.
+	Patches []string `json:"patches"`
 }
 
 // TaskState is the per-task state file shape: <state dir>/tasks/<ticket>.json.

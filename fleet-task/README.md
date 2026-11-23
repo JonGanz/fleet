@@ -11,9 +11,19 @@ conventions).
 
 ## Commands
 
-### `fleet-task new`
+### `fleet-task new [ticket] [-d <description>] [--repo <name>]... [--skip-patch <repo>:<name>]... [--no-patches] [--json]`
 
-Interactively:
+**Flag mode** (for scripts and agents): with a ticket and at least one
+`--repo` nothing is prompted. `--repo` is repeatable or comma-separated;
+`-d`/`--description` defaults to empty. Every available patch is applied to
+each repo — the same default as the picker's all-checked start — minus any
+`--skip-patch <repo>:<name>`, or none with `--no-patches`. Unknown repos or
+patch names are usage errors (exit 2) raised before anything is created.
+Applied patch names are recorded per repo in the state file. A patch that
+fails to apply is a warning, not a failure: it is listed in the `--json`
+result's `patch_errors` and left out of the recorded `patches`.
+
+**Interactively** (no `--repo`):
 
 1. Prompts for a ticket id and description. The ticket id is validated (no
    path separators, not `.`/`..`), and `new` **refuses a ticket that already
@@ -66,7 +76,37 @@ Globs `<state dir>/tasks/*.json` and prints a table of
 ticket/description/repo-count/created-at, or the raw JSON array with
 `--json`.
 
-### `fleet-task jump [ticket]`
+### `fleet-task show <ticket> [--json]`
+
+One task: description, created-at, whether `fleet-run` currently has it
+active, and per repo its branch, worktree path and applied patches. In the
+JSON (`{ticket, description, created_at, repos[{repo, branch, worktree_path,
+patches}], active}`), `patches` is `null` for tasks created before patches
+were recorded ("unknown") and `[]` when none were applied; the text table
+shows `?` and `-` respectively.
+
+### `fleet-task repos [--json]`
+
+Repos configured in `repos.yaml`: name, runtime, default branch, branch
+template, `fleet-run` targets (`run[{name, target: "<repo>:<name>", cmd}]`)
+and available patches (same objects as `fleet-task patches`).
+
+### `fleet-task patches [repo] [--json]`
+
+Patches under `<config dir>/patches/<repo>/*.patch` (every repo if none is
+given), each as `{repo, name, path, summary, files}`:
+
+- `summary` is the `Subject:` line of a `git format-patch` file (minus any
+  `[PATCH n/m]` tag), else the first non-blank line of free text before the
+  diff — `git apply` ignores that text, so a one-line description can be put
+  at the top of a plain `git diff` patch — else `""`.
+- `files` are the paths the patch touches, from its `diff --git` headers (or
+  `+++` lines for a plain unified diff).
+
+### `fleet-task jump [ticket] [--repo <name>]`
+
+With `--repo` (which requires a ticket), or whenever only one worktree
+matches, the path is printed without a picker.
 
 Globs `<state dir>/tasks/*.json`, flattens all (ticket, repo, worktree
 path) rows across every task, and lets you pick one via the same
@@ -85,9 +125,15 @@ source /path/to/fleet-task/contrib/fleet.sh
 fj   # select a worktree, cd into it
 ```
 
-### `fleet-task edit [ticket]`
+### `fleet-task edit [ticket] [--add <repo>]... [--remove <repo>]... [--skip-patch <repo>:<name>]... [--no-patches] [--json]`
 
-Lets an already-created task's repo list grow or shrink, without tearing
+**Flag mode**: `--add`/`--remove` (repeatable or comma-separated) replace the
+pickers. Added repos must be configured and not yet attached, removed repos
+must be attached, and no repo may be in both — otherwise a usage error
+(exit 2) before anything changes. Patches for added repos follow `new`'s
+flag-mode rules.
+
+Interactively, `edit` lets an already-created task's repo list grow or shrink, without tearing
 down and recreating the whole task:
 
 1. Loads the task's state file and `repos.yaml`, then shows two separate
@@ -120,7 +166,7 @@ add or remove failed, `edit` still attempts everything and saves the state,
 then exits 1. If nothing is selected it prints "no changes selected" on
 stdout and exits 0.
 
-### `fleet-task mv [old-ticket] [new-ticket]`
+### `fleet-task mv [old-ticket] [new-ticket] [--json]`
 
 Renames a ticket in place, without tearing down and recreating its
 worktrees:
@@ -153,7 +199,7 @@ Branch names are **not** renamed — they come from `branch_template` and
 aren't necessarily derived from the ticket at all (see "Design notes"
 above), so `TaskRepo.Branch` is left as-is.
 
-### `fleet-task rm [ticket]`
+### `fleet-task rm [ticket] [--json]`
 
 The ticket is optional: if omitted, a ticket picker is shown. Refuses if the
 ticket is currently active under `fleet-run`. Loads that ticket's state file,
@@ -180,10 +226,35 @@ parsing. Unknown flags are errors (`rm --json` is not read as a ticket).
 Every ticket id accepted from the command line is validated (no path
 separators, not `.`/`..`).
 
-Exit status is 0 on success and 1 on any failure, including *partial*
-failure: `new`, `edit` and `rm` all attempt every repo before exiting 1 if
-some failed. Fatal errors print `error: ...` and non-fatal ones
-`warning: ...` on stderr.
+Exit status is 0 on success, 1 on any operation failure, including *partial*
+failure (`new`, `edit` and `rm` all attempt every repo before exiting 1 if
+some failed), and **2 for a usage error or missing input**: bad flags,
+unknown repo/patch names, an existing ticket for `new`, or a value that would
+need a prompt when prompting isn't allowed. Fatal errors print `error: ...`
+and non-fatal ones `warning: ...` on stderr.
+
+**No terminal, no prompts.** If stdin is not a terminal (a pipe, `/dev/null`)
+or `FLEET_NO_INPUT=1` is set, no picker or prompt is ever opened — the
+pickers draw on `/dev/tty`, so without this an agent could open one on its
+user's terminal and hang. A missing value is an exit-2 error naming the flag
+or argument that supplies it.
+
+**`--json` on `new`, `edit`, `mv`, `rm`** prints one document on stdout
+(progress, hook and git output move to stderr), also when the command then
+exits 1:
+
+```json
+{"ticket": "PROJ-1", "renamed_from": "OLD-1", "ok": false,
+ "repos": [{"repo": "api", "action": "created", "ok": true, "branch": "PROJ-1",
+            "worktree_path": "...", "patches": ["local-env.patch"],
+            "patch_errors": ["broken.patch: ..."]},
+           {"repo": "ui", "action": "created", "ok": false, "error": "..."}]}
+```
+
+`action` is `created`, `removed`, `moved` or `skipped` (`mv` stops at the
+first failure; later repos are `skipped`). `renamed_from` appears only for
+`mv`, `patch_errors`/`error` only when non-empty. Usage errors (exit 2)
+happen before any work and print no JSON.
 
 ### Hooks
 

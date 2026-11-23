@@ -18,6 +18,9 @@ import (
 // the entered values in the same order as labels, or an error if the user
 // cancels (esc/ctrl-c).
 func promptForm(labels []string) ([]string, error) {
+	if !interactiveAllowed() {
+		return nil, usageErrorf("%s required and no terminal is available for a prompt; pass it as arguments/flags (see --help)", strings.Join(labels, ", "))
+	}
 	m := newFormModel(labels)
 
 	// Same /dev/tty wiring as select.go's runSelect, for the same reason:

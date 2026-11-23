@@ -5,8 +5,43 @@ import (
 	"os"
 )
 
-// runStop implements `fleet-run stop [--ticket <id>] [--all] [names...]`.
-func runStop(ticket string, all bool, names []string) error {
+// stopOpts are `fleet-run stop`'s parsed flags and arguments.
+type stopOpts struct {
+	all    bool
+	asJSON bool
+	names  []string // "repo:run-name" labels
+	ticket string
+}
+
+// StopReport is the `fleet-run stop --json` output.
+type StopReport struct {
+	OK bool `json:"ok"`
+	// Stopped, NotRunning and Failed hold window names.
+	Stopped    []string `json:"stopped"`
+	NotRunning []string `json:"not_running"`
+	Failed     []string `json:"failed"`
+	// ClearedActive is true when nothing was left running, so the
+	// active-ticket record was cleared.
+	ClearedActive bool `json:"cleared_active"`
+}
+
+// runStop implements `fleet-run stop [--ticket <id>] [--all]
+// [repo:run-name ...] [--json]`.
+func runStop(opts stopOpts) error {
+	if opts.all && len(opts.names) > 0 {
+		return usageErrorf("--all and explicit repo:run-name targets are mutually exclusive")
+	}
+	var named []string
+	if len(opts.names) > 0 {
+		var err error
+		if named, err = namesToWindowNames(opts.names); err != nil {
+			return &usageError{msg: err.Error()}
+		}
+	}
+	if !opts.all && len(named) == 0 && !interactiveAllowed() {
+		return inputRequiredError("no targets given; pass repo:run-name ... or --all (see `fleet-run status`)")
+	}
+
 	rf, err := reposFile()
 	if err != nil {
 		return err
@@ -20,37 +55,35 @@ func runStop(ticket string, all bool, names []string) error {
 		return err
 	}
 
-	if ticket != "" {
+	if opts.ticket != "" {
+		if err := validateTicket(opts.ticket); err != nil {
+			return err
+		}
 		active, hasActive, err := activeTicket()
 		if err != nil {
 			return err
 		}
-		if err := checkTicketMatchesActive(ticket, active, hasActive); err != nil {
+		if err := checkTicketMatchesActive(opts.ticket, active, hasActive); err != nil {
 			return err
 		}
 	}
 
+	report := StopReport{Stopped: []string{}, NotRunning: []string{}, Failed: []string{}}
 	windows, err := listWindows(session)
 	if err != nil {
 		return err
 	}
 	if len(windows) == 0 {
 		fmt.Fprintln(os.Stderr, "no windows currently running")
-		return nil
+		return finishStop(report, opts.asJSON)
 	}
 
 	var toKill []string
-
 	switch {
-	case all:
+	case opts.all:
 		toKill = windows
-
-	case len(names) > 0:
-		toKill, err = namesToWindowNames(names)
-		if err != nil {
-			return err
-		}
-
+	case len(named) > 0:
+		toKill = named
 	default:
 		// Show the same "repo:run" form the positional args take; window
 		// names themselves stay "repo-run".
@@ -64,7 +97,7 @@ func runStop(ticket string, all bool, names []string) error {
 
 	if len(toKill) == 0 {
 		fmt.Fprintln(os.Stderr, "nothing selected to stop")
-		return nil
+		return finishStop(report, opts.asJSON)
 	}
 
 	runningSet := make(map[string]bool, len(windows))
@@ -75,11 +108,14 @@ func runStop(ticket string, all bool, names []string) error {
 	for _, wname := range toKill {
 		if !runningSet[wname] {
 			fmt.Fprintf(os.Stderr, "warning: window %q is not running, skipping\n", wname)
+			report.NotRunning = append(report.NotRunning, wname)
 			continue
 		}
 		running = append(running, wname)
 	}
-	failed := killWindows(session, running)
+	stopped, failed := killWindows(session, running)
+	report.Stopped = append(report.Stopped, stopped...)
+	report.Failed = append(report.Failed, failed...)
 
 	remaining, err := listWindows(session)
 	if err != nil {
@@ -88,27 +124,41 @@ func runStop(ticket string, all bool, names []string) error {
 	if shouldClearActive(remaining) {
 		if err := clearActiveTicket(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: clearing active ticket record: %v\n", err)
+		} else {
+			report.ClearedActive = true
 		}
 	}
-	if failed > 0 {
-		return fmt.Errorf("%d window(s) failed to stop", failed)
+	return finishStop(report, opts.asJSON)
+}
+
+// finishStop prints report (with asJSON) and turns failures into an error.
+func finishStop(report StopReport, asJSON bool) error {
+	report.OK = len(report.Failed) == 0
+	if asJSON {
+		if err := printJSON(report); err != nil {
+			return err
+		}
+	}
+	if len(report.Failed) > 0 {
+		return fmt.Errorf("%d window(s) failed to stop", len(report.Failed))
 	}
 	return nil
 }
 
 // killWindows kills each named window, reporting progress on stderr, and
-// returns how many kills failed. Shared by `stop` and the switch path in
-// `start`.
-func killWindows(session string, names []string) (failed int) {
+// returns which kills succeeded and which failed. Shared by `stop` and the
+// switch path in `start`.
+func killWindows(session string, names []string) (stopped, failed []string) {
 	for _, wname := range names {
 		if err := killWindow(session, wname); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to kill window %q: %v\n", wname, err)
-			failed++
+			failed = append(failed, wname)
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "stopped %s\n", wname)
+		stopped = append(stopped, wname)
 	}
-	return failed
+	return stopped, failed
 }
 
 // killAllWindowsInSession kills every window currently in the session,
@@ -121,8 +171,8 @@ func killAllWindowsInSession(session string) error {
 	if err != nil {
 		return err
 	}
-	if failed := killWindows(session, windows); failed > 0 {
-		return fmt.Errorf("%d window(s) failed to stop while switching tickets", failed)
+	if _, failed := killWindows(session, windows); len(failed) > 0 {
+		return fmt.Errorf("%d window(s) failed to stop while switching tickets", len(failed))
 	}
 	return nil
 }

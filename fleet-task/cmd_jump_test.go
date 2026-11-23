@@ -45,3 +45,26 @@ func TestBuildJumpEntries(t *testing.T) {
 		t.Errorf("lines[0] = %q, missing expected fields", lines[0])
 	}
 }
+
+func TestFilterJumpEntries(t *testing.T) {
+	entries := []jumpEntry{{Ticket: "T", Repo: "api"}, {Ticket: "T", Repo: "ui"}}
+	got := filterJumpEntries(entries, "ui")
+	if len(got) != 1 || got[0].Repo != "ui" {
+		t.Errorf("filterJumpEntries = %v", got)
+	}
+	if got := filterJumpEntries(entries, "db"); len(got) != 0 {
+		t.Errorf("unknown repo should match nothing, got %v", got)
+	}
+}
+
+func TestFormatPatchList(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want string
+	}{{nil, "?"}, {[]string{}, "-"}, {[]string{"a.patch", "b.patch"}, "a.patch,b.patch"}}
+	for _, c := range cases {
+		if got := formatPatchList(c.in); got != c.want {
+			t.Errorf("formatPatchList(%#v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

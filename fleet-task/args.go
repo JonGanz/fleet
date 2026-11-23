@@ -40,7 +40,7 @@ func parseCmdArgs(spec cmdSpec, args []string, setup func(fs *flag.FlagSet)) ([]
 				printCmdUsage(os.Stdout, spec, fs)
 				return nil, flag.ErrHelp
 			}
-			return nil, fmt.Errorf("%w (see `fleet-task %s --help`)", err, spec.name)
+			return nil, usageErrorf("%v (see `fleet-task %s --help`)", err, spec.name)
 		}
 		remaining := fs.Args()
 		if len(remaining) == 0 {
@@ -56,7 +56,7 @@ func parseCmdArgs(spec cmdSpec, args []string, setup func(fs *flag.FlagSet)) ([]
 	}
 
 	if len(pos) > spec.maxPos {
-		return nil, fmt.Errorf("too many arguments: usage is `fleet-task %s` (see `fleet-task %s --help`)", spec.synopsis, spec.name)
+		return nil, usageErrorf("too many arguments: usage is `fleet-task %s` (see `fleet-task %s --help`)", spec.synopsis, spec.name)
 	}
 	return pos, nil
 }

@@ -26,8 +26,12 @@ func buildJumpEntries(tasks []*TaskState) []jumpEntry {
 }
 
 // cmdJump prints a chosen worktree path. If ticket is non-empty, the picker
-// is restricted to that ticket's repos.
-func cmdJump(ticket string) error {
+// is restricted to that ticket's repos; if repo is also given, or only one
+// worktree remains, the path is printed without a picker.
+func cmdJump(ticket, repo string) error {
+	if repo != "" && ticket == "" {
+		return usageErrorf("--repo requires a ticket: `fleet-task jump <ticket> --repo <name>`")
+	}
 	td, err := tasksDir()
 	if err != nil {
 		return err
@@ -54,8 +58,21 @@ func cmdJump(ticket string) error {
 	}
 
 	entries := buildJumpEntries(tasks)
+	if repo != "" {
+		entries = filterJumpEntries(entries, repo)
+		if len(entries) == 0 {
+			return fmt.Errorf("task %s has no repo %s (see `fleet-task show %s`)", ticket, repo, ticket)
+		}
+	}
 	if len(entries) == 0 {
 		return fmt.Errorf("no tasks found")
+	}
+	if len(entries) == 1 {
+		fmt.Println(entries[0].WorktreePath)
+		return nil
+	}
+	if !interactiveAllowed() {
+		return needInput("a worktree choice", "pass `fleet-task jump <ticket> --repo <name>`")
 	}
 
 	lines := jumpEntryLines(entries)
@@ -79,4 +96,15 @@ func cmdJump(ticket string) error {
 	//   fj() { local d; d=$(fleet-task jump) && cd "$d"; }
 	fmt.Println(entry.WorktreePath)
 	return nil
+}
+
+// filterJumpEntries keeps only entries for repo.
+func filterJumpEntries(entries []jumpEntry, repo string) []jumpEntry {
+	var kept []jumpEntry
+	for _, e := range entries {
+		if e.Repo == repo {
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }

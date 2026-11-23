@@ -12,7 +12,7 @@ import (
 // error including combined context on failure.
 func runGit(args ...string) error {
 	cmd := exec.Command("git", args...)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git %v: %w", args, err)
@@ -27,7 +27,7 @@ func runGit(args ...string) error {
 func runGitCapture(args ...string) error {
 	cmd := exec.Command("git", args...)
 	var stderr bytes.Buffer
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = out
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git %s: %w%s", strings.Join(args, " "), err, stderrSuffix(stderr.String()))

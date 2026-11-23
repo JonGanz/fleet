@@ -70,6 +70,9 @@ func listTaskFiles(dir string) ([]string, error) {
 // than one is an error asking the caller to pass --ticket explicitly.
 func resolveTicketState(tasksDirPath, ticket string) (*TaskState, error) {
 	if ticket != "" {
+		if err := validateTicket(ticket); err != nil {
+			return nil, err
+		}
 		path := filepath.Join(tasksDirPath, ticket+".json")
 		if _, err := os.Stat(path); err != nil {
 			return nil, fmt.Errorf("no task state found for ticket %q (expected %s): %w", ticket, path, err)
@@ -99,4 +102,14 @@ func ticketsFromFiles(files []string) []string {
 		tickets = append(tickets, strings.TrimSuffix(filepath.Base(f), ".json"))
 	}
 	return tickets
+}
+
+// validateTicket rejects ticket ids that can't be a task file name: empty,
+// "." / "..", or containing a path separator (which would otherwise let
+// --ticket point outside the tasks dir). Mirrors fleet-task's rule.
+func validateTicket(ticket string) error {
+	if ticket == "" || ticket == "." || ticket == ".." || strings.ContainsAny(ticket, `/\`) {
+		return usageErrorf("invalid ticket id %q (must be a plain name with no path separators)", ticket)
+	}
+	return nil
 }

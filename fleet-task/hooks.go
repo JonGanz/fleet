@@ -66,7 +66,7 @@ func runHooks(phase, ticket, repo, worktreeDir string) error {
 	for _, h := range hooks {
 		cmd := exec.Command(h)
 		cmd.Env = env
-		cmd.Stdout = os.Stdout
+		cmd.Stdout = out
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: hook %s failed: %v\n", h, err)

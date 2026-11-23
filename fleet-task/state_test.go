@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -15,8 +16,9 @@ func TestTaskStateRoundTrip(t *testing.T) {
 		Description: "Add retry logic to payment webhook",
 		CreatedAt:   time.Date(2026, 8, 2, 22, 58, 0, 0, time.UTC),
 		Repos: []TaskRepo{
-			{Repo: "backend", Branch: "PROJ-1234", WorktreePath: "/home/jon/.local/state/fleet/worktrees/PROJ-1234/backend"},
-			{Repo: "admin-ui", Branch: "PROJ-1234", WorktreePath: "/home/jon/.local/state/fleet/worktrees/PROJ-1234/admin-ui"},
+			{Repo: "backend", Branch: "PROJ-1234", WorktreePath: "/home/jon/.local/state/fleet/worktrees/PROJ-1234/backend", Patches: []string{"local-env.patch"}},
+			{Repo: "admin-ui", Branch: "PROJ-1234", WorktreePath: "/home/jon/.local/state/fleet/worktrees/PROJ-1234/admin-ui", Patches: []string{}},
+			{Repo: "legacy", Branch: "PROJ-1234", WorktreePath: "/home/jon/.local/state/fleet/worktrees/PROJ-1234/legacy"},
 		},
 	}
 
@@ -42,7 +44,9 @@ func TestTaskStateRoundTrip(t *testing.T) {
 		t.Fatalf("len(Repos) = %d, want %d", len(got.Repos), len(want.Repos))
 	}
 	for i := range want.Repos {
-		if got.Repos[i] != want.Repos[i] {
+		// reflect.DeepEqual distinguishes nil Patches (unknown, legacy) from
+		// an empty list (none applied); both must survive the round trip.
+		if !reflect.DeepEqual(got.Repos[i], want.Repos[i]) {
 			t.Errorf("Repos[%d] = %+v, want %+v", i, got.Repos[i], want.Repos[i])
 		}
 	}

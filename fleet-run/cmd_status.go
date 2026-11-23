@@ -12,12 +12,18 @@ type Status struct {
 	ActiveTicket string   `json:"active_ticket"`
 	Description  string   `json:"description"`
 	Windows      []string `json:"windows"`
+	// Panes carries per-window pane state; Windows is kept for
+	// compatibility with earlier consumers.
+	Panes []PaneInfo `json:"panes"`
 }
 
 // formatStatus renders st as indented JSON (asJSON) or human-readable text.
 func formatStatus(st Status, asJSON bool) (string, error) {
 	if st.Windows == nil {
 		st.Windows = []string{}
+	}
+	if st.Panes == nil {
+		st.Panes = []PaneInfo{}
 	}
 	if asJSON {
 		b, err := json.MarshalIndent(st, "", "  ")
@@ -44,9 +50,21 @@ func formatStatus(st Status, asJSON bool) (string, error) {
 	}
 	sb.WriteString("windows:\n")
 	for _, w := range st.Windows {
-		fmt.Fprintf(&sb, "  %s\n", w)
+		fmt.Fprintf(&sb, "  %s%s\n", w, paneStateSuffix(st.Panes, w))
 	}
 	return strings.TrimRight(sb.String(), "\n"), nil
+}
+
+// paneStateSuffix annotates a dead window in the text status output.
+func paneStateSuffix(panes []PaneInfo, window string) string {
+	pane, ok := findPane(panes, window)
+	if !ok || pane.Alive {
+		return ""
+	}
+	if pane.ExitStatus != nil {
+		return fmt.Sprintf("  (dead, exit %d; see `fleet-run logs`)", *pane.ExitStatus)
+	}
+	return "  (dead; see `fleet-run logs`)"
 }
 
 // runStatus implements `fleet-run status [--json]`. A missing tmux server is
@@ -77,7 +95,18 @@ func runStatus(asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	out, err := formatStatus(Status{Session: session, ActiveTicket: ticket, Description: desc, Windows: windows}, asJSON)
+	panes, err := listPanes(session)
+	if err != nil {
+		return err
+	}
+	st := Status{
+		Session:      session,
+		ActiveTicket: ticket,
+		Description:  desc,
+		Windows:      windows,
+		Panes:        labelPanes(panes, windowLabels(cfg)),
+	}
+	out, err := formatStatus(st, asJSON)
 	if err != nil {
 		return err
 	}

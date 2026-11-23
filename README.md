@@ -94,22 +94,30 @@ Source `fleet-task/contrib/fleet.sh` from your shell profile to get `fj`, which 
 Each tool's README has the full reference (flags, exit codes, behaviour).
 
 - **`fleet-task`** — [`fleet-task/README.md`](fleet-task/README.md)
-  - `new` — create a ticket's worktrees (prompts for ticket/description, repos, patches; runs hooks;
-    installs `node_modules` via `fleet-cache`)
-  - `list [--json]` — list tickets
-  - `jump [ticket]` — pick a worktree and print its path (use via `fj`)
-  - `edit [ticket]` — add or remove repos of an existing ticket
+  - `new [ticket]` — create a ticket's worktrees (prompts, or `--repo`/`-d`/`--skip-patch` flags;
+    runs hooks; installs `node_modules` via `fleet-cache`)
+  - `list` / `show <ticket>` — list tickets / show one ticket's repos, branches, paths, patches
+  - `repos` / `patches [repo]` — configured repos and run targets / available patches with summaries
+  - `jump [ticket] [--repo <name>]` — print a worktree path (use via `fj`)
+  - `edit [ticket]` — add or remove repos (pickers, or `--add`/`--remove`)
   - `mv [old] [new]` — rename a ticket, moving its worktrees
   - `rm [ticket]` — remove a ticket's worktrees and state (picker if no ticket given)
 - **`fleet-run`** — [`fleet-run/README.md`](fleet-run/README.md)
-  - `start [--ticket <id>]` — start a ticket's apps, one tmux window each, named
-    `<repo>-<run-name>` (e.g. `backend-api`); switches tickets if another is active
+  - `start [--ticket <id>] [--all] [repo:run-name ...]` — start a ticket's apps, one tmux window
+    each, named `<repo>-<run-name>` (e.g. `backend-api`); switches tickets if another is active
   - `stop [--ticket <id>] [--all] [repo:run-name ...]` — stop windows
-  - `status [--json]` — show the active ticket and running windows
+  - `status` — show the active ticket and windows, including crashed (dead) ones
+  - `targets [--ticket <id>]` — list a ticket's runnable `repo:run-name` targets
+  - `logs <repo:run-name> [-n N]` — print an app's recent output, even after it crashed
 - **`fleet-cache`** — [`fleet-cache/README.md`](fleet-cache/README.md)
   - `ensure <dir>` — link `<dir>/node_modules` from the shared cache (run for you by `fleet-task new`)
   - `gc` — report, or with `--roots` and `--force` delete, cache entries no longer referenced
   - `ensure-windows` / `gc-windows` — the same for `runtime: windows` repos, using a Windows-native cache
+
+For scripts and AI agents, every fleet-task/fleet-run command except `jump` takes `--json`, never prompts
+without a terminal (or with `FLEET_NO_INPUT=1`; a missing value exits 2), and
+[`skills/fleet/SKILL.md`](skills/fleet/SKILL.md) is a ready-made Claude Code skill (installed by
+`install.sh`).
 
 Config, state and cache live under XDG directories (`~/.config/fleet`, `~/.local/state/fleet`,
 `~/.cache/fleet`), overridable with `FLEET_CONFIG_DIR`, `FLEET_REPOS_FILE`, `FLEET_STATE_DIR` and

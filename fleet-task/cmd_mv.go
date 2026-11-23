@@ -18,7 +18,13 @@ import (
 // file is rewritten with that repo's new worktree path, so state always
 // reflects reality. If a later repo fails, rerunning `mv old new` skips the
 // repos already at their destination and carries on with the rest.
-func cmdMv(oldTicket, newTicket string) error {
+func cmdMv(oldTicket, newTicket string, jsonOut bool) error {
+	useJSONOutput(jsonOut)
+	if oldTicket == "" || newTicket == "" {
+		if !interactiveAllowed() {
+			return needInput("both the old and new ticket ids", "pass them as `fleet-task mv <old> <new>`")
+		}
+	}
 	if oldTicket == "" {
 		t, err := pickTicket()
 		if err != nil {
@@ -81,13 +87,21 @@ func cmdMv(oldTicket, newTicket string) error {
 	// recorded as exactly that (moved repos carry their new paths), so the
 	// state file never points at directories that no longer exist, and a
 	// rerun resumes where this one stopped.
+	results := []repoResult{}
+	report := func(ok bool) error {
+		if !jsonOut {
+			return nil
+		}
+		return printJSON(opResult{Ticket: newTicket, RenamedFrom: oldTicket, OK: ok, Repos: results})
+	}
 	for i := range st.Repos {
 		r := st.Repos[i]
 		newWorktreePath := filepath.Join(newTicketDir, r.Repo)
 
 		if alreadyMoved(r.WorktreePath, newWorktreePath) {
-			fmt.Printf("worktree %s already at %s, skipping\n", r.Repo, newWorktreePath)
+			fmt.Fprintf(out, "worktree %s already at %s, skipping\n", r.Repo, newWorktreePath)
 			st.Repos[i].WorktreePath = newWorktreePath
+			results = append(results, repoResult{Repo: r.Repo, Action: "moved", OK: true, Branch: r.Branch, WorktreePath: newWorktreePath, Patches: r.Patches})
 			continue
 		}
 
@@ -98,13 +112,21 @@ func cmdMv(oldTicket, newTicket string) error {
 			if werr := writeTaskState(oldFile, st); werr != nil {
 				warnf("update task state %s: %v", oldFile, werr)
 			}
+			results = append(results, repoResult{Repo: r.Repo, Action: "moved", Branch: r.Branch, WorktreePath: r.WorktreePath, Error: err.Error()})
+			for _, rest := range st.Repos[i+1:] {
+				results = append(results, repoResult{Repo: rest.Repo, Action: "skipped", Branch: rest.Branch, WorktreePath: rest.WorktreePath, Error: "not attempted after an earlier failure"})
+			}
+			if rerr := report(false); rerr != nil {
+				warnf("printing JSON result: %v", rerr)
+			}
 			return fmt.Errorf(
 				"moving worktree %s (%s): %w\n%d of %d repo(s) moved to %s; %d (%s) not yet -- fix the problem and rerun `fleet-task mv %s %s` to finish (state still lives under %s)",
 				r.WorktreePath, r.Repo, err, i, len(st.Repos), newTicketDir, len(remaining), repoNames(remaining), oldTicket, newTicket, oldTicket,
 			)
 		}
-		fmt.Printf("moved worktree %s -> %s (%s)\n", r.WorktreePath, newWorktreePath, r.Repo)
+		fmt.Fprintf(out, "moved worktree %s -> %s (%s)\n", r.WorktreePath, newWorktreePath, r.Repo)
 		st.Repos[i].WorktreePath = newWorktreePath
+		results = append(results, repoResult{Repo: r.Repo, Action: "moved", OK: true, Branch: r.Branch, WorktreePath: newWorktreePath, Patches: r.Patches})
 		if err := writeTaskState(oldFile, st); err != nil {
 			return fmt.Errorf("update task state %s after moving %s (worktree is already at %s): %w", oldFile, r.Repo, newWorktreePath, err)
 		}
@@ -123,8 +145,8 @@ func cmdMv(oldTicket, newTicket string) error {
 		warnf("%v", err)
 	}
 
-	fmt.Printf("renamed task %s -> %s; state written to %s\n", oldTicket, newTicket, newFile)
-	return nil
+	fmt.Fprintf(out, "renamed task %s -> %s; state written to %s\n", oldTicket, newTicket, newFile)
+	return report(true)
 }
 
 // alreadyMoved reports whether a repo's worktree is already at its
@@ -199,7 +221,7 @@ func moveTicketDirLeftovers(oldDir, newDir string) error {
 			failed = append(failed, fmt.Sprintf("%s (%v)", e.Name(), err))
 			continue
 		}
-		fmt.Printf("moved %s -> %s\n", src, dst)
+		fmt.Fprintf(out, "moved %s -> %s\n", src, dst)
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("left in old ticket workspace dir %s: %s", oldDir, strings.Join(failed, ", "))

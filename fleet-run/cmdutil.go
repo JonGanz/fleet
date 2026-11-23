@@ -33,7 +33,7 @@ func parseFlags(fs *flag.FlagSet, usage string, args []string) ([]string, error)
 			return nil, flag.ErrHelp
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%w (see 'fleet-run %s --help')", err, fs.Name())
+			return nil, usageErrorf("%v (see 'fleet-run %s --help')", err, fs.Name())
 		}
 		rest := fs.Args()
 		consumed := len(args) - len(rest)

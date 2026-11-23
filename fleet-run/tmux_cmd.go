@@ -45,7 +45,8 @@ func newSessionPrefix(session, configFile string) []string {
 // app window.
 func newSessionWithWindowArgsLinux(session, configFile, name, cwd, cmd string) []string {
 	args := newSessionPrefix(session, configFile)
-	return append(args, "-n", name, "-c", cwd, cmd)
+	args = append(args, "-n", name, "-c", cwd, cmd)
+	return withRemainOnExit(args, session, name)
 }
 
 // newSessionWithWindowArgsWindows builds argv that creates the fleet session
@@ -55,7 +56,8 @@ func newSessionWithWindowArgsLinux(session, configFile, name, cwd, cmd string) [
 func newSessionWithWindowArgsWindows(session, configFile, name, winDir, cmd string) []string {
 	psCmd := windowsPowershellCommand(winDir, cmd)
 	args := newSessionPrefix(session, configFile)
-	return append(args, "-n", name, "powershell.exe", "-NoExit", "-Command", psCmd)
+	args = append(args, "-n", name, "powershell.exe", "-NoExit", "-Command", psCmd)
+	return withRemainOnExit(args, session, name)
 }
 
 // listWindowsArgs builds argv for listing window names in a session.
@@ -87,7 +89,8 @@ func indexedTarget(session string, index int) string {
 // newWindowArgsLinux builds argv for creating a window that runs cmd
 // directly in cwd (the linux-runtime case), at the given explicit index.
 func newWindowArgsLinux(session, name, cwd, cmd string, index int) []string {
-	return []string{"new-window", "-t", indexedTarget(session, index), "-n", name, "-c", cwd, cmd}
+	args := []string{"new-window", "-t", indexedTarget(session, index), "-n", name, "-c", cwd, cmd}
+	return withRemainOnExit(args, session, name)
 }
 
 // windowsPowershellCommand builds the -Command string used to run cmd inside
@@ -102,12 +105,58 @@ func windowsPowershellCommand(winDir, cmd string) string {
 // used to seed the Windows process's working directory.
 func newWindowArgsWindows(session, name, winDir, cmd string, index int) []string {
 	psCmd := windowsPowershellCommand(winDir, cmd)
-	return []string{"new-window", "-t", indexedTarget(session, index), "-n", name, "powershell.exe", "-NoExit", "-Command", psCmd}
+	args := []string{"new-window", "-t", indexedTarget(session, index), "-n", name, "powershell.exe", "-NoExit", "-Command", psCmd}
+	return withRemainOnExit(args, session, name)
+}
+
+// windowTarget builds an exact "=<session>:<window name>" target.
+func windowTarget(session, name string) string {
+	return exactTarget(session) + ":" + name
+}
+
+// withRemainOnExit appends a chained `; set-option -w -t <window>
+// remain-on-exit on` to a window-creating argv. Chaining it into the same
+// tmux invocation (rather than a second tmux call) applies the option in the
+// same server command queue as the window's creation, so even a command that
+// exits immediately leaves a dead pane behind -- with its output, readable
+// via `fleet-run logs` -- instead of the window silently vanishing.
+func withRemainOnExit(args []string, session, name string) []string {
+	return append(args, ";", "set-option", "-w", "-t", windowTarget(session, name), "remain-on-exit", "on")
+}
+
+// respawnPaneArgsLinux builds argv that restarts a window's dead pane
+// (kept by remain-on-exit) running cmd in cwd.
+func respawnPaneArgsLinux(session, name, cwd, cmd string) []string {
+	return []string{"respawn-pane", "-k", "-t", windowTarget(session, name), "-c", cwd, cmd}
+}
+
+// respawnPaneArgsWindows builds argv that restarts a window's dead pane via
+// powershell.exe; winDir must already be win32-form (see
+// newWindowArgsWindows).
+func respawnPaneArgsWindows(session, name, winDir, cmd string) []string {
+	psCmd := windowsPowershellCommand(winDir, cmd)
+	return []string{"respawn-pane", "-k", "-t", windowTarget(session, name), "powershell.exe", "-NoExit", "-Command", psCmd}
+}
+
+// listPanesArgs builds argv listing every pane in the session as
+// tab-separated "window_name, pane_dead, pane_pid, pane_dead_status" lines
+// (see parsePaneLines).
+func listPanesArgs(session string) []string {
+	return []string{"list-panes", "-s", "-t", exactTarget(session), "-F", paneFormat}
+}
+
+// paneFormat is the -F format parsed by parsePaneLines.
+const paneFormat = "#{window_name}\t#{pane_dead}\t#{pane_pid}\t#{pane_dead_status}"
+
+// capturePaneArgs builds argv printing a window's pane content, including up
+// to historyLines lines of scrollback, with wrapped lines joined (-J).
+func capturePaneArgs(session, name string, historyLines int) []string {
+	return []string{"capture-pane", "-p", "-J", "-S", fmt.Sprintf("-%d", historyLines), "-t", windowTarget(session, name)}
 }
 
 // killWindowArgs builds argv for killing a specific window by name.
 func killWindowArgs(session, name string) []string {
-	return []string{"kill-window", "-t", exactTarget(session) + ":" + name}
+	return []string{"kill-window", "-t", windowTarget(session, name)}
 }
 
 // setSessionOptionArgs builds argv for setting the @fleet_task_ticket/

@@ -11,12 +11,12 @@ import (
 	"strings"
 )
 
-// runTmux runs `tmux <args...>` with stdout/stderr inherited (so tmux's own
-// error messages surface directly) and returns an error if it exits
-// non-zero.
+// runTmux runs `tmux <args...>` with its output sent to stderr (so tmux's own
+// error messages surface directly, while stdout stays reserved for results
+// such as --json output) and returns an error if it exits non-zero.
 func runTmux(args ...string) error {
 	cmd := exec.Command("tmux", args...)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
@@ -160,17 +160,11 @@ func checkWorktreeDir(dir string) error {
 // `fleet-run stop`'s picker and its "nothing left running" detection work
 // correctly.
 func newWindow(session, configFile, name string, p RunPair) error {
-	if err := checkWorktreeDir(p.WorktreeDir); err != nil {
+	winDir, err := pairLaunchDir(p)
+	if err != nil {
 		return err
 	}
 	isWindows := p.Runtime == "windows"
-	var winDir string
-	if isWindows {
-		var err error
-		if winDir, err = windowsWorktreeWinPath(p.WorktreeDir); err != nil {
-			return err
-		}
-	}
 
 	if !sessionExists(session) {
 		if configFile != "" {
@@ -190,6 +184,55 @@ func newWindow(session, configFile, name string, p RunPair) error {
 		return runTmux(newWindowArgsWindows(session, name, winDir, p.Cmd, index)...)
 	}
 	return runTmux(newWindowArgsLinux(session, name, p.WorktreeDir, p.Cmd, index)...)
+}
+
+// pairLaunchDir checks p's worktree dir exists and, for a windows-runtime
+// pair, returns its win32-form path ("" for linux pairs, which use the WSL
+// path directly).
+func pairLaunchDir(p RunPair) (winDir string, err error) {
+	if err := checkWorktreeDir(p.WorktreeDir); err != nil {
+		return "", err
+	}
+	if p.Runtime != "windows" {
+		return "", nil
+	}
+	return windowsWorktreeWinPath(p.WorktreeDir)
+}
+
+// respawnWindow restarts the dead pane (kept by remain-on-exit) of an
+// existing window with p's current command and directory.
+func respawnWindow(session, name string, p RunPair) error {
+	winDir, err := pairLaunchDir(p)
+	if err != nil {
+		return err
+	}
+	if p.Runtime == "windows" {
+		return runTmux(respawnPaneArgsWindows(session, name, winDir, p.Cmd)...)
+	}
+	return runTmux(respawnPaneArgsLinux(session, name, p.WorktreeDir, p.Cmd)...)
+}
+
+// listPanes returns every pane in the session with its live/dead state.
+// Returns nil (not an error) if the session doesn't exist.
+func listPanes(session string) ([]PaneInfo, error) {
+	if !sessionExists(session) {
+		return nil, nil
+	}
+	out, err := tmuxOutput(listPanesArgs(session)...)
+	if err != nil {
+		return nil, fmt.Errorf("list panes in session %q: %w", session, err)
+	}
+	return parsePaneLines(out)
+}
+
+// capturePane returns a window's pane content (plus up to historyLines of
+// scrollback) as text.
+func capturePane(session, name string, historyLines int) (string, error) {
+	out, err := tmuxOutput(capturePaneArgs(session, name, historyLines)...)
+	if err != nil {
+		return "", fmt.Errorf("capture window %q: %w", name, err)
+	}
+	return out, nil
 }
 
 // killWindow kills a single named window in the session.

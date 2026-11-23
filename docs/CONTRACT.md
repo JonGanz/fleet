@@ -141,9 +141,12 @@ Field notes:
 
 Directory listing only, no index file:
 `<config dir>/patches/<repo>/*.patch` — plain files produced by `git diff` / `git format-patch`.
-`fleet-task new` lets the user multiselect (in-process bubbletea picker, by filename) which ones
-to apply per repo, applying each with `git apply` in the new worktree (never `git am`; authorship/
-commit metadata in a patch is not preserved).
+`fleet-task new` lets the user multiselect (in-process bubbletea picker, by filename, all checked
+by default) which ones to apply per repo, or takes the choice from flags (all, minus
+`--skip-patch <repo>:<name>`, or none with `--no-patches`), applying each with `git apply` in the
+new worktree (never `git am`; authorship/commit metadata in a patch is not preserved). Free text
+before the first `diff --git`/`---` line is ignored by `git apply` and is shown by
+`fleet-task patches` as the patch's summary (a format-patch `Subject:` takes precedence).
 
 ## Hooks
 
@@ -188,15 +191,18 @@ Everything else (`fleet-run`) only reads these files.
   "description": "Add retry logic to payment webhook",
   "created_at": "2026-08-02T22:58:00Z",
   "repos": [
-    { "repo": "backend", "branch": "eng/PROJ-1234", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/backend" },
-    { "repo": "admin-ui", "branch": "PROJ-1234-add-retry-logic-to-payment-webhook", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/admin-ui" }
+    { "repo": "backend", "branch": "eng/PROJ-1234", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/backend", "patches": ["local-env.patch"] },
+    { "repo": "admin-ui", "branch": "PROJ-1234-add-retry-logic-to-payment-webhook", "worktree_path": "/home/jon/.local/state/fleet/worktrees/PROJ-1234/admin-ui", "patches": [] }
   ]
 }
 ```
 
 `branch` reflects each repo's resolved `branch_template` (see `repos.yaml` field notes above) — it's
 not necessarily identical to `ticket`, and can differ per repo. `worktree_path` is always
-`<worktree_root>/<ticket>/<repo>` regardless of the branch name.
+`<worktree_root>/<ticket>/<repo>` regardless of the branch name. `patches` lists the patch
+filenames successfully applied when the worktree was created; it is `null` (or absent) in state
+files written before the field existed, meaning "unknown", and `[]` when none were applied. Readers
+must tolerate its absence (`fleet-run` ignores it).
 
 `repos` isn't fixed at `fleet-task new` time — `fleet-task edit <ticket>` can add or remove entries
 from it later, reusing `new`'s per-repo setup and `rm`'s per-repo teardown respectively. Repos added
@@ -259,6 +265,26 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
   Vite's `.vite/deps_temp_*`) at the exact moment git tries to remove it, leaving `git worktree
   remove --force` failing with "Directory not empty" — the fix is `fleet-run stop` first, not a
   smarter retry.
+
+- **Every window fleet-run creates gets the window option `remain-on-exit on`**, chained into the
+  same tmux call that creates it (`… ; set-option -w -t =<session>:<window> remain-on-exit on`).
+  An exited app leaves a dead pane instead of a vanished window: `fleet-run status` reports
+  `alive: false` and `exit_status`, `fleet-run logs` still reads its output, `fleet-run start`
+  respawns it (`respawn-pane -k`), and `stop` kills it like a live one. A ticket whose panes are
+  all dead still counts as active (the `@fleet_task_ticket` option stays set) until stopped.
+
+## CLI conventions shared by fleet-task and fleet-run
+
+- **Exit codes:** 0 ok; 1 the operation failed (fully or partly); 2 usage error or input required
+  (bad flags/arguments, unknown names, or a value that would need a prompt). Exit 2 means nothing
+  was changed.
+- **No terminal, no prompts:** pickers and prompts open only if stdin is a terminal (checked with
+  isatty — `/dev/null` is a character device too) and `FLEET_NO_INPUT` is not `1`. Only stdin is
+  checked: stdout is legitimately captured by `cd "$(fleet-task jump)"`. Otherwise a step that
+  would prompt exits 2 naming the flag or argument that supplies the value. Both tools implement
+  `interactiveAllowed()` independently and also guard inside their (hand-synced) `runSelect`.
+- **`--json`** results go to stdout as a single document, also when the command exits 1; progress,
+  git, hook and tmux output go to stderr. Usage errors print no JSON.
 
 ## CLI contracts between tools (subprocess boundary, not shared code)
 

@@ -111,3 +111,14 @@ func TestParseTaskStateCreatedAt(t *testing.T) {
 		t.Errorf("RFC3339Nano with offset: %v", err)
 	}
 }
+
+func TestValidateTicket(t *testing.T) {
+	for _, bad := range []string{"", ".", "..", "a/b", `a\b`, "../x"} {
+		if err := validateTicket(bad); !isUsage(err) {
+			t.Errorf("validateTicket(%q) = %v, want usage error", bad, err)
+		}
+	}
+	if err := validateTicket("PROJ-1"); err != nil {
+		t.Errorf("valid ticket rejected: %v", err)
+	}
+}

@@ -38,6 +38,11 @@ func runSelect(opts selectOpts) ([]string, error) {
 	if len(opts.Items) == 0 {
 		return nil, nil
 	}
+	// Backstop: callers check interactiveAllowed first so they can name the
+	// missing flag, but no picker may ever open without a terminal.
+	if !interactiveAllowed() {
+		return nil, usageErrorf("a selection is required (%s) and no terminal is available for a picker; pass it as flags/arguments (see --help)", selectTitleOr(opts.Title, "picker"))
+	}
 	var preselected map[string]bool
 	if opts.Preselected {
 		preselected = make(map[string]bool, len(opts.Items))
@@ -321,4 +326,12 @@ func (m selectModel) View() string {
 	b.WriteString(selectDimStyle.Render(help))
 
 	return b.String()
+}
+
+// selectTitleOr returns title, or fallback if title is empty.
+func selectTitleOr(title, fallback string) string {
+	if title == "" {
+		return fallback
+	}
+	return title
 }

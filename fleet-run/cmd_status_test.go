@@ -41,3 +41,22 @@ func TestFormatStatusRunning(t *testing.T) {
 		t.Errorf("json round trip: %v %+v", err, back)
 	}
 }
+
+func TestFormatStatusMarksDeadPanes(t *testing.T) {
+	code := 3
+	st := Status{
+		Session: "fleet", ActiveTicket: "A-1", Windows: []string{"backend-api", "web-dev"},
+		Panes: []PaneInfo{{Window: "backend-api", Alive: true}, {Window: "web-dev", ExitStatus: &code}},
+	}
+	txt, err := formatStatus(st, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(txt, "web-dev  (dead, exit 3") || strings.Contains(txt, "backend-api  (dead") {
+		t.Errorf("text = %s", txt)
+	}
+	js, _ := formatStatus(Status{Session: "fleet"}, true)
+	if !strings.Contains(js, `"panes": []`) {
+		t.Errorf("panes should be an empty array, got %s", js)
+	}
+}

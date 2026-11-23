@@ -7,8 +7,12 @@ import (
 	"strings"
 )
 
-func cmdRm(ticket string) error {
+func cmdRm(ticket string, jsonOut bool) error {
+	useJSONOutput(jsonOut)
 	if ticket == "" {
+		if !interactiveAllowed() {
+			return needInput("a ticket id", "pass it as `fleet-task rm <ticket>`")
+		}
 		t, err := pickTicket()
 		if err != nil {
 			return err
@@ -38,14 +42,28 @@ func cmdRm(ticket string) error {
 	cfg := loadReposConfigOptional()
 
 	var remaining []TaskRepo
+	results := []repoResult{}
 
 	for _, r := range st.Repos {
+		res := repoResult{Repo: r.Repo, Action: "removed", Branch: r.Branch, WorktreePath: r.WorktreePath, Patches: r.Patches}
 		if rmErr := removeRepoWorktree(cfg, ticket, r); rmErr != nil {
 			warnf("removing worktree %s: %v", r.WorktreePath, rmErr)
 			remaining = append(remaining, r)
+			res.Error = rmErr.Error()
+			results = append(results, res)
 			continue
 		}
-		fmt.Printf("removed worktree %s (%s)\n", r.WorktreePath, r.Repo)
+		fmt.Fprintf(out, "removed worktree %s (%s)\n", r.WorktreePath, r.Repo)
+		res.OK = true
+		results = append(results, res)
+	}
+	if jsonOut {
+		// Printed before the state-file bookkeeping below: the per-repo
+		// outcomes are final at this point, and stdout must carry the JSON
+		// even when the command goes on to fail.
+		if err := printJSON(opResult{Ticket: ticket, OK: len(remaining) == 0, Repos: results}); err != nil {
+			return err
+		}
 	}
 
 	// If any worktree removal failed, keep the task state around (with only
@@ -63,7 +81,7 @@ func cmdRm(ticket string) error {
 	if err := os.Remove(tf); err != nil {
 		return fmt.Errorf("remove task state %s: %w", tf, err)
 	}
-	fmt.Printf("removed task state %s\n", tf)
+	fmt.Fprintf(out, "removed task state %s\n", tf)
 
 	// Every repo's worktree_path is <worktree_root>/<ticket>/<repo> (per
 	// docs/CONTRACT.md, true for runtime: windows repos too -- that path is
@@ -84,7 +102,7 @@ func cmdRm(ticket string) error {
 	case err != nil:
 		warnf("removing ticket workspace dir %s: %v", ticketDir, err)
 	case removed:
-		fmt.Printf("removed ticket workspace dir %s\n", ticketDir)
+		fmt.Fprintf(out, "removed ticket workspace dir %s\n", ticketDir)
 	case len(leftovers) > 0:
 		warnf("left ticket workspace dir %s in place; it still contains: %s", ticketDir, strings.Join(leftovers, ", "))
 	}

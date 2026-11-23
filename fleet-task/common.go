@@ -102,3 +102,16 @@ func warnf(format string, args ...any) {
 func errorf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
 }
+
+// uniqueStrings returns items without duplicates, keeping first-seen order.
+func uniqueStrings(items []string) []string {
+	seen := make(map[string]bool, len(items))
+	var unique []string
+	for _, it := range items {
+		if !seen[it] {
+			seen[it] = true
+			unique = append(unique, it)
+		}
+	}
+	return unique
+}

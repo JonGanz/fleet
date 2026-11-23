@@ -35,8 +35,10 @@ module boundaries.
 - **XDG-compliant**: config/state/cache each live under their own XDG base dir, all overridable.
 - **UNIX-y / no shared runtime**: three separate precompiled Go binaries gluing together common
   CLI tools (`git`, `tmux`, `npm`) rather than one monolith with a language runtime dependency.
-  Read commands that are meant to be scripted support `--json` (`fleet-task list`,
-  `fleet-run status`, `fleet-cache gc`/`gc-windows`); `fleet-task jump` prints a bare path.
+  Every command can run without a terminal: flags replace every picker/prompt, a missing value
+  exits 2 (no terminal on stdin, or `FLEET_NO_INPUT=1`), and `--json` is on every fleet-task and
+  fleet-run command (except `jump`) plus `fleet-cache gc`/`gc-windows`; `fleet-task jump` prints a bare path.
+  `skills/fleet/SKILL.md` is the agent-facing guide built on that surface.
 
 Each subdirectory (`fleet-task/`, `fleet-run/`, `fleet-cache/`) is its own Go module with its own
 `go.mod`. **There is no shared Go code between them** — this is intentional (each may become its
@@ -124,7 +126,8 @@ it instead of switching on `repo.Runtime`; keep new git operations on the interf
 
 Command flow for `fleet-task new` (`cmd_new.go`): prompt for ticket/description (bubbletea form) →
 validate the ticket id and **refuse if `tasks/<ticket>.json` already exists** → pick repos
-(bubbletea multiselect) → per repo, pick patches (`<config dir>/patches/<repo>/*.patch`, all
+(bubbletea multiselect, or `--repo` flags, which also switch patches to
+`--skip-patch`/`--no-patches`, default all) → per repo, pick patches (`<config dir>/patches/<repo>/*.patch`, all
 prompts up front, skipped if none) → then per repo, in `createRepoWorktree`: run `pre-create`
 hooks → `Preflight` + ensure `base` exists/is fetched → `git worktree add` (create branch, else
 attach existing; both errors reported) → apply patches with `git apply` (not `git am` — see
@@ -159,8 +162,10 @@ named `<repo>-<run-name>` (no ticket prefix — since only one ticket runs at a 
 to be disambiguated in the name). The picker/CLI form is `repo:run-name`; `config.go`'s `validate`
 therefore rejects `:` in repo/run names and any two `<repo>-<run>` window names that collide.
 
-Commands: `start`, `stop`, `status [--json]` (`cmd_start.go`, `cmd_stop.go`, `cmd_status.go`).
-`fleet-run start [--ticket <id>]` resolves the ticket: `--ticket`, else the only file under
+Commands: `start`, `stop`, `status`, `targets`, `logs` (`cmd_*.go`); all take `--json`.
+`start`/`stop` take `repo:run-name` positionals or `--all` instead of the multiselect. Windows get
+`remain-on-exit on`, so a crashed app is a dead pane that `status` reports, `logs` reads
+(`capture-pane`) and `start` respawns. `fleet-run start [--ticket <id>]` resolves the ticket: `--ticket`, else the only file under
 `tasks/*.json`, else a bubbletea picker when there are several (zero is an error; there's no "plain
 checkout, no ticket" mode). "Which ticket is active" is tracked via two tmux user options set with
 `-g` (global, `activeticket.go`; not per-session, because `set-option -t =<session>` can't resolve

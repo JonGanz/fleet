@@ -3,21 +3,35 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
-// runStart implements `fleet-run start [--ticket <id>]`. Only one ticket's
-// windows are ever meant to be live in the session at once, so starting a
-// different ticket than whatever's currently active tears down every
-// existing window first -- this is what used to be the separate `switch`
-// command; it's now just what `start` does when the ticket changes.
+// startOpts are `fleet-run start`'s parsed flags and arguments.
+type startOpts struct {
+	all     bool
+	asJSON  bool
+	targets []string // "repo:run-name" labels
+	ticket  string
+}
+
+// runStart implements `fleet-run start [--ticket <id>] [--all]
+// [repo:run-name ...] [--json]`. Only one ticket's windows are ever meant to
+// be live in the session at once, so starting a different ticket than
+// whatever's currently active tears down every existing window first.
 // Starting the *same* ticket that's already active stays additive (only
-// missing windows get created), matching how reruns always worked.
-func runStart(ticket string) error {
-	cfg, ts, err := loadStartContext(ticket)
+// missing windows get created; dead panes get respawned).
+func runStart(opts startOpts) error {
+	if opts.all && len(opts.targets) > 0 {
+		return usageErrorf("--all and explicit repo:run-name targets are mutually exclusive")
+	}
+	if !opts.all && len(opts.targets) == 0 && !interactiveAllowed() {
+		return inputRequiredError("no targets given; pass repo:run-name ... or --all (see `fleet-run targets`)")
+	}
+	cfg, ts, err := loadStartContext(opts.ticket)
 	if err != nil {
 		return err
 	}
-	return startFlow(cfg, ts)
+	return startFlow(cfg, ts, opts)
 }
 
 // requireSession returns the configured tmux session name, erroring if it's
@@ -76,6 +90,9 @@ func pickTicketIfAmbiguous(tasksDirPath string) (string, error) {
 	if len(files) <= 1 {
 		return "", nil
 	}
+	if !interactiveAllowed() {
+		return "", inputRequiredError(fmt.Sprintf("multiple tasks exist (%s); pass --ticket", strings.Join(ticketsFromFiles(files), ", ")))
+	}
 
 	chosen, err := selectOne(ticketsFromFiles(files))
 	if err != nil {
@@ -84,11 +101,12 @@ func pickTicketIfAmbiguous(tasksDirPath string) (string, error) {
 	return chosen, nil
 }
 
-// startFlow runs the interactive multiselect + tmux window creation flow
-// for the given already-resolved config/task. It attempts every selected
-// pair, then returns an error if any of them failed to start (so the exit
-// code is non-zero on partial failure).
-func startFlow(cfg *ReposConfig, ts *TaskState) error {
+// startFlow resolves which targets to start (explicit, --all, or the
+// multiselect), switches tickets if needed, and creates or respawns each
+// target's window. It attempts every target, then returns an error if any
+// failed (so the exit code is non-zero on partial failure). With asJSON the
+// StartReport is printed to stdout either way.
+func startFlow(cfg *ReposConfig, ts *TaskState, opts startOpts) error {
 	session, err := requireSession(cfg)
 	if err != nil {
 		return err
@@ -98,20 +116,16 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 		return fmt.Errorf("no repo:run-name targets available for ticket %s (check repos.yaml `run` entries against the task's worktrees)", ts.Ticket)
 	}
 
-	labels := make([]string, len(pairs))
-	for i, p := range pairs {
-		labels[i] = p.Label()
-	}
-
-	selected, err := selectMulti(labels)
+	selected, err := selectStartTargets(pairs, opts)
 	if err != nil {
 		return err
 	}
+	report := StartReport{Ticket: ts.Ticket, Results: []StartResult{}}
 	if len(selected) == 0 {
 		// Deliberately does nothing else -- no session/option changes -- so
 		// backing out of selection never tears down a working environment.
 		fmt.Fprintln(os.Stderr, "no targets selected, nothing to start")
-		return nil
+		return finishStart(report, opts.asJSON)
 	}
 
 	active, hasActive, err := activeTicket()
@@ -123,6 +137,7 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 		if err := killAllWindowsInSession(session); err != nil {
 			return err
 		}
+		report.SwitchedFrom = active
 		// Killing every window -- including the last one -- makes tmux
 		// destroy the session itself (and the server too, if it was the only
 		// session); the newWindow call below recreates it together with
@@ -133,13 +148,9 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 		}
 	}
 
-	existing, err := listWindows(session)
+	panes, err := listPanes(session)
 	if err != nil {
 		return err
-	}
-	existingSet := make(map[string]bool, len(existing))
-	for _, w := range existing {
-		existingSet[w] = true
 	}
 
 	// The active-ticket options are tmux server options, and `tmux
@@ -157,39 +168,88 @@ func startFlow(cfg *ReposConfig, ts *TaskState) error {
 		}
 		return nil
 	}
-	if len(existingSet) > 0 {
+	if len(panes) > 0 {
 		if err := record(); err != nil {
 			return err
 		}
 	}
 
-	failed := 0
-	for _, label := range selected {
-		pair, ok := findPairByLabel(pairs, label)
-		if !ok {
-			fmt.Fprintf(os.Stderr, "warning: unrecognized selection %q, skipping\n", label)
-			failed++
-			continue
+	for _, pair := range selected {
+		res := startOne(session, cfg.Tmux.ConfigFile, pair, panes)
+		if res.Status == startStatusStarted || res.Status == startStatusRespawned {
+			if err := record(); err != nil {
+				res.Status, res.Error = startStatusFailed, err.Error()
+			}
 		}
-		wname := pair.WindowName()
-		if existingSet[wname] {
-			fmt.Fprintf(os.Stderr, "warning: window %q already exists, skipping\n", wname)
-			continue
+		if res.Status == startStatusFailed {
+			fmt.Fprintf(os.Stderr, "warning: failed to start %s: %s\n", res.Window, res.Error)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s %s\n", res.Status, res.Window)
 		}
-		if err := newWindow(session, cfg.Tmux.ConfigFile, wname, pair); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to start window %q: %v\n", wname, err)
-			failed++
-			continue
-		}
-		existingSet[wname] = true
-		fmt.Fprintf(os.Stderr, "started %s\n", wname)
-		if err := record(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
-			failed++
+		report.Results = append(report.Results, res)
+	}
+	return finishStart(report, opts.asJSON)
+}
+
+// finishStart prints report (with asJSON) and turns failures into an error.
+func finishStart(report StartReport, asJSON bool) error {
+	failed := report.failedCount()
+	report.OK = failed == 0
+	if asJSON {
+		if err := printJSON(report); err != nil {
+			return err
 		}
 	}
 	if failed > 0 {
-		return fmt.Errorf("%d of %d selected targets failed to start", failed, len(selected))
+		return fmt.Errorf("%d of %d selected targets failed to start", failed, len(report.Results))
 	}
 	return nil
+}
+
+// selectStartTargets returns the pairs to start: explicit labels or --all
+// without a picker, else the interactive multiselect (runStart has already
+// refused the no-terminal case).
+func selectStartTargets(pairs []RunPair, opts startOpts) ([]RunPair, error) {
+	selected, needPicker, err := resolveStartTargets(pairs, opts.all, opts.targets)
+	if err != nil || !needPicker {
+		return selected, err
+	}
+	if !interactiveAllowed() {
+		return nil, inputRequiredError("no targets given; pass repo:run-name ... or --all (see `fleet-run targets`)")
+	}
+	labels := make([]string, len(pairs))
+	for i, p := range pairs {
+		labels[i] = p.Label()
+	}
+	chosen, err := selectMulti(labels)
+	if err != nil {
+		return nil, err
+	}
+	for _, label := range chosen {
+		if pair, ok := findPairByLabel(pairs, label); ok {
+			selected = append(selected, pair)
+		}
+	}
+	return selected, nil
+}
+
+// startOne creates pair's window, respawns it if its pane is dead, or leaves
+// a live one alone.
+func startOne(session, configFile string, pair RunPair, panes []PaneInfo) StartResult {
+	res := StartResult{Target: pair.Label(), Window: pair.WindowName()}
+	if pane, exists := findPane(panes, res.Window); exists {
+		res.Status = existingWindowStatus(pane)
+		if res.Status == startStatusRespawned {
+			if err := respawnWindow(session, res.Window, pair); err != nil {
+				res.Status, res.Error = startStatusFailed, err.Error()
+			}
+		}
+		return res
+	}
+	if err := newWindow(session, configFile, res.Window, pair); err != nil {
+		res.Status, res.Error = startStatusFailed, err.Error()
+		return res
+	}
+	res.Status = startStatusStarted
+	return res
 }

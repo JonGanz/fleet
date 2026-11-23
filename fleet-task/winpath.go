@@ -56,7 +56,7 @@ func windowsCommandScript(winDir string, args ...string) string {
 // powershell.exe from WSL. See windowsCommandScript.
 func runWindowsCommand(winDir string, args ...string) error {
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", windowsCommandScript(winDir, args...))
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("powershell (%v) in %s: %w", args, winDir, err)
@@ -70,7 +70,7 @@ func runWindowsCommand(winDir string, args ...string) error {
 func runWindowsCommandCapture(winDir string, args ...string) error {
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", windowsCommandScript(winDir, args...))
 	var stderr bytes.Buffer
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = out
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("powershell (%v) in %s: %w%s", args, winDir, err, stderrSuffix(stderr.String()))
@@ -108,7 +108,7 @@ func windowsMkdirScript(winDir string) string {
 // New-Item, mirroring os.MkdirAll but as a Windows-native operation.
 func windowsMkdirAll(winDir string) error {
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", windowsMkdirScript(winDir))
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("New-Item -Force %s: %w", winDir, err)

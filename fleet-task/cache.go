@@ -30,7 +30,7 @@ func ensureNodeCache(repo *RepoConfig, cfg *ReposConfig, worktreePath string) {
 	}
 
 	cmd := exec.Command("fleet-cache", args...)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: fleet-cache %v failed: %v\n", args, err)

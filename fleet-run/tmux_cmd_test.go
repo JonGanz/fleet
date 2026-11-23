@@ -1,18 +1,26 @@
 package main
 
-import "reflect"
+import (
+	"reflect"
+	"testing"
+)
 
-import "testing"
+// remainOnExit is the chained suffix every window-creating argv ends with.
+func remainOnExit(window string) []string {
+	return []string{";", "set-option", "-w", "-t", "=fleet:" + window, "remain-on-exit", "on"}
+}
 
 func TestNewSessionWithWindowArgsLinux(t *testing.T) {
 	got := newSessionWithWindowArgsLinux("fleet", "", "PROJ-1234-backend-api", "/state/worktrees/PROJ-1234/backend", "npm run start:dev")
 	want := []string{"new-session", "-d", "-s", "fleet", "-n", "PROJ-1234-backend-api", "-c", "/state/worktrees/PROJ-1234/backend", "npm run start:dev"}
+	want = append(want, remainOnExit("PROJ-1234-backend-api")...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("newSessionWithWindowArgsLinux(no config) = %v, want %v", got, want)
 	}
 
 	got = newSessionWithWindowArgsLinux("fleet", "/home/jon/.config/fleet/tmux.conf", "PROJ-1234-backend-api", "/state/worktrees/PROJ-1234/backend", "npm run start:dev")
 	want = []string{"-f", "/home/jon/.config/fleet/tmux.conf", "new-session", "-d", "-s", "fleet", "-n", "PROJ-1234-backend-api", "-c", "/state/worktrees/PROJ-1234/backend", "npm run start:dev"}
+	want = append(want, remainOnExit("PROJ-1234-backend-api")...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("newSessionWithWindowArgsLinux(with config) = %v, want %v", got, want)
 	}
@@ -25,6 +33,7 @@ func TestNewSessionWithWindowArgsWindows(t *testing.T) {
 		"powershell.exe", "-NoExit", "-Command",
 		`cd 'C:\worktrees\PROJ-1234\admin-ui'; npm run dev`,
 	}
+	want = append(want, remainOnExit("PROJ-1234-admin-ui-dev")...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("newSessionWithWindowArgsWindows(no config) = %v, want %v", got, want)
 	}
@@ -36,6 +45,7 @@ func TestNewSessionWithWindowArgsWindows(t *testing.T) {
 		"powershell.exe", "-NoExit", "-Command",
 		`cd 'C:\worktrees\PROJ-1234\admin-ui'; npm run dev`,
 	}
+	want = append(want, remainOnExit("PROJ-1234-admin-ui-dev")...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("newSessionWithWindowArgsWindows(with config) = %v, want %v", got, want)
 	}
@@ -52,6 +62,7 @@ func TestListWindowsArgs(t *testing.T) {
 func TestNewWindowArgsLinux(t *testing.T) {
 	got := newWindowArgsLinux("fleet", "PROJ-1234-backend-api", "/state/worktrees/PROJ-1234/backend", "npm run start:dev", 3)
 	want := []string{"new-window", "-t", "=fleet:3", "-n", "PROJ-1234-backend-api", "-c", "/state/worktrees/PROJ-1234/backend", "npm run start:dev"}
+	want = append(want, remainOnExit("PROJ-1234-backend-api")...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("newWindowArgsLinux = %v, want %v", got, want)
 	}
@@ -64,6 +75,7 @@ func TestNewWindowArgsWindows(t *testing.T) {
 		"powershell.exe", "-NoExit", "-Command",
 		`cd 'C:\worktrees\PROJ-1234\admin-ui'; npm run dev`,
 	}
+	want = append(want, remainOnExit("PROJ-1234-admin-ui-dev")...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("newWindowArgsWindows = %v, want %v", got, want)
 	}
@@ -114,5 +126,37 @@ func TestShowSessionOptionArgs(t *testing.T) {
 	want := []string{"show-options", "-g", "-v", "@fleet_task_ticket"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("showSessionOptionArgs = %v, want %v", got, want)
+	}
+}
+
+func TestCapturePaneArgs(t *testing.T) {
+	got := capturePaneArgs("fleet", "backend-api", 200)
+	want := []string{"capture-pane", "-p", "-J", "-S", "-200", "-t", "=fleet:backend-api"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("capturePaneArgs = %v, want %v", got, want)
+	}
+}
+
+func TestListPanesArgs(t *testing.T) {
+	got := listPanesArgs("fleet")
+	want := []string{"list-panes", "-s", "-t", "=fleet", "-F", "#{window_name}\t#{pane_dead}\t#{pane_pid}\t#{pane_dead_status}"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("listPanesArgs = %v, want %v", got, want)
+	}
+}
+
+func TestRespawnPaneArgsLinux(t *testing.T) {
+	got := respawnPaneArgsLinux("fleet", "backend-api", "/wt/backend", "npm run start:dev")
+	want := []string{"respawn-pane", "-k", "-t", "=fleet:backend-api", "-c", "/wt/backend", "npm run start:dev"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("respawnPaneArgsLinux = %v, want %v", got, want)
+	}
+}
+
+func TestRespawnPaneArgsWindows(t *testing.T) {
+	got := respawnPaneArgsWindows("fleet", "admin-ui-dev", `C:\wt\admin-ui`, "npm run dev")
+	want := []string{"respawn-pane", "-k", "-t", "=fleet:admin-ui-dev", "powershell.exe", "-NoExit", "-Command", `cd 'C:\wt\admin-ui'; npm run dev`}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("respawnPaneArgsWindows = %v, want %v", got, want)
 	}
 }

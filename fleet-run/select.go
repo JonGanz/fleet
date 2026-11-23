@@ -41,6 +41,12 @@ func selectOne(items []string) (string, error) {
 }
 
 func runSelect(items []string, multi bool, preselected map[string]bool) ([]string, error) {
+	// Backstop (hand-synced with fleet-task's runSelect): callers check
+	// interactiveAllowed first so they can name the missing flag, but no
+	// picker may ever open without a terminal.
+	if !interactiveAllowed() {
+		return nil, inputRequiredError("pass the selection as flags/arguments (see --help)")
+	}
 	m := newSelectModel(items, multi, preselected)
 
 	// Render/read against the controlling terminal directly rather than
