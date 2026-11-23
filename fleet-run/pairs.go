@@ -11,6 +11,7 @@ type RunPair struct {
 	Cmd         string
 	Runtime     string // "linux" (default) or "windows"
 	WorktreeDir string
+	Branch      string // from the task state; passed to hooks as FLEET_BRANCH
 }
 
 // Label returns the "repo:run-name" string used both as the fzf candidate
@@ -49,6 +50,7 @@ func availablePairs(cfg *ReposConfig, ts *TaskState) []RunPair {
 				Cmd:         run.Cmd,
 				Runtime:     runtime,
 				WorktreeDir: tr.WorktreePath,
+				Branch:      tr.Branch,
 			})
 		}
 	}

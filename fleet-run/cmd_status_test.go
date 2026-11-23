@@ -60,3 +60,21 @@ func TestFormatStatusMarksDeadPanes(t *testing.T) {
 		t.Errorf("panes should be an empty array, got %s", js)
 	}
 }
+
+func TestFormatStatusStale(t *testing.T) {
+	if !isStaleActive("A-1", 0) || isStaleActive("A-1", 1) || isStaleActive("", 0) {
+		t.Error("isStaleActive wrong")
+	}
+	st := Status{Session: "fleet", ActiveTicket: "A-1", StaleActive: true}
+	txt, err := formatStatus(st, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(txt, "STALE") || !strings.Contains(txt, "fleet-run stop") {
+		t.Errorf("text = %s", txt)
+	}
+	js, _ := formatStatus(st, true)
+	if !strings.Contains(js, `"stale_active": true`) {
+		t.Errorf("json = %s", js)
+	}
+}

@@ -56,8 +56,13 @@ func TestResolveTicketStateExplicit(t *testing.T) {
 
 func TestResolveTicketStateExplicitMissing(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := resolveTicketState(dir, "PROJ-0000"); err == nil {
-		t.Error("expected error for missing ticket, got nil")
+	_, err := resolveTicketState(dir, "PROJ-0000")
+	if err == nil {
+		t.Fatal("expected error for missing ticket, got nil")
+	}
+	// An unknown ticket is a usage error (exit 2) per the contract.
+	if exitCodeFor(err) != exitUsage {
+		t.Errorf("exit code = %d, want %d (%v)", exitCodeFor(err), exitUsage, err)
 	}
 }
 

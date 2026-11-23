@@ -8,6 +8,9 @@ import (
 
 // TargetInfo is one row of `fleet-run targets`.
 type TargetInfo struct {
+	// Target is the "repo:run-name" form, named as in every other document.
+	Target string `json:"target"`
+	// Label duplicates Target. Deprecated: kept for older consumers.
 	Label   string `json:"label"`
 	Window  string `json:"window"`
 	Cwd     string `json:"cwd"`
@@ -31,6 +34,7 @@ func buildTargets(pairs []RunPair, panes []PaneInfo, ticketActive bool) []Target
 	out := make([]TargetInfo, 0, len(pairs))
 	for _, p := range pairs {
 		info := TargetInfo{
+			Target:  p.Label(),
 			Label:   p.Label(),
 			Window:  p.WindowName(),
 			Cwd:     p.WorktreeDir,
@@ -77,7 +81,7 @@ func runTargets(ticket string, asJSON bool) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "TARGET\tWINDOW\tRUNTIME\tRUNNING\tCMD")
 	for _, t := range report.Targets {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%s\n", t.Label, t.Window, t.Runtime, t.Running, t.Cmd)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%s\n", t.Target, t.Window, t.Runtime, t.Running, t.Cmd)
 	}
 	return w.Flush()
 }

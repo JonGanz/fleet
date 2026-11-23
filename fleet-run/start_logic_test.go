@@ -18,11 +18,28 @@ func isUsage(err error) bool {
 }
 
 func TestExistingWindowStatus(t *testing.T) {
-	if got := existingWindowStatus(PaneInfo{Alive: true}); got != startStatusAlreadyRunning {
+	if got := existingWindowStatus(PaneInfo{Alive: true}, false); got != startStatusAlreadyRunning {
 		t.Errorf("live = %q", got)
 	}
-	if got := existingWindowStatus(PaneInfo{Alive: false}); got != startStatusRespawned {
+	if got := existingWindowStatus(PaneInfo{Alive: false}, false); got != startStatusRespawned {
 		t.Errorf("dead = %q", got)
+	}
+	if got := existingWindowStatus(PaneInfo{Alive: true}, true); got != startStatusRestarted {
+		t.Errorf("live, restart = %q", got)
+	}
+	if got := existingWindowStatus(PaneInfo{Alive: false}, true); got != startStatusRespawned {
+		t.Errorf("dead, restart = %q", got)
+	}
+}
+
+func TestStartResultLaunched(t *testing.T) {
+	for status, want := range map[string]bool{
+		startStatusStarted: true, startStatusRespawned: true, startStatusRestarted: true,
+		startStatusAlreadyRunning: false, startStatusFailed: false,
+	} {
+		if got := (StartResult{Status: status}).launched(); got != want {
+			t.Errorf("launched(%s) = %v, want %v", status, got, want)
+		}
 	}
 }
 

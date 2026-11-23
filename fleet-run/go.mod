@@ -1,4 +1,4 @@
-module fleet-run
+module github.com/JonGanz/fleet/fleet-run
 
 go 1.25.4
 

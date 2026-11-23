@@ -62,15 +62,6 @@ func tasksDir() (string, error) {
 	return filepath.Join(sd, "tasks"), nil
 }
 
-// taskFile returns <state dir>/tasks/<ticket>.json.
-func taskFile(ticket string) (string, error) {
-	td, err := tasksDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(td, ticket+".json"), nil
-}
-
 // expandHome expands a leading ~ to the user's home directory.
 func expandHome(p string) string {
 	if p == "~" {

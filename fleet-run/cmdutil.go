@@ -20,14 +20,15 @@ func newFlagSet(name string) *flag.FlagSet {
 // positional arguments (Go's flag package stops at the first positional), and
 // returns the positionals. A literal "--" ends flag parsing; everything after
 // it is positional. On -h/--help it prints usage (header plus flag defaults)
-// to stderr and returns flag.ErrHelp.
+// to stdout -- help that was asked for is the command's output -- and
+// returns flag.ErrHelp.
 func parseFlags(fs *flag.FlagSet, usage string, args []string) ([]string, error) {
 	var positional []string
 	for {
 		err := fs.Parse(args)
 		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(os.Stderr, usage)
-			fs.SetOutput(os.Stderr)
+			fmt.Fprintln(os.Stdout, usage)
+			fs.SetOutput(os.Stdout)
 			fs.PrintDefaults()
 			fs.SetOutput(io.Discard)
 			return nil, flag.ErrHelp

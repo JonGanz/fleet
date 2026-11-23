@@ -15,6 +15,10 @@ type Status struct {
 	// Panes carries per-window pane state; Windows is kept for
 	// compatibility with earlier consumers.
 	Panes []PaneInfo `json:"panes"`
+	// StaleActive is true when an active ticket is recorded but no windows
+	// are running: the session was killed outside fleet-run while the tmux
+	// server survived. `fleet-run stop --all` clears it.
+	StaleActive bool `json:"stale_active"`
 }
 
 // formatStatus renders st as indented JSON (asJSON) or human-readable text.
@@ -36,7 +40,12 @@ func formatStatus(st Status, asJSON bool) (string, error) {
 		return "nothing running", nil
 	}
 	var sb strings.Builder
-	if st.ActiveTicket != "" {
+	if st.StaleActive {
+		fmt.Fprintf(&sb, "active ticket: %s (STALE: nothing is running; clear it with `fleet-run stop --all`)\n", st.ActiveTicket)
+		if st.Description != "" {
+			fmt.Fprintf(&sb, "description:   %s\n", st.Description)
+		}
+	} else if st.ActiveTicket != "" {
 		fmt.Fprintf(&sb, "active ticket: %s\n", st.ActiveTicket)
 		if st.Description != "" {
 			fmt.Fprintf(&sb, "description:   %s\n", st.Description)
@@ -53,6 +62,12 @@ func formatStatus(st Status, asJSON bool) (string, error) {
 		fmt.Fprintf(&sb, "  %s%s\n", w, paneStateSuffix(st.Panes, w))
 	}
 	return strings.TrimRight(sb.String(), "\n"), nil
+}
+
+// isStaleActive reports whether an active-ticket record exists with no
+// windows to back it.
+func isStaleActive(activeTicket string, windowCount int) bool {
+	return activeTicket != "" && windowCount == 0
 }
 
 // paneStateSuffix annotates a dead window in the text status output.
@@ -103,8 +118,9 @@ func runStatus(asJSON bool) error {
 		Session:      session,
 		ActiveTicket: ticket,
 		Description:  desc,
-		Windows:      windows,
+		Windows:      windowNames(windows),
 		Panes:        labelPanes(panes, windowLabels(cfg)),
+		StaleActive:  isStaleActive(ticket, len(windows)),
 	}
 	out, err := formatStatus(st, asJSON)
 	if err != nil {

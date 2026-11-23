@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +67,41 @@ func TestPickerLabelRoundTrip(t *testing.T) {
 	back := pickerSelectionToWindows([]string{"admin-ui:dev", "orphan-thing"}, windows, labels)
 	if len(back) != 2 || back[0] != "admin-ui-dev" || back[1] != "orphan-thing" {
 		t.Errorf("back = %v", back)
+	}
+}
+
+func TestUniqueStrings(t *testing.T) {
+	got := uniqueStrings([]string{"a", "b", "a", "c", "b"})
+	if want := []string{"a", "b", "c"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestWindowsNamed(t *testing.T) {
+	ws := []tmuxWindow{{"@1", "a"}, {"@2", "b"}, {"@3", "a"}}
+	if got := windowsNamed(ws, "a"); len(got) != 2 || got[0].ID != "@1" || got[1].ID != "@3" {
+		t.Errorf("got %v", got)
+	}
+	if got := windowsNamed(ws, "z"); len(got) != 0 {
+		t.Errorf("got %v", got)
+	}
+}
+
+func TestLabelsFor(t *testing.T) {
+	got := labelsFor([]string{"backend-api", "orphan"}, map[string]string{"backend-api": "backend:api"})
+	if want := []string{"backend:api", ""}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestNewStopReportEncodesEmptyArrays(t *testing.T) {
+	b, err := json.Marshal(newStopReport())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"stopped", "stopped_targets", "not_running", "not_running_targets", "failed", "failed_targets"} {
+		if !strings.Contains(string(b), `"`+f+`":[]`) {
+			t.Errorf("%s not an empty array in %s", f, b)
+		}
 	}
 }

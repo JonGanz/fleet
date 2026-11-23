@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -75,6 +77,11 @@ func resolveTicketState(tasksDirPath, ticket string) (*TaskState, error) {
 		}
 		path := filepath.Join(tasksDirPath, ticket+".json")
 		if _, err := os.Stat(path); err != nil {
+			// An unknown ticket is a usage error (exit 2) per the contract;
+			// any other stat failure is a real one.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil, usageErrorf("no task state found for ticket %q (expected %s; see `fleet-task list`)", ticket, path)
+			}
 			return nil, fmt.Errorf("no task state found for ticket %q (expected %s): %w", ticket, path, err)
 		}
 		return loadTaskState(path)

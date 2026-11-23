@@ -22,9 +22,9 @@ func TestAvailablePairs(t *testing.T) {
 
 	got := availablePairs(cfg, ts)
 	want := []RunPair{
-		{Repo: "backend", RunName: "api", Cmd: "npm run start:dev", Runtime: "linux", WorktreeDir: "/state/worktrees/PROJ-1234/backend"},
-		{Repo: "backend", RunName: "worker", Cmd: "npm run start:worker", Runtime: "linux", WorktreeDir: "/state/worktrees/PROJ-1234/backend"},
-		{Repo: "admin-ui", RunName: "dev", Cmd: "npm run dev", Runtime: "windows", WorktreeDir: "/state/worktrees/PROJ-1234/admin-ui"},
+		{Repo: "backend", RunName: "api", Cmd: "npm run start:dev", Runtime: "linux", WorktreeDir: "/state/worktrees/PROJ-1234/backend", Branch: "PROJ-1234"},
+		{Repo: "backend", RunName: "worker", Cmd: "npm run start:worker", Runtime: "linux", WorktreeDir: "/state/worktrees/PROJ-1234/backend", Branch: "PROJ-1234"},
+		{Repo: "admin-ui", RunName: "dev", Cmd: "npm run dev", Runtime: "windows", WorktreeDir: "/state/worktrees/PROJ-1234/admin-ui", Branch: "PROJ-1234"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("availablePairs = %+v, want %+v", got, want)

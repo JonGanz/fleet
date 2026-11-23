@@ -193,3 +193,20 @@ func TestParseReposConfigRejectsWindowNameCollision(t *testing.T) {
 		t.Errorf("fixture should be valid: %v", err)
 	}
 }
+
+func TestParseReposConfigRejectsBadSessionName(t *testing.T) {
+	for _, name := range []string{"my.fleet", "a:b"} {
+		yml := "tmux:\n  session_name: \"" + name + "\"\nrepos: []\n"
+		if _, err := parseReposConfig([]byte(yml)); err == nil {
+			t.Errorf("session_name %q should be rejected", name)
+		}
+	}
+}
+
+func TestParseReposConfigAllowsDots(t *testing.T) {
+	// Windows are targeted by id, so dotted names are fine.
+	yml := "tmux:\n  session_name: fleet\nrepos:\n  - name: my.app\n    run:\n      - name: dev.server\n        cmd: x\n"
+	if _, err := parseReposConfig([]byte(yml)); err != nil {
+		t.Errorf("dotted names rejected: %v", err)
+	}
+}

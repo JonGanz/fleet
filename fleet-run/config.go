@@ -115,6 +115,11 @@ func parseReposConfig(data []byte) (*ReposConfig, error) {
 // config (e.g. repo "admin" + run "ui-dev" collides with repo "admin-ui" +
 // run "dev", and duplicate run names within a repo collide with themselves).
 func (c *ReposConfig) validate() error {
+	// tmux silently rewrites "." and ":" in a new session's name to "_", so
+	// the session fleet-run creates would never be found again by name.
+	if strings.ContainsAny(c.Tmux.SessionName, ".:") {
+		return fmt.Errorf("tmux.session_name %q must not contain '.' or ':' (tmux would rename the session)", c.Tmux.SessionName)
+	}
 	seen := make(map[string]string) // window name -> "repo:run" that claimed it
 	for _, r := range c.Repos {
 		if strings.Contains(r.Name, ":") {

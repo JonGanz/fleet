@@ -79,3 +79,21 @@ func TestCheckWorktreeDir(t *testing.T) {
 		t.Error("expected error for non-directory")
 	}
 }
+
+func TestParseWindowLines(t *testing.T) {
+	got, err := parseWindowLines("@1\tbackend-api\n@12\tmy.app-dev\n\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != (tmuxWindow{"@1", "backend-api"}) || got[1] != (tmuxWindow{"@12", "my.app-dev"}) {
+		t.Errorf("got %v", got)
+	}
+	if names := windowNames(got); len(names) != 2 || names[1] != "my.app-dev" {
+		t.Errorf("windowNames = %v", names)
+	}
+	for _, bad := range []string{"noTab", "1\tname"} {
+		if _, err := parseWindowLines(bad); err == nil {
+			t.Errorf("parseWindowLines(%q) should fail", bad)
+		}
+	}
+}

@@ -95,3 +95,28 @@ func pickerSelectionToWindows(selected, windows []string, labels map[string]stri
 	}
 	return out
 }
+
+// uniqueStrings returns ss without repeats, keeping first-seen order.
+func uniqueStrings(ss []string) []string {
+	seen := make(map[string]bool, len(ss))
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// windowsNamed returns every window called name. Normally at most one, but a
+// window created by hand with the same name is stopped along with it.
+func windowsNamed(windows []tmuxWindow, name string) []tmuxWindow {
+	var out []tmuxWindow
+	for _, w := range windows {
+		if w.Name == name {
+			out = append(out, w)
+		}
+	}
+	return out
+}

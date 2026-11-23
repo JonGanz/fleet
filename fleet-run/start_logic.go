@@ -8,6 +8,7 @@ const (
 	startStatusAlreadyRunning = "already_running"
 	startStatusFailed         = "failed"
 	startStatusRespawned      = "respawned"
+	startStatusRestarted      = "restarted"
 	startStatusStarted        = "started"
 )
 
@@ -41,12 +42,26 @@ func (r StartReport) failedCount() int {
 }
 
 // existingWindowStatus decides what start does with a target whose window
-// already exists: leave a live pane alone, respawn a dead one.
-func existingWindowStatus(pane PaneInfo) string {
-	if pane.Alive {
+// already exists: respawn a dead pane; leave a live one alone, unless
+// restart (`fleet-run restart`) asks for it to be respawned too.
+func existingWindowStatus(pane PaneInfo, restart bool) string {
+	switch {
+	case !pane.Alive:
+		return startStatusRespawned
+	case restart:
+		return startStatusRestarted
+	default:
 		return startStatusAlreadyRunning
 	}
-	return startStatusRespawned
+}
+
+// launched reports whether the target's app was (re)started by this run.
+func (r StartResult) launched() bool {
+	switch r.Status {
+	case startStatusRespawned, startStatusRestarted, startStatusStarted:
+		return true
+	}
+	return false
 }
 
 // resolveStartTargets picks the pairs to start without a picker: every pair

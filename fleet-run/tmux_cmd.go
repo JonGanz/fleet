@@ -1,10 +1,36 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // This file contains pure tmux argv-building functions, kept separate from
 // tmux_exec.go's subprocess execution so the command shapes can be unit
 // tested without a real tmux binary.
+//
+// Existing windows are always targeted by their server-unique id ("@N",
+// from list-windows/list-panes), never by name: tmux parses a "." in the
+// window part of a target as a window.pane separator, so a window named
+// "my.app-dev" can be created but not found again by name.
+
+// attachSessionArgs builds argv attaching the current terminal to session.
+func attachSessionArgs(session string) []string {
+	return []string{"attach-session", "-t", exactTarget(session)}
+}
+
+// capturePaneArgs builds argv printing a window's pane content, including up
+// to historyLines lines of scrollback, with wrapped lines joined (-J).
+func capturePaneArgs(windowID string, historyLines int) []string {
+	return []string{"capture-pane", "-p", "-J", "-S", fmt.Sprintf("-%d", historyLines), "-t", windowID}
+}
+
+// currentWindowTarget builds "=<session>:", the session's current window.
+// Right after new-session that is the only window, whatever base-index the
+// user's tmux config sets.
+func currentWindowTarget(session string) string {
+	return exactTarget(session) + ":"
+}
 
 // exactTarget prefixes a tmux target with "=" to force exact-name matching.
 // Without it, tmux falls back to prefix matching against every session on
@@ -21,13 +47,52 @@ func hasSessionArgs(session string) []string {
 	return []string{"has-session", "-t", exactTarget(session)}
 }
 
+// indexedTarget builds an exact "=<session>:<index>" target for creating a
+// window at a specific, caller-computed index.
+//
+// We compute the index ourselves (see nextFreeWindowIndex) and target it
+// explicitly rather than relying on tmux's own placement rules: a bare
+// session target (no index) bases placement on the *attached client's*
+// current window rather than the target session's, and the "-a" flag
+// ("insert after target-window") does the same when the target session
+// isn't the one the client is attached to — both were caught, against a
+// live tmux server, silently creating windows in the operator's current
+// session instead of the configured fleet session.
+func indexedTarget(session string, index int) string {
+	return fmt.Sprintf("%s:%d", exactTarget(session), index)
+}
+
+// killWindowArgs builds argv for killing a window by id.
+func killWindowArgs(windowID string) []string {
+	return []string{"kill-window", "-t", windowID}
+}
+
+// listPanesArgs builds argv listing every pane in the session as
+// tab-separated "window_id, window_name, pane_dead, pane_pid,
+// pane_dead_status" lines (see parsePaneLines).
+func listPanesArgs(session string) []string {
+	return []string{"list-panes", "-s", "-t", exactTarget(session), "-F", paneFormat}
+}
+
+// listWindowIndicesArgs builds argv for listing window indices in a session,
+// used to compute a free index for new-window to target explicitly.
+func listWindowIndicesArgs(session string) []string {
+	return []string{"list-windows", "-t", exactTarget(session), "-F", "#{window_index}"}
+}
+
+// listWindowsArgs builds argv listing a session's windows as tab-separated
+// "window_id, window_name" lines (see parseWindowLines).
+func listWindowsArgs(session string) []string {
+	return []string{"list-windows", "-t", exactTarget(session), "-F", "#{window_id}\t#{window_name}"}
+}
+
 // newSessionPrefix builds the leading "-f <file>" global flag (if configFile
 // is set) plus the "new-session -d -s <session>" argv shared by both
 // runtime variants below.
 //
 // Note: -f is a global tmux flag, not a `new-session` flag, so it must
 // precede the subcommand: `tmux -f <config_file> new-session -d -s <name>`,
-// not `tmux new-session -f <config_file> ...`.
+// not `tmux new-session -f <config_file> ...`. (tmuxArgv puts -L before it.)
 func newSessionPrefix(session, configFile string) []string {
 	var args []string
 	if configFile != "" {
@@ -46,7 +111,7 @@ func newSessionPrefix(session, configFile string) []string {
 func newSessionWithWindowArgsLinux(session, configFile, name, cwd, cmd string) []string {
 	args := newSessionPrefix(session, configFile)
 	args = append(args, "-n", name, "-c", cwd, cmd)
-	return withRemainOnExit(args, session, name)
+	return withRemainOnExit(args, currentWindowTarget(session))
 }
 
 // newSessionWithWindowArgsWindows builds argv that creates the fleet session
@@ -54,49 +119,18 @@ func newSessionWithWindowArgsLinux(session, configFile, name, cwd, cmd string) [
 // powershell.exe (the windows-runtime case). winDir must already be the
 // win32-form path, per the same requirement as newWindowArgsWindows.
 func newSessionWithWindowArgsWindows(session, configFile, name, winDir, cmd string) []string {
-	psCmd := windowsPowershellCommand(winDir, cmd)
 	args := newSessionPrefix(session, configFile)
-	args = append(args, "-n", name, "powershell.exe", "-NoExit", "-Command", psCmd)
-	return withRemainOnExit(args, session, name)
-}
-
-// listWindowsArgs builds argv for listing window names in a session.
-func listWindowsArgs(session string) []string {
-	return []string{"list-windows", "-t", exactTarget(session), "-F", "#{window_name}"}
-}
-
-// listWindowIndicesArgs builds argv for listing window indices in a session,
-// used to compute a free index for new-window to target explicitly.
-func listWindowIndicesArgs(session string) []string {
-	return []string{"list-windows", "-t", exactTarget(session), "-F", "#{window_index}"}
-}
-
-// indexedTarget builds an exact "=<session>:<index>" target for creating a
-// window at a specific, caller-computed index.
-//
-// We compute the index ourselves (see nextFreeWindowIndex) and target it
-// explicitly rather than relying on tmux's own placement rules: a bare
-// session target (no index) bases placement on the *attached client's*
-// current window rather than the target session's, and the "-a" flag
-// ("insert after target-window") does the same when the target session
-// isn't the one the client is attached to — both were caught, against a
-// live tmux server, silently creating windows in the operator's current
-// session instead of the configured fleet session.
-func indexedTarget(session string, index int) string {
-	return fmt.Sprintf("%s:%d", exactTarget(session), index)
+	args = append(args, "-n", name)
+	args = append(args, powershellArgv(winDir, cmd)...)
+	return withRemainOnExit(args, currentWindowTarget(session))
 }
 
 // newWindowArgsLinux builds argv for creating a window that runs cmd
 // directly in cwd (the linux-runtime case), at the given explicit index.
 func newWindowArgsLinux(session, name, cwd, cmd string, index int) []string {
-	args := []string{"new-window", "-t", indexedTarget(session, index), "-n", name, "-c", cwd, cmd}
-	return withRemainOnExit(args, session, name)
-}
-
-// windowsPowershellCommand builds the -Command string used to run cmd inside
-// a Windows-side shell, cd'd into the (already win32-translated) directory.
-func windowsPowershellCommand(winDir, cmd string) string {
-	return fmt.Sprintf("cd '%s'; %s", winDir, cmd)
+	target := indexedTarget(session, index)
+	args := []string{"new-window", "-t", target, "-n", name, "-c", cwd, cmd}
+	return withRemainOnExit(args, target)
 }
 
 // newWindowArgsWindows builds argv for creating a window that runs cmd via
@@ -104,59 +138,40 @@ func windowsPowershellCommand(winDir, cmd string) string {
 // `wslpath -w`), since tmux's own -c expects a WSL-side path and can't be
 // used to seed the Windows process's working directory.
 func newWindowArgsWindows(session, name, winDir, cmd string, index int) []string {
-	psCmd := windowsPowershellCommand(winDir, cmd)
-	args := []string{"new-window", "-t", indexedTarget(session, index), "-n", name, "powershell.exe", "-NoExit", "-Command", psCmd}
-	return withRemainOnExit(args, session, name)
+	target := indexedTarget(session, index)
+	args := []string{"new-window", "-t", target, "-n", name}
+	args = append(args, powershellArgv(winDir, cmd)...)
+	return withRemainOnExit(args, target)
 }
 
-// windowTarget builds an exact "=<session>:<window name>" target.
-func windowTarget(session, name string) string {
-	return exactTarget(session) + ":" + name
+// powershellArgv is the command a windows-runtime window runs.
+func powershellArgv(winDir, cmd string) []string {
+	return []string{"powershell.exe", "-NoExit", "-Command", windowsPowershellCommand(winDir, cmd)}
 }
 
-// withRemainOnExit appends a chained `; set-option -w -t <window>
-// remain-on-exit on` to a window-creating argv. Chaining it into the same
-// tmux invocation (rather than a second tmux call) applies the option in the
-// same server command queue as the window's creation, so even a command that
-// exits immediately leaves a dead pane behind -- with its output, readable
-// via `fleet-run logs` -- instead of the window silently vanishing.
-func withRemainOnExit(args []string, session, name string) []string {
-	return append(args, ";", "set-option", "-w", "-t", windowTarget(session, name), "remain-on-exit", "on")
+// powershellQuote returns s as a PowerShell single-quoted (verbatim) string
+// literal: the only character special inside one is the single quote
+// itself, which is escaped by doubling it.
+func powershellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// respawnPaneArgsLinux builds argv that restarts a window's dead pane
-// (kept by remain-on-exit) running cmd in cwd.
-func respawnPaneArgsLinux(session, name, cwd, cmd string) []string {
-	return []string{"respawn-pane", "-k", "-t", windowTarget(session, name), "-c", cwd, cmd}
+// respawnPaneArgsLinux builds argv that restarts a window's pane (killing
+// it first if still running) running cmd in cwd.
+func respawnPaneArgsLinux(windowID, cwd, cmd string) []string {
+	return []string{"respawn-pane", "-k", "-t", windowID, "-c", cwd, cmd}
 }
 
-// respawnPaneArgsWindows builds argv that restarts a window's dead pane via
+// respawnPaneArgsWindows builds argv that restarts a window's pane via
 // powershell.exe; winDir must already be win32-form (see
 // newWindowArgsWindows).
-func respawnPaneArgsWindows(session, name, winDir, cmd string) []string {
-	psCmd := windowsPowershellCommand(winDir, cmd)
-	return []string{"respawn-pane", "-k", "-t", windowTarget(session, name), "powershell.exe", "-NoExit", "-Command", psCmd}
+func respawnPaneArgsWindows(windowID, winDir, cmd string) []string {
+	return append([]string{"respawn-pane", "-k", "-t", windowID}, powershellArgv(winDir, cmd)...)
 }
 
-// listPanesArgs builds argv listing every pane in the session as
-// tab-separated "window_name, pane_dead, pane_pid, pane_dead_status" lines
-// (see parsePaneLines).
-func listPanesArgs(session string) []string {
-	return []string{"list-panes", "-s", "-t", exactTarget(session), "-F", paneFormat}
-}
-
-// paneFormat is the -F format parsed by parsePaneLines.
-const paneFormat = "#{window_name}\t#{pane_dead}\t#{pane_pid}\t#{pane_dead_status}"
-
-// capturePaneArgs builds argv printing a window's pane content, including up
-// to historyLines lines of scrollback, with wrapped lines joined (-J).
-func capturePaneArgs(session, name string, historyLines int) []string {
-	return []string{"capture-pane", "-p", "-J", "-S", fmt.Sprintf("-%d", historyLines), "-t", windowTarget(session, name)}
-}
-
-// killWindowArgs builds argv for killing a specific window by name.
-func killWindowArgs(session, name string) []string {
-	return []string{"kill-window", "-t", windowTarget(session, name)}
+// selectWindowArgs builds argv making a window its session's current one.
+func selectWindowArgs(windowID string) []string {
+	return []string{"select-window", "-t", windowID}
 }
 
 // setSessionOptionArgs builds argv for setting the @fleet_task_ticket/
@@ -177,14 +192,54 @@ func setSessionOptionArgs(name, value string) []string {
 	return []string{"set-option", "-g", name, value}
 }
 
-// unsetSessionOptionArgs builds argv for clearing a global session option.
-func unsetSessionOptionArgs(name string) []string {
-	return []string{"set-option", "-gu", name}
-}
-
 // showSessionOptionArgs builds argv for reading a global session option's
 // value only (-v), so callers get a bare value with no "name value" prefix
 // to strip.
 func showSessionOptionArgs(name string) []string {
 	return []string{"show-options", "-g", "-v", name}
+}
+
+// socketPathArgs builds argv printing the server's socket path, used by
+// attach to tell whether $TMUX points at this same server.
+func socketPathArgs(session string) []string {
+	return []string{"display-message", "-p", "-t", currentWindowTarget(session), "#{socket_path}"}
+}
+
+// switchClientArgs builds argv switching the calling tmux client to session.
+func switchClientArgs(session string) []string {
+	return []string{"switch-client", "-t", exactTarget(session)}
+}
+
+// tmuxArgv prepends `-L <socket>` when socket is non-empty (FLEET_TMUX_SOCKET).
+// It must come before every other global flag such as -f, so it is added
+// here, once, rather than by each builder.
+func tmuxArgv(socket string, args []string) []string {
+	if socket == "" {
+		return args
+	}
+	return append([]string{"-L", socket}, args...)
+}
+
+// unsetSessionOptionArgs builds argv for clearing a global session option.
+func unsetSessionOptionArgs(name string) []string {
+	return []string{"set-option", "-gu", name}
+}
+
+// windowsPowershellCommand builds the -Command string used to run cmd inside
+// a Windows-side shell, in the (already win32-translated) directory.
+// -LiteralPath stops PowerShell treating [ ] * ? in the path as wildcards.
+func windowsPowershellCommand(winDir, cmd string) string {
+	return fmt.Sprintf("Set-Location -LiteralPath %s; %s", powershellQuote(winDir), cmd)
+}
+
+// withRemainOnExit appends a chained `; set-option -w -t <target>
+// remain-on-exit on` to a window-creating argv. Chaining it into the same
+// tmux invocation (rather than a second tmux call) applies the option in the
+// same server command queue as the window's creation, so even a command that
+// exits immediately leaves a dead pane behind -- with its output, readable
+// via `fleet-run logs` -- instead of the window silently vanishing. target
+// is the index/current-window form used for the creation, not the window
+// name (see the file comment).
+func withRemainOnExit(args []string, target string) []string {
+	return append(args, ";", "set-option", "-w", "-t", target, "remain-on-exit", "on")
 }

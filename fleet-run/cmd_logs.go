@@ -79,7 +79,7 @@ func runLogs(label string, lines int, asJSON bool) error {
 	if !ok {
 		return fmt.Errorf("%s is not running (no window %q in session %q; see `fleet-run status`)", label, window, session)
 	}
-	captured, err := capturePane(session, window, lines)
+	captured, err := capturePane(pane, lines)
 	if err != nil {
 		return err
 	}

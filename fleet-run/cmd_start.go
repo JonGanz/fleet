@@ -8,8 +8,11 @@ import (
 
 // startOpts are `fleet-run start`'s parsed flags and arguments.
 type startOpts struct {
-	all     bool
-	asJSON  bool
+	all    bool
+	asJSON bool
+	// restart makes a target whose app is still alive restart
+	// (`fleet-run restart`) instead of being left alone.
+	restart bool
 	targets []string // "repo:run-name" labels
 	ticket  string
 }
@@ -157,15 +160,16 @@ func startFlow(cfg *ReposConfig, ts *TaskState, opts startOpts) error {
 	// set-option` does not start a server, so they can only be set once a
 	// window (hence a server) exists: right after the first successful
 	// creation, or immediately if the session already has windows.
+	// A failed attempt is retried for the next target rather than skipped.
 	recorded := false
 	record := func() error {
 		if recorded {
 			return nil
 		}
-		recorded = true
 		if err := setActiveTicket(ts); err != nil {
 			return fmt.Errorf("recording active ticket: %w", err)
 		}
+		recorded = true
 		return nil
 	}
 	if len(panes) > 0 {
@@ -175,8 +179,8 @@ func startFlow(cfg *ReposConfig, ts *TaskState, opts startOpts) error {
 	}
 
 	for _, pair := range selected {
-		res := startOne(session, cfg.Tmux.ConfigFile, pair, panes)
-		if res.Status == startStatusStarted || res.Status == startStatusRespawned {
+		res := startOne(session, cfg.Tmux.ConfigFile, ts, pair, panes, opts.restart)
+		if res.launched() {
 			if err := record(); err != nil {
 				res.Status, res.Error = startStatusFailed, err.Error()
 			}
@@ -233,23 +237,30 @@ func selectStartTargets(pairs []RunPair, opts startOpts) ([]RunPair, error) {
 	return selected, nil
 }
 
-// startOne creates pair's window, respawns it if its pane is dead, or leaves
-// a live one alone.
-func startOne(session, configFile string, pair RunPair, panes []PaneInfo) StartResult {
-	res := StartResult{Target: pair.Label(), Window: pair.WindowName()}
-	if pane, exists := findPane(panes, res.Window); exists {
-		res.Status = existingWindowStatus(pane)
-		if res.Status == startStatusRespawned {
-			if err := respawnWindow(session, res.Window, pair); err != nil {
-				res.Status, res.Error = startStatusFailed, err.Error()
-			}
+// startOne creates pair's window, respawns it if its pane is dead (or alive
+// and restart is set), or leaves a live one alone. pre-run/post-run hooks run
+// around every create or respawn, never for a window left alone.
+func startOne(session, configFile string, ts *TaskState, pair RunPair, panes []PaneInfo, restart bool) StartResult {
+	res := StartResult{Target: pair.Label(), Window: pair.WindowName(), Status: startStatusStarted}
+	pane, exists := findPane(panes, res.Window)
+	if exists {
+		res.Status = existingWindowStatus(pane, restart)
+		if res.Status == startStatusAlreadyRunning {
+			return res
 		}
-		return res
 	}
-	if err := newWindow(session, configFile, res.Window, pair); err != nil {
+
+	runRunHooks(hookPhasePreRun, ts, pair)
+	var err error
+	if exists {
+		err = respawnWindow(pane.WindowID, pair)
+	} else {
+		err = newWindow(session, configFile, res.Window, pair)
+	}
+	if err != nil {
 		res.Status, res.Error = startStatusFailed, err.Error()
 		return res
 	}
-	res.Status = startStatusStarted
+	runRunHooks(hookPhasePostRun, ts, pair)
 	return res
 }
