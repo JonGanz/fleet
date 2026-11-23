@@ -9,9 +9,6 @@ Remaining items after the 2026-11 sweep (see commits f29357c..8bfd896). Build, v
 - Windows staging-to-entry rename is a plain `os.Rename` over `/mnt/c`. Not tested under antivirus/indexer contention.
 
 ## Open items
-- fleet-cache: legacy entries (pre-staging) with a partial `node_modules` can't be detected. No completion marker. Only entries missing `node_modules` entirely are rebuilt. Consider a marker file written after a successful build.
-- fleet-cache: `windowsRemoveAll` may duplicate helpers in fleet-task. Not reviewed. Check and dedupe or document.
-- fleet-task: `note:` lines in `selfHealWorktreeRemove` still use the old wording. Normalize to `warning:`/`error:`.
 - `--json` only on `fleet-task list`, `fleet-run status`, `fleet-cache gc`/`gc-windows`. Other read commands have none.
 
 ## Decisions kept as-is (revisit only if wanted)

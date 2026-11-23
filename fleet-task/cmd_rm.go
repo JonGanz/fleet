@@ -154,7 +154,7 @@ func selfHealWorktreeRemove(worktreePath string, removeErr error, prune func() e
 		if pruneErr := prune(); pruneErr != nil {
 			warnf("worktree prune after removing missing %s: %v", worktreePath, pruneErr)
 		}
-		fmt.Fprintf(os.Stderr, "note: %s was already gone from disk; pruned its worktree registration\n", worktreePath)
+		warnf("%s was already gone from disk; pruned its worktree registration", worktreePath)
 		return nil
 	} else if statErr != nil {
 		return removeErr
@@ -166,7 +166,7 @@ func selfHealWorktreeRemove(worktreePath string, removeErr error, prune func() e
 	if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
 		return fmt.Errorf("%w (also failed to remove leftover directory: %v)", removeErr, rmErr)
 	}
-	fmt.Fprintf(os.Stderr, "note: git had already deregistered %s; removed leftover directory\n", worktreePath)
+	warnf("git had already deregistered %s; removed leftover directory", worktreePath)
 	return nil
 }
 

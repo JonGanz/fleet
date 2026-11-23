@@ -22,7 +22,8 @@ PowerShell/npm processes rather than WSL reaching into `/mnt/...`.
     ├── <sha256 of package-lock.json>/
     │   ├── package-lock.json   # copy of the lockfile that produced this entry
     │   ├── package.json        # copy of the manifest (`npm ci` needs both)
-    │   └── node_modules/       # populated once via `npm ci`, reused thereafter
+    │   ├── node_modules/       # populated once via `npm ci`, reused thereafter
+    │   └── .fleet-cache-complete # written last; an entry without it is rebuilt
     └── <sha256>.tmp-<pid>/     # staging dir while an entry is being built
 ```
 
@@ -35,7 +36,10 @@ leaves only a `<hash>.tmp-<pid>` staging dir (never a reusable partial
 entry), and staging dirs are removed on any failure. Concurrent `ensure`s of
 the same hash don't corrupt each other: the loser's rename finds the
 winner's entry already present, discards its own staging dir and uses the
-winner's. `gc` reports leftover staging dirs older than a day (see below).
+winner's. A `.fleet-cache-complete` marker is written into the staging dir
+just before the rename; an entry dir without it (e.g. a legacy entry built
+before staging existed, possibly with a partial `node_modules`) is deleted
+and rebuilt. `gc` reports leftover staging dirs older than a day (see below).
 
 **Conventions common to every command:**
 

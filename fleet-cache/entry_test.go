@@ -48,7 +48,7 @@ func TestEnsureCacheEntrySuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{"package.json", "package-lock.json", "node_modules/pkg"} {
+	for _, f := range []string{"package.json", "package-lock.json", "node_modules/pkg", entryCompleteMarker} {
 		if _, err := os.Stat(filepath.Join(entry, f)); err != nil {
 			t.Errorf("entry missing %s: %v", f, err)
 		}
@@ -109,6 +109,9 @@ func TestEnsureCacheEntryLosesRace(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(entry, "node_modules", "winner"), 0o755); err != nil {
 				return err
 			}
+			if err := os.WriteFile(filepath.Join(entry, entryCompleteMarker), nil, 0o644); err != nil {
+				return err
+			}
 			return fakeInstall(staging)
 		},
 		remove: os.RemoveAll,
@@ -149,4 +152,25 @@ func TestStageEntryInputsDetectsLockfileChange(t *testing.T) {
 	if err := stageEntryInputs(filepath.Join(t.TempDir(), "s"), lock, "not-the-hash"); err == nil {
 		t.Fatal("expected mismatch error")
 	}
+}
+
+func TestEnsureCacheEntryReplacesLegacyEntryWithoutMarker(t *testing.T) {
+	_, lock, hash := fakeProject(t)
+	nc := filepath.Join(t.TempDir(), "node-cache")
+	entry := filepath.Join(nc, hash)
+	// legacy entry: node_modules present (maybe partial), no completion marker
+	os.MkdirAll(filepath.Join(entry, "node_modules", "partial"), 0o755)
+
+	if err := ensureCacheEntry(entry, hash, lock, entryOps{install: fakeInstall, remove: os.RemoveAll}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(entry, "node_modules", "partial")); err == nil {
+		t.Error("legacy partial content must be discarded")
+	}
+	for _, f := range []string{"node_modules/pkg", entryCompleteMarker} {
+		if _, err := os.Stat(filepath.Join(entry, f)); err != nil {
+			t.Errorf("rebuilt entry missing %s: %v", f, err)
+		}
+	}
+	noStaging(t, nc)
 }

@@ -279,7 +279,9 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
   error, not an empty root), and without both `--roots` and `--force` they only report.
 - Cache entries are built in a staging directory `<cache root>/node-cache/<hash>.tmp-<pid>` and
   renamed to `<hash>` only once complete, so a `<hash>` directory is always a finished entry and
-  concurrent `ensure`s of one hash can't corrupt each other. Staging dirs left behind by a killed
+  concurrent `ensure`s of one hash can't corrupt each other. A complete entry carries a
+  `.fleet-cache-complete` marker at its root (written just before the rename); an entry without
+  it is treated as incomplete, deleted and rebuilt. Staging dirs left behind by a killed
   run are reported by `gc` (and removed with `--force --roots`) once they're older than a day.
 - `fleet-cache ensure` (Linux/WSL2 path only) is safe to call repeatedly against the same
   `<worktree_dir>`: it's a no-op if `<worktree_dir>/node_modules` is already linked from the current

@@ -14,6 +14,13 @@ import (
 // place, so an entry directory only ever exists once it is complete.
 const stagingInfix = ".tmp-"
 
+// entryCompleteMarker is written at the root of a staging dir once the
+// entry is fully built (install and finalize both succeeded), just before
+// the rename into place. An entry dir without it is never trusted: that
+// catches legacy entries built before staging existed, which may hold a
+// partial node_modules.
+const entryCompleteMarker = ".fleet-cache-complete"
+
 // stagingMaxAge is how old a staging dir must be before gc flags it as
 // abandoned (a live `ensure` is never expected to take this long).
 const stagingMaxAge = 24 * time.Hour
@@ -95,6 +102,18 @@ func stagingPath(entry string) string {
 	return fmt.Sprintf("%s%s%d", entry, stagingInfix, os.Getpid())
 }
 
+// isEntryComplete reports whether entry carries entryCompleteMarker.
+func isEntryComplete(entry string) (bool, error) {
+	_, err := os.Stat(filepath.Join(entry, entryCompleteMarker))
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("checking cache entry %s: %w", entry, err)
+}
+
 func isStagingName(name string) bool {
 	return strings.Contains(name, stagingInfix)
 }
@@ -121,15 +140,17 @@ type entryOps struct {
 //     discards its own staging dir and uses the winner's;
 //   - the staging dir is removed on any failure.
 func ensureCacheEntry(entry, hash, lockPath string, ops entryOps) error {
-	nodeModules := filepath.Join(entry, "node_modules")
-	if _, err := os.Stat(nodeModules); err == nil {
+	complete, err := isEntryComplete(entry)
+	if err != nil {
+		return err
+	}
+	if complete {
 		return nil
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("checking cache entry %s: %w", entry, err)
 	}
 
-	// An entry dir without node_modules can only be a partial entry from
-	// before staging existed; it can't be trusted, and rename can't replace it.
+	// An entry dir without the completion marker can only be a legacy entry
+	// from before staging existed (possibly with a partial node_modules); it
+	// can't be trusted, and rename can't replace it.
 	if _, err := os.Lstat(entry); err == nil {
 		logf("removing incomplete cache entry %s", entry)
 		if err := ops.remove(entry); err != nil {
@@ -164,9 +185,12 @@ func ensureCacheEntry(entry, hash, lockPath string, ops entryOps) error {
 			return err
 		}
 	}
+	if err := os.WriteFile(filepath.Join(staging, entryCompleteMarker), []byte(hash+"\n"), 0o644); err != nil {
+		return fmt.Errorf("writing cache entry completion marker: %w", err)
+	}
 
 	if err := os.Rename(staging, entry); err != nil {
-		if _, statErr := os.Stat(nodeModules); statErr == nil {
+		if done, _ := isEntryComplete(entry); done {
 			logf("cache entry %s was completed by another process; using it", shortHash(hash))
 			return nil
 		}
