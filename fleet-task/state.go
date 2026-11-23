@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -28,22 +29,15 @@ type TaskState struct {
 }
 
 // writeTaskState marshals the task state to JSON and writes it to
-// <state dir>/tasks/<ticket>.json, taking an exclusive flock on that
-// specific file as a safety belt against concurrent writers (contract:
-// "Writes to a given ticket's own file should still take a flock on that
-// file"). Locking is advisory and implemented via an O_EXCL sibling
-// lockfile rather than syscall flock, so it behaves the same across
-// platforms without a cgo/unix-only dependency.
+// <state dir>/tasks/<ticket>.json via a temp file + rename, so readers never
+// see a half-written file. The caller must hold the ticket's lock
+// (lockTicket) for its whole read-modify-write cycle; taking the lock here,
+// around the write alone, would not stop two commands from losing each
+// other's updates.
 func writeTaskState(path string, st *TaskState) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}
-
-	unlock, err := lockFile(path)
-	if err != nil {
-		return err
-	}
-	defer unlock()
 
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -87,7 +81,10 @@ func listTaskFiles(dir string) ([]string, error) {
 
 // listTasks globs <dir>/*.json, parses each, and returns the resulting
 // TaskState values sorted by ticket. Files that fail to parse are skipped
-// with a warning on stderr rather than aborting the whole listing.
+// with a warning on stderr rather than aborting the whole listing. The
+// filename is authoritative for the ticket id (it's what every command looks
+// up), so a file whose `ticket` field disagrees is reported and listed under
+// its filename.
 func listTasks(dir string) ([]*TaskState, error) {
 	files, err := listTaskFiles(dir)
 	if err != nil {
@@ -99,6 +96,10 @@ func listTasks(dir string) ([]*TaskState, error) {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", f, err)
 			continue
+		}
+		if stem := strings.TrimSuffix(filepath.Base(f), ".json"); st.Ticket != stem {
+			warnf("%s says ticket %q; using %q from its filename", f, st.Ticket, stem)
+			st.Ticket = stem
 		}
 		tasks = append(tasks, st)
 	}

@@ -34,21 +34,21 @@ func TestLockIsStale(t *testing.T) {
 	now := time.Now()
 	alive := func(int) bool { return true }
 	dead := func(int) bool { return false }
-	maxAge := 5 * time.Minute
+	maxAge := time.Minute
 
 	if lockIsStale("100\n", now, now, maxAge, alive) {
 		t.Error("fresh lock with live owner should not be stale")
 	}
+	if lockIsStale("100\n", now.Add(-time.Hour), now, maxAge, alive) {
+		t.Error("old lock with live owner must not be stale (long-running command)")
+	}
 	if !lockIsStale("100\n", now, now, maxAge, dead) {
 		t.Error("fresh lock with dead owner should be stale")
-	}
-	if !lockIsStale("100\n", now.Add(-10*time.Minute), now, maxAge, alive) {
-		t.Error("old lock should be stale even if pid is alive (pid reuse)")
 	}
 	if lockIsStale("", now, now, maxAge, dead) {
 		t.Error("fresh lock with no pid yet should not be stale (owner may be mid-create)")
 	}
-	if !lockIsStale("", now.Add(-10*time.Minute), now, maxAge, alive) {
+	if !lockIsStale("garbage", now.Add(-10*time.Minute), now, maxAge, alive) {
 		t.Error("old lock with no pid should be stale")
 	}
 }
@@ -62,9 +62,9 @@ func TestPidAlive(t *testing.T) {
 	}
 }
 
-func TestLockFileCreateAndRelease(t *testing.T) {
-	target := filepath.Join(t.TempDir(), "T-1.json")
-	unlock, err := lockFile(target)
+func TestLockTicketCreateAndRelease(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "tasks", "T-1.json")
+	unlock, err := lockTicket(target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,33 +81,84 @@ func TestLockFileCreateAndRelease(t *testing.T) {
 	}
 }
 
-func TestLockFileTakesOverDeadOwner(t *testing.T) {
-	target := filepath.Join(t.TempDir(), "T-1.json")
+func TestLockTicketTakesOverDeadOwner(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "T-1.json")
 	if err := os.WriteFile(target+".lock", []byte("2147483000\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	unlock, err := lockFile(target)
+	unlock, err := lockTicket(target)
 	if err != nil {
 		t.Fatalf("expected takeover of stale lock, got %v", err)
 	}
 	unlock()
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Errorf("takeover left files behind: %v", entries)
+	}
 }
 
-func TestLockFileLiveOwnerTimesOutWithHelpfulError(t *testing.T) {
-	old := lockTimeout
-	lockTimeout = 150 * time.Millisecond
-	defer func() { lockTimeout = old }()
-
+func TestLockTicketLiveOwnerFailsFast(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "T-1.json")
 	lockPath := target + ".lock"
 	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := lockFile(target)
+	start := time.Now()
+	_, err := lockTicket(target)
 	if err == nil {
-		t.Fatal("expected timeout")
+		t.Fatal("expected an error for a live lock")
+	}
+	if time.Since(start) > time.Second {
+		t.Error("should fail fast, not wait")
 	}
 	if !strings.Contains(err.Error(), lockPath) || !strings.Contains(err.Error(), "rm ") {
 		t.Errorf("error should name the lock file and how to clear it: %v", err)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Errorf("live lock must be left in place: %v", err)
+	}
+}
+
+func TestLockTicketSecondHolderRefused(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "T-1.json")
+	unlock, err := lockTicket(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if _, err := lockTicket(target); err == nil {
+		t.Error("a held lock must not be granted twice")
+	}
+}
+
+func TestReleaseLockLeavesForeignLock(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "T-1.json.lock")
+	if err := os.WriteFile(lockPath, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	releaseLock(lockPath)
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Errorf("releaseLock removed a lock it does not own: %v", err)
+	}
+}
+
+func TestTakeOverStaleLockRestoresLiveLock(t *testing.T) {
+	// Simulates losing the race: by the time we grab the file, it holds a
+	// live owner's pid. It must be put back, not deleted.
+	lockPath := filepath.Join(t.TempDir(), "T-1.json.lock")
+	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := takeOverStaleLock(lockPath); err == nil {
+		t.Error("expected a held-lock error")
+	}
+	data, err := os.ReadFile(lockPath)
+	if err != nil || strings.TrimSpace(string(data)) != strconv.Itoa(os.Getpid()) {
+		t.Errorf("live lock not restored: %q, %v", data, err)
+	}
+	entries, _ := os.ReadDir(filepath.Dir(lockPath))
+	if len(entries) != 1 {
+		t.Errorf("expected only the restored lock, got %v", entries)
 	}
 }

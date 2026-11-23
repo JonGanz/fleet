@@ -29,15 +29,23 @@ func cmdNew(o newOpts) error {
 		return err
 	}
 
-	// taskFile validates the ticket id (no path separators, not "." / "..").
+	// taskFile validates the ticket id (usage error if unsafe).
 	tf, err := taskFile(ticket)
 	if err != nil {
 		return err
 	}
-	// `new` on an existing ticket would overwrite its state with only this
-	// run's repos and reset created_at, orphaning the earlier worktrees.
-	if _, err := os.Stat(tf); err == nil {
-		return usageErrorf("task %s already exists (%s); use `fleet-task edit %s` to add or remove repos, or `fleet-task rm %s` to start over", ticket, tf, ticket, ticket)
+	if err := requireNoTask(ticket, tf); err != nil {
+		return err
+	}
+	// Held for the whole command, so a concurrent `new`/`edit`/`rm` of the
+	// same ticket fails fast instead of interleaving with this one.
+	unlock, err := lockTicket(tf)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := requireNoTask(ticket, tf); err != nil {
+		return err
 	}
 
 	cfg, rf, err := loadConfig()
@@ -51,6 +59,9 @@ func cmdNew(o newOpts) error {
 	flagMode := len(o.Repos) > 0
 	selectedRepos, err := resolveNewRepos(cfg, o.Repos)
 	if err != nil {
+		return err
+	}
+	if err := validateBranchNames(cfg, selectedRepos, ticket, description); err != nil {
 		return err
 	}
 
@@ -69,32 +80,35 @@ func cmdNew(o newOpts) error {
 		return err
 	}
 
-	taskRepos, results, failed := addRepos(cfg, ticket, description, wtRoot, selectedRepos, patchesByRepo)
+	// addRepos writes the state file after every repo it sets up, so an
+	// interrupted `new` still leaves a task that `edit`/`rm` can handle.
+	st := &TaskState{
+		Ticket:      ticket,
+		Description: description,
+		CreatedAt:   time.Now().UTC(),
+	}
+	results, failed, addErr := addRepos(cfg, st, tf, wtRoot, selectedRepos, patchesByRepo)
 	report := func() error {
 		if !o.JSON {
 			return nil
 		}
-		return printJSON(opResult{Ticket: ticket, OK: failed == 0, Repos: results})
+		return printJSON(opResult{Ticket: ticket, OK: failed == 0 && addErr == nil, Repos: results})
+	}
+	if addErr != nil {
+		if err := report(); err != nil {
+			warnf("printing JSON result: %v", err)
+		}
+		return addErr
 	}
 
-	if len(taskRepos) == 0 {
+	if len(st.Repos) == 0 {
 		if err := report(); err != nil {
 			return err
 		}
 		return fmt.Errorf("no repos were successfully set up; not writing task state")
 	}
 
-	st := &TaskState{
-		Ticket:      ticket,
-		Description: description,
-		CreatedAt:   time.Now().UTC(),
-		Repos:       taskRepos,
-	}
-	if err := writeTaskState(tf, st); err != nil {
-		return fmt.Errorf("write task state: %w", err)
-	}
-
-	fmt.Fprintf(out, "Task %s created with %d repo(s); state written to %s\n", ticket, len(taskRepos), tf)
+	fmt.Fprintf(out, "Task %s created with %d repo(s); state written to %s\n", ticket, len(st.Repos), tf)
 	if err := report(); err != nil {
 		return err
 	}
@@ -188,11 +202,15 @@ func selectPatchesFor(cfg *ReposConfig, repoNames []string) map[string][]string 
 	return patchesByRepo
 }
 
-// addRepos sets up a worktree for each named repo (createRepoWorktree) and
-// returns the ones that succeeded plus a count of failures (unknown repo, or
-// worktree setup error). Every repo is attempted even after a failure; the
-// caller decides how to report a nonzero failure count.
-func addRepos(cfg *ReposConfig, ticket, description, wtRoot string, repoNames []string, patchesByRepo map[string][]string) (added []TaskRepo, results []repoResult, failed int) {
+// addRepos sets up a worktree for each named repo (createRepoWorktree),
+// appending each success to st.Repos and writing st to tf right away, so
+// the state file always lists every worktree that exists even if the
+// command dies partway (Ctrl-C during a long npm ci). Every repo is
+// attempted even after a failure; failed counts them (unknown repo, or
+// worktree setup error). err is set only if the state write itself fails,
+// which stops further work: carrying on would create worktrees nothing
+// records. The caller must hold the ticket's lock.
+func addRepos(cfg *ReposConfig, st *TaskState, tf, wtRoot string, repoNames []string, patchesByRepo map[string][]string) (results []repoResult, failed int, err error) {
 	for _, repoName := range repoNames {
 		repo := cfg.findRepo(repoName)
 		if repo == nil {
@@ -202,14 +220,18 @@ func addRepos(cfg *ReposConfig, ticket, description, wtRoot string, repoNames []
 			failed++
 			continue
 		}
-		tr, patchErrors, err := createRepoWorktree(cfg, repo, ticket, description, wtRoot, patchesByRepo[repoName])
+		tr, patchErrors, err := createRepoWorktree(cfg, repo, st.Ticket, st.Description, wtRoot, patchesByRepo[repoName])
 		if err != nil {
 			errorf("%v", err)
 			results = append(results, repoResult{Repo: repoName, Action: "created", Error: err.Error()})
 			failed++
 			continue
 		}
-		added = append(added, tr)
+		st.Repos = append(st.Repos, tr)
+		if err := writeTaskState(tf, st); err != nil {
+			results = append(results, repoResult{Repo: tr.Repo, Action: "created", Branch: tr.Branch, WorktreePath: tr.WorktreePath, Patches: tr.Patches, Error: err.Error()})
+			return results, failed + 1, fmt.Errorf("worktree for %s was created at %s but recording it in %s failed: %w", tr.Repo, tr.WorktreePath, tf, err)
+		}
 		results = append(results, repoResult{
 			Repo:         tr.Repo,
 			Action:       "created",
@@ -220,7 +242,7 @@ func addRepos(cfg *ReposConfig, ticket, description, wtRoot string, repoNames []
 			PatchErrors:  patchErrors,
 		})
 	}
-	return added, results, failed
+	return results, failed, nil
 }
 
 // createRepoWorktree performs the full per-repo worktree setup, shared
@@ -238,7 +260,8 @@ func createRepoWorktree(cfg *ReposConfig, repo *RepoConfig, ticket, description,
 	worktreePath := filepath.Join(wtRoot, ticket, repo.Name)
 	branch := branchName(repo.BranchTemplate, ticket, description)
 
-	if err := runHooks("pre-create", ticket, repo.Name, worktreePath); err != nil {
+	hook := hookContext{Ticket: ticket, Description: description, Repo: repo.Name, Branch: branch, WorktreeDir: worktreePath}
+	if err := runHooks("pre-create", hook); err != nil {
 		warnf("pre-create hooks for %s: %v", repo.Name, err)
 	}
 
@@ -260,7 +283,7 @@ func createRepoWorktree(cfg *ReposConfig, repo *RepoConfig, ticket, description,
 		applied = append(applied, filepath.Base(p))
 	}
 
-	if err := runHooks("post-create", ticket, repo.Name, worktreePath); err != nil {
+	if err := runHooks("post-create", hook); err != nil {
 		warnf("post-create hooks for %s: %v", repo.Name, err)
 	}
 
@@ -317,8 +340,19 @@ func selectPatches(repo string) ([]string, error) {
 	return selected, nil
 }
 
-// setupWorktree ensures the repo's base bare clone exists (cloning or
-// fetching as needed) and creates the worktree at worktreePath on branch.
+// requireNoTask refuses (usage error) a ticket that already has a state
+// file: `new` would overwrite it with only this run's repos and reset
+// created_at, orphaning the earlier worktrees.
+func requireNoTask(ticket, tf string) error {
+	if _, err := os.Stat(tf); err == nil {
+		return usageErrorf("task %s already exists (%s); use `fleet-task edit %s` to add or remove repos, or `fleet-task rm %s` to start over", ticket, tf, ticket, ticket)
+	}
+	return nil
+}
+
+// setupWorktree ensures the repo's base clone exists and is fetched
+// (ensureBase, which also completes a base left half-made by an interrupted
+// run) and creates the worktree at worktreePath on branch (addWorktree).
 // Runtime differences (WSL git vs Windows-native git.exe plus a WSL-side
 // symlink) live behind runner; base is the bare clone's WSL-visible path.
 func setupWorktree(runner gitRunner, repo *RepoConfig, base, branch, worktreePath string) error {
@@ -328,28 +362,36 @@ func setupWorktree(runner gitRunner, repo *RepoConfig, base, branch, worktreePat
 	if err := runner.Preflight(base, worktreePath); err != nil {
 		return err
 	}
-
-	exists, err := runner.BaseExists(base)
-	if err != nil {
-		return fmt.Errorf("checking base %s: %w", base, err)
+	if err := ensureBase(runner, repo.Name, repo.Origin, base); err != nil {
+		return err
 	}
-	if !exists {
-		if err := runner.CloneBare(repo.Origin, base); err != nil {
-			return fmt.Errorf("clone %s: %w", repo.Origin, err)
-		}
-	} else if err := runner.Fetch(base); err != nil {
-		return fmt.Errorf("fetch %s: %w", base, err)
-	}
-
 	if err := runner.Prune(base); err != nil {
 		warnf("worktree prune for %s: %v", base, err)
 	}
+	return addWorktree(runner, base, worktreePath, branch, repo.DefaultBranch)
+}
 
-	// WorktreeAdd falls back from "create branch" to "attach existing
-	// branch" (a prior run for this ticket) and reports both errors if both
-	// fail.
-	if err := runner.WorktreeAdd(base, worktreePath, branch, repo.DefaultBranch); err != nil {
-		return err
+// validateBranchNames computes every named repo's branch (branchName) and
+// rejects, as a usage error before any git/hook work, one that is empty or
+// that git won't accept as a branch name -- e.g. a template whose only
+// placeholder is {description} with no description given.
+func validateBranchNames(cfg *ReposConfig, repoNames []string, ticket, description string) error {
+	for _, name := range repoNames {
+		repo := cfg.findRepo(name)
+		if repo == nil {
+			continue // reported per repo by addRepos
+		}
+		branch := branchName(repo.BranchTemplate, ticket, description)
+		if branch == "" {
+			return usageErrorf("repo %s: branch_template %q gives an empty branch name for ticket %s and description %q", repo.Name, repo.BranchTemplate, ticket, description)
+		}
+		ok, err := isValidBranchName(branch)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return usageErrorf("repo %s: branch_template %q gives %q, which git does not accept as a branch name (`git check-ref-format --branch`)", repo.Name, repo.BranchTemplate, branch)
+		}
 	}
 	return nil
 }

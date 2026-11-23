@@ -1,24 +1,20 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
-// validateTicketName rejects ticket ids that can't safely become both a
-// JSON filename (<tasks dir>/<ticket>.json) and a worktree directory
-// component (<worktree_root>/<ticket>/<repo>).
-func validateTicketName(ticket string) error {
-	if ticket == "" {
-		return fmt.Errorf("ticket id is required")
-	}
-	if ticket != filepath.Base(ticket) || strings.Contains(ticket, "/") || strings.Contains(ticket, `\`) {
-		return fmt.Errorf("ticket id %q must not contain path separators", ticket)
-	}
-	if ticket == "." || ticket == ".." {
-		return fmt.Errorf("ticket id %q is not valid", ticket)
+// requireTaskExists returns noTaskError if tf (ticket's state file) is
+// missing.
+func requireTaskExists(ticket, tf string) error {
+	if _, err := os.Stat(tf); os.IsNotExist(err) {
+		return noTaskError(ticket)
 	}
 	return nil
 }
@@ -54,14 +50,56 @@ func loadConfig() (*ReposConfig, string, error) {
 
 // loadReposConfigOptional is loadConfig for commands (rm, mv) that can
 // still do useful best-effort work without repos.yaml: it returns nil if the
-// file is missing or unparsable, and every helper taking a *ReposConfig
-// tolerates nil.
+// file is missing, unparsable or invalid, and every helper taking a
+// *ReposConfig tolerates nil. A file that exists but can't be used is
+// warned about, since the fallback then ignores its base paths.
 func loadReposConfigOptional() *ReposConfig {
 	cfg, _, err := loadConfig()
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			warnf("ignoring repos.yaml: %v", err)
+		}
 		return nil
 	}
 	return cfg
+}
+
+// lockAndReadTask takes ticket's lock (see lockTicket) and then reads its
+// state, so the state the caller modifies can't change underneath it. An
+// invalid id or a ticket with no state file is a usage error (exit 2). On
+// success the caller must call unlock when done; on error nothing is held.
+func lockAndReadTask(ticket string) (tf string, st *TaskState, unlock func(), err error) {
+	tf, err = taskFile(ticket)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if err := requireTaskExists(ticket, tf); err != nil {
+		return "", nil, nil, err
+	}
+	unlock, err = lockTicket(tf)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	// Re-checked under the lock: a concurrent rm/mv may have just removed it.
+	if err := requireTaskExists(ticket, tf); err != nil {
+		unlock()
+		return "", nil, nil, err
+	}
+	st, err = readTaskState(tf)
+	if err != nil {
+		unlock()
+		return "", nil, nil, fmt.Errorf("read task %s: %w", ticket, err)
+	}
+	if st.Ticket != ticket {
+		warnf("%s says ticket %q; using %q from its filename", tf, st.Ticket, ticket)
+		st.Ticket = ticket
+	}
+	return tf, st, unlock, nil
+}
+
+// noTaskError is the usage error for a ticket with no state file.
+func noTaskError(ticket string) error {
+	return usageErrorf("no task found for ticket %s (see `fleet-task list`)", ticket)
 }
 
 // removeDirIfEmpty removes dir only if it has no entries, and otherwise
@@ -87,6 +125,37 @@ func removeDirIfEmpty(dir string) (removed bool, leftovers []string, err error) 
 		return false, nil, err
 	}
 	return true, nil, nil
+}
+
+// validateTicketName rejects ticket ids that can't safely become both a
+// JSON filename (<tasks dir>/<ticket>.json) and a worktree directory
+// component (<worktree_root>/<ticket>/<repo>) -- on Linux and, for
+// runtime: windows repos, on NTFS -- or that would be misread as a flag on
+// a later command line. Invalid ids are usage errors.
+func validateTicketName(ticket string) error {
+	const maxTicketLen = 100
+	switch {
+	case ticket == "":
+		return usageErrorf("ticket id is required")
+	case len(ticket) > maxTicketLen:
+		return usageErrorf("ticket id %q is longer than %d bytes", ticket, maxTicketLen)
+	case strings.ContainsAny(ticket, `/\`):
+		return usageErrorf("ticket id %q must not contain path separators", ticket)
+	case ticket == "." || ticket == "..":
+		return usageErrorf("ticket id %q is not valid", ticket)
+	case strings.HasPrefix(ticket, "-"):
+		return usageErrorf("ticket id %q must not start with '-'", ticket)
+	case strings.ContainsAny(ticket, `<>:"|?*`):
+		return usageErrorf("ticket id %q must not contain any of <>:\"|?* (not allowed in Windows filenames)", ticket)
+	case strings.HasSuffix(ticket, ".") || strings.HasSuffix(ticket, " "):
+		return usageErrorf("ticket id %q must not end with '.' or a space (not allowed in Windows filenames)", ticket)
+	}
+	for _, r := range ticket {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r == utf8.RuneError {
+			return usageErrorf("ticket id %q must not contain whitespace, control characters or invalid UTF-8", ticket)
+		}
+	}
+	return nil
 }
 
 // warnf prints a "warning: ..." line to stderr; the one spelling used for

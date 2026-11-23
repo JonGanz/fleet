@@ -7,7 +7,9 @@ import (
 	"strings"
 )
 
-func cmdRm(ticket string, jsonOut bool) error {
+// cmdRm removes a task. force skips the uncommitted-changes guard
+// (checkRemovable).
+func cmdRm(ticket string, force, jsonOut bool) error {
 	useJSONOutput(jsonOut)
 	if ticket == "" {
 		if !interactiveAllowed() {
@@ -20,6 +22,12 @@ func cmdRm(ticket string, jsonOut bool) error {
 		ticket = t
 	}
 
+	tf, st, unlock, err := lockAndReadTask(ticket)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	// Catch the "still running under fleet-run" case up front with an
 	// actionable error instead of racing it and hoping selfHealWorktreeRemove
 	// covers whatever's left.
@@ -27,26 +35,23 @@ func cmdRm(ticket string, jsonOut bool) error {
 		return err
 	}
 
-	tf, err := taskFile(ticket)
-	if err != nil {
-		return err
-	}
-	st, err := readTaskState(tf)
-	if err != nil {
-		return fmt.Errorf("read task %s: %w", ticket, err)
-	}
-
 	// repos.yaml is optional here: if it's missing or no longer has the
 	// repo entry, we still try to remove the worktree (best-effort, via
 	// git run from the worktree itself) rather than aborting the whole rm.
 	cfg := loadReposConfigOptional()
+
+	// Every repo is checked before any is removed, so a refusal leaves the
+	// task exactly as it was.
+	if err := checkRemovable(cfg, st.Repos, force); err != nil {
+		return err
+	}
 
 	var remaining []TaskRepo
 	results := []repoResult{}
 
 	for _, r := range st.Repos {
 		res := repoResult{Repo: r.Repo, Action: "removed", Branch: r.Branch, WorktreePath: r.WorktreePath, Patches: r.Patches}
-		if rmErr := removeRepoWorktree(cfg, ticket, r); rmErr != nil {
+		if rmErr := removeRepoWorktree(cfg, st, r); rmErr != nil {
 			warnf("removing worktree %s: %v", r.WorktreePath, rmErr)
 			remaining = append(remaining, r)
 			res.Error = rmErr.Error()
@@ -118,8 +123,9 @@ func cmdRm(ticket string, jsonOut bool) error {
 // aborting. pre-remove/post-remove hooks run around the teardown itself;
 // like pre-create/post-create, hook failures are non-fatal (warned to
 // stderr by runHooks) and never block the removal.
-func removeRepoWorktree(cfg *ReposConfig, ticket string, r TaskRepo) error {
-	if err := runHooks("pre-remove", ticket, r.Repo, r.WorktreePath); err != nil {
+func removeRepoWorktree(cfg *ReposConfig, st *TaskState, r TaskRepo) error {
+	hook := hookContext{Ticket: st.Ticket, Description: st.Description, Repo: r.Repo, Branch: r.Branch, WorktreeDir: r.WorktreePath}
+	if err := runHooks("pre-remove", hook); err != nil {
 		warnf("pre-remove hooks for %s: %v", r.Repo, err)
 	}
 
@@ -134,7 +140,7 @@ func removeRepoWorktree(cfg *ReposConfig, ticket string, r TaskRepo) error {
 		return removeErr
 	}
 
-	if err := runHooks("post-remove", ticket, r.Repo, r.WorktreePath); err != nil {
+	if err := runHooks("post-remove", hook); err != nil {
 		warnf("post-remove hooks for %s: %v", r.Repo, err)
 	}
 	return nil

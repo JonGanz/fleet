@@ -52,7 +52,7 @@ func cmdJump(ticket, repo string) error {
 			}
 		}
 		if len(filtered) == 0 {
-			return fmt.Errorf("no task found for ticket %s", ticket)
+			return noTaskError(ticket)
 		}
 		tasks = filtered
 	}
@@ -61,7 +61,7 @@ func cmdJump(ticket, repo string) error {
 	if repo != "" {
 		entries = filterJumpEntries(entries, repo)
 		if len(entries) == 0 {
-			return fmt.Errorf("task %s has no repo %s (see `fleet-task show %s`)", ticket, repo, ticket)
+			return usageErrorf("task %s has no repo %s (see `fleet-task show %s`)", ticket, repo, ticket)
 		}
 	}
 	if len(entries) == 0 {

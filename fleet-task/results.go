@@ -28,16 +28,6 @@ type repoResult struct {
 	Error        string   `json:"error,omitempty"`
 }
 
-// allOK reports whether every repo result succeeded.
-func allOK(results []repoResult) bool {
-	for _, r := range results {
-		if !r.OK {
-			return false
-		}
-	}
-	return true
-}
-
 // printJSON writes v to stdout as indented JSON.
 func printJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)

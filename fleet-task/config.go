@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -89,6 +90,9 @@ func loadReposConfig(configPath string) (*ReposConfig, error) {
 		return nil, fmt.Errorf("parse repos config %s: %w", configPath, err)
 	}
 	cfg.applyDefaults()
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("invalid repos config %s: %w", configPath, err)
+	}
 	return &cfg, nil
 }
 
@@ -112,4 +116,30 @@ func (c *ReposConfig) repoNames() []string {
 		names = append(names, r.Name)
 	}
 	return names
+}
+
+// validate rejects repo entries fleet-task can't use safely: a repo name
+// becomes a directory component (<worktree_root>/<ticket>/<repo>, the
+// patches dir, base_root/<repo>) and a lookup key, so it must be non-empty,
+// unique and a single plain path component; runtime picks the git driver,
+// so a typo must not silently fall through to linux.
+func (c *ReposConfig) validate() error {
+	seen := make(map[string]bool, len(c.Repos))
+	for i, r := range c.Repos {
+		switch {
+		case r.Name == "":
+			return fmt.Errorf("repos[%d] has no name", i)
+		case r.Name == "." || r.Name == ".." || strings.ContainsAny(r.Name, `/\`):
+			return fmt.Errorf("repo name %q must be a plain name (no path separators, not . or ..)", r.Name)
+		case seen[r.Name]:
+			return fmt.Errorf("repo name %q is used more than once", r.Name)
+		}
+		seen[r.Name] = true
+		switch r.Runtime {
+		case "", "linux", "windows":
+		default:
+			return fmt.Errorf("repo %s: runtime %q must be linux or windows", r.Name, r.Runtime)
+		}
+	}
+	return nil
 }

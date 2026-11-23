@@ -4,74 +4,114 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
-// Lock tuning. Variables (not constants) so tests can shorten them.
-var (
-	// lockTimeout is how long lockFile waits on a lock that looks live.
-	lockTimeout = 5 * time.Second
-	// staleLockAge is how old a lock file may get before it's treated as
-	// abandoned regardless of its pid (guards against pid reuse, and
-	// against a lock whose pid was never written). A state write takes
-	// milliseconds, so minutes is very conservative.
-	staleLockAge = 5 * time.Minute
-)
+// staleLockAge is how old a lock file with no parseable pid may get before
+// it's treated as abandoned. The owner writes its pid right after creating
+// the file, so an empty/garbled lock older than this means the owner died in
+// between. A variable so tests can shorten it.
+var staleLockAge = time.Minute
 
-// lockFile implements a simple, portable advisory lock for a given target
-// path by creating a "<path>.lock" sibling file with O_EXCL and spinning
-// briefly if it's already held. This is deliberately not a real flock(2)
-// syscall (which would pull in an OS-specific dependency such as
-// golang.org/x/sys/unix) -- since each ticket has its own state file and
-// contention is only ever between two invocations touching the *same*
-// ticket at nearly the same instant, a simple exclusive-create lockfile
-// with a short retry/timeout is sufficient as the "safety belt" the
-// contract calls for.
+// lockTicket takes the advisory lock for one ticket's state file (path is
+// <tasks dir>/<ticket>.json) and holds it until the returned unlock is
+// called. Mutating commands (new, edit, rm, mv) take it *before* reading the
+// state and keep it for their whole run, so two concurrent invocations on
+// the same ticket can't interleave read-modify-write cycles and lose an
+// update. Different tickets never contend: each has its own lock.
 //
-// The lock file holds the owner's pid. A lock left behind by a crashed
-// process (Ctrl-C between create and unlock) is detected -- owner pid no
-// longer alive, or the file older than staleLockAge -- and taken over
-// instead of blocking every later write to that ticket forever. If a lock
-// that looks live is never released, the timeout error names the file and
-// says how to clear it.
+// The lock is a "<path>.lock" sibling created with O_EXCL holding the
+// owner's pid -- deliberately not flock(2), which would need an OS-specific
+// dependency; per-ticket files already make cross-ticket contention
+// impossible, so this only guards the rare same-ticket race.
 //
-// It returns an unlock function that must be called to release the lock
-// (removes the lockfile).
-func lockFile(path string) (unlock func(), err error) {
+// It fails fast instead of waiting: a command can legitimately hold the lock
+// for many minutes (npm ci), so waiting would mostly just delay the same
+// error. A lock is taken over only when it is stale (see lockIsStale).
+func lockTicket(path string) (unlock func(), err error) {
 	lockPath := path + ".lock"
-	deadline := time.Now().Add(lockTimeout)
-	for {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(lockPath), err)
+	}
+	// Two attempts: the second follows a successful stale-lock takeover.
+	for attempt := 0; attempt < 2; attempt++ {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err == nil {
-			fmt.Fprintf(f, "%d\n", os.Getpid())
-			f.Close()
-			return func() { os.Remove(lockPath) }, nil
+			_, werr := fmt.Fprintf(f, "%d\n", os.Getpid())
+			cerr := f.Close()
+			if werr != nil || cerr != nil {
+				os.Remove(lockPath)
+				return nil, fmt.Errorf("write lock %s: %v", lockPath, errors.Join(werr, cerr))
+			}
+			return func() { releaseLock(lockPath) }, nil
 		}
 		if !os.IsExist(err) {
 			return nil, fmt.Errorf("create lock %s: %w", lockPath, err)
 		}
 
-		contents, mtime, statErr := readLock(lockPath)
-		if statErr == nil && lockIsStale(contents, mtime, time.Now(), staleLockAge, pidAlive) {
-			fmt.Fprintf(os.Stderr, "warning: removing stale lock %s (owner is gone)\n", lockPath)
-			// Best effort. If another process takes over at the same
-			// instant, the O_EXCL create above arbitrates on the next turn.
-			os.Remove(lockPath)
-			continue
+		contents, mtime, readErr := readLock(lockPath)
+		if os.IsNotExist(readErr) {
+			continue // released between our create and our read
 		}
-
-		if time.Now().After(deadline) {
-			owner := ""
-			if pid, ok := parseLockPid(contents); ok {
-				owner = fmt.Sprintf(" (held by pid %d)", pid)
-			}
-			return nil, fmt.Errorf("timed out waiting for lock %s%s; if no other fleet-task is running, remove it with `rm %s`", lockPath, owner, lockPath)
+		if readErr != nil {
+			return nil, fmt.Errorf("read lock %s: %w", lockPath, readErr)
 		}
-		time.Sleep(50 * time.Millisecond)
+		if !lockIsStale(contents, mtime, time.Now(), staleLockAge, pidAlive) {
+			return nil, lockHeldError(lockPath, contents)
+		}
+		if err := takeOverStaleLock(lockPath); err != nil {
+			return nil, err
+		}
 	}
+	return nil, fmt.Errorf("could not take lock %s: another fleet-task took it first; retry", lockPath)
+}
+
+// lockHeldError explains who holds a live lock and how to clear it if that
+// owner is actually gone (e.g. pid reuse).
+func lockHeldError(lockPath, contents string) error {
+	owner := "an unknown process"
+	if pid, ok := parseLockPid(contents); ok {
+		owner = fmt.Sprintf("pid %d", pid)
+	}
+	return fmt.Errorf("task is locked by another fleet-task (%s, lock file %s); wait for it to finish, or if no other fleet-task is running, remove the lock with `rm %s`", owner, lockPath, lockPath)
+}
+
+// lockIsStale decides whether a lock file can be taken over. A live owner
+// pid never makes it stale, however old (commands hold the lock for their
+// whole run, which can be many minutes); a dead owner always does. A lock
+// with no parseable pid (the owner died between creating the file and
+// writing its pid) is stale once older than maxAge. alive is injected so
+// this stays a pure, testable function.
+func lockIsStale(contents string, mtime, now time.Time, maxAge time.Duration, alive func(pid int) bool) bool {
+	pid, ok := parseLockPid(contents)
+	if !ok {
+		return now.Sub(mtime) > maxAge
+	}
+	return !alive(pid)
+}
+
+// parseLockPid extracts the owner pid from a lock file's contents.
+func parseLockPid(contents string) (int, bool) {
+	pid, err := strconv.Atoi(strings.TrimSpace(contents))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
+
+// pidAlive reports whether a process with the given pid exists, via signal
+// 0. EPERM means it exists but belongs to someone else.
+func pidAlive(pid int) bool {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = p.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func readLock(lockPath string) (contents string, mtime time.Time, err error) {
@@ -86,38 +126,47 @@ func readLock(lockPath string) (contents string, mtime time.Time, err error) {
 	return string(data), info.ModTime(), nil
 }
 
-// parseLockPid extracts the owner pid from a lock file's contents.
-func parseLockPid(contents string) (int, bool) {
-	pid, err := strconv.Atoi(strings.TrimSpace(contents))
-	if err != nil || pid <= 0 {
-		return 0, false
-	}
-	return pid, true
-}
-
-// lockIsStale decides whether a lock file can be taken over: its owner pid
-// is no longer alive, or it's older than maxAge. A lock with no parseable
-// pid (e.g. the owner died between creating the file and writing its pid)
-// is only stale by age. alive is injected so this stays a pure, testable
-// function.
-func lockIsStale(contents string, mtime, now time.Time, maxAge time.Duration, alive func(pid int) bool) bool {
-	if now.Sub(mtime) > maxAge {
-		return true
-	}
-	pid, ok := parseLockPid(contents)
-	if !ok {
-		return false
-	}
-	return !alive(pid)
-}
-
-// pidAlive reports whether a process with the given pid exists, via signal
-// 0. EPERM means it exists but belongs to someone else.
-func pidAlive(pid int) bool {
-	p, err := os.FindProcess(pid)
+// releaseLock removes lockPath only if it still holds our own pid, so an
+// unlock can never delete a lock some other process legitimately owns.
+func releaseLock(lockPath string) {
+	data, err := os.ReadFile(lockPath)
 	if err != nil {
-		return false
+		return
 	}
-	err = p.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
+	if pid, ok := parseLockPid(string(data)); ok && pid == os.Getpid() {
+		os.Remove(lockPath)
+	}
+}
+
+// takeOverStaleLock removes a lock judged stale without racing another
+// process doing the same: a plain re-check-then-remove could delete a
+// *fresh* lock that a faster process created in between. Instead the lock is
+// renamed to a name unique to us (rename is atomic, so exactly one process
+// gets any given lock file), and its contents are re-checked there. If what
+// we grabbed turns out to be live after all, it is put back with a no-clobber
+// link and we report it as held.
+func takeOverStaleLock(lockPath string) error {
+	grabbed := fmt.Sprintf("%s.stale-%d-%d", lockPath, os.Getpid(), time.Now().UnixNano())
+	if err := os.Rename(lockPath, grabbed); err != nil {
+		if os.IsNotExist(err) {
+			return nil // someone else already cleared it; just retry the create
+		}
+		return fmt.Errorf("taking over stale lock %s: %w", lockPath, err)
+	}
+	defer os.Remove(grabbed)
+
+	contents, mtime, err := readLock(grabbed)
+	if err != nil {
+		return fmt.Errorf("reading stale lock %s: %w", grabbed, err)
+	}
+	if lockIsStale(contents, mtime, time.Now(), staleLockAge, pidAlive) {
+		warnf("removed stale lock %s (its owner is gone)", lockPath)
+		return nil
+	}
+	// We raced another process and took its fresh lock: restore it. Link
+	// (not rename) so we never overwrite a lock created meanwhile.
+	if err := os.Link(grabbed, lockPath); err != nil {
+		return fmt.Errorf("lock %s changed hands while taking it over (%v); retry", lockPath, err)
+	}
+	return lockHeldError(lockPath, contents)
 }

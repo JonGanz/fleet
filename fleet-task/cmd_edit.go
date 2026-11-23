@@ -31,6 +31,7 @@ type editOpts struct {
 	Remove      []string
 	SkipPatches []string
 	NoPatches   bool
+	Force       bool // skip the uncommitted-changes guard on removals
 	JSON        bool
 }
 
@@ -59,14 +60,14 @@ func cmdEdit(o editOpts) error {
 		ticket = picked
 	}
 
-	tf, err := taskFile(ticket)
+	// Locked for the whole command: edit reads the repo list, works for
+	// minutes, then writes it back, so a concurrent edit/rm/mv of this
+	// ticket must not interleave.
+	tf, st, unlock, err := lockAndReadTask(ticket)
 	if err != nil {
 		return err
 	}
-	st, err := readTaskState(tf)
-	if err != nil {
-		return fmt.Errorf("read task %s: %w", ticket, err)
-	}
+	defer unlock()
 
 	cfg, _, err := loadConfig()
 	if err != nil {
@@ -84,6 +85,9 @@ func cmdEdit(o editOpts) error {
 	if err != nil {
 		return err
 	}
+	if err := validateBranchNames(cfg, toAdd, ticket, st.Description); err != nil {
+		return err
+	}
 	if len(toAdd) == 0 && len(toRemove) == 0 {
 		fmt.Fprintln(out, "no changes selected")
 		if o.JSON {
@@ -98,6 +102,9 @@ func cmdEdit(o editOpts) error {
 	// unaffected, so only check when a removal is actually requested.
 	if len(toRemove) > 0 {
 		if err := requireNotActive(ticket, "removing repos from it"); err != nil {
+			return err
+		}
+		if err := checkRemovable(cfg, reposNamed(st.Repos, toRemove), o.Force); err != nil {
 			return err
 		}
 	}
@@ -119,11 +126,16 @@ func cmdEdit(o editOpts) error {
 	if err != nil {
 		return err
 	}
-	addResults, err := editAddPhase(cfg, ticket, st, toAdd, patchesByRepo)
-	if err != nil {
-		return err
-	}
+	addResults, addErr := editAddPhase(cfg, st, tf, toAdd, patchesByRepo)
 	results := append(removeResults, addResults...)
+	if addErr != nil {
+		if o.JSON {
+			if err := printJSON(opResult{Ticket: ticket, OK: false, Repos: results}); err != nil {
+				warnf("printing JSON result: %v", err)
+			}
+		}
+		return addErr
+	}
 	added, removed, failures := countEditResults(results)
 
 	// If every repo ended up removed and none were added, drop the task
@@ -151,6 +163,22 @@ func cmdEdit(o editOpts) error {
 		return fmt.Errorf("%d repo operation(s) failed for %s (see messages above); rerun `fleet-task edit %s` to retry", failures, ticket, ticket)
 	}
 	return nil
+}
+
+// reposNamed returns the entries of repos whose name is in names, in
+// repos' order.
+func reposNamed(repos []TaskRepo, names []string) []TaskRepo {
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	var picked []TaskRepo
+	for _, r := range repos {
+		if want[r.Repo] {
+			picked = append(picked, r)
+		}
+	}
+	return picked
 }
 
 // countEditResults tallies successful adds, successful removals and
@@ -218,7 +246,7 @@ func editRemovePhase(cfg *ReposConfig, ticket, tf string, st *TaskState, toRemov
 			continue
 		}
 		res := repoResult{Repo: r.Repo, Action: "removed", Branch: r.Branch, WorktreePath: r.WorktreePath, Patches: r.Patches}
-		if err := removeRepoWorktree(cfg, ticket, r); err != nil {
+		if err := removeRepoWorktree(cfg, st, r); err != nil {
 			warnf("removing worktree %s: %v", r.WorktreePath, err)
 			kept = append(kept, r)
 			res.Error = err.Error()
@@ -241,9 +269,10 @@ func editRemovePhase(cfg *ReposConfig, ticket, tf string, st *TaskState, toRemov
 
 // editAddPhase sets up worktrees for the selected repos (same per-repo setup
 // as `new`, using the task's existing description so branch names stay
-// consistent with the repos added at `new` time), appending the successes to
-// st.Repos. Returns one result per repo attempted.
-func editAddPhase(cfg *ReposConfig, ticket string, st *TaskState, toAdd []string, patchesByRepo map[string][]string) ([]repoResult, error) {
+// consistent with the repos added at `new` time); addRepos appends each
+// success to st.Repos and persists it immediately. Returns one result per
+// repo attempted.
+func editAddPhase(cfg *ReposConfig, st *TaskState, tf string, toAdd []string, patchesByRepo map[string][]string) ([]repoResult, error) {
 	if len(toAdd) == 0 {
 		return nil, nil
 	}
@@ -251,9 +280,8 @@ func editAddPhase(cfg *ReposConfig, ticket string, st *TaskState, toAdd []string
 	if err != nil {
 		return nil, err
 	}
-	newRepos, results, _ := addRepos(cfg, ticket, st.Description, wtRoot, toAdd, patchesByRepo)
-	st.Repos = append(st.Repos, newRepos...)
-	return results, nil
+	results, _, err := addRepos(cfg, st, tf, wtRoot, toAdd, patchesByRepo)
+	return results, err
 }
 
 // validateEditFlags checks --add/--remove against repos.yaml and the task:

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -225,16 +226,17 @@ func TestLoadReposConfigAppliesDefaults(t *testing.T) {
 func TestCheckSameDrive(t *testing.T) {
 	if err := checkSameDrive(map[string]string{
 		"a": `C:\fleet\base`,
-		"b": `C:\fleet\worktrees`,
+		"b": `c:\fleet\worktrees`,
 	}); err != nil {
 		t.Errorf("checkSameDrive same-drive: %v", err)
 	}
 
-	if err := checkSameDrive(map[string]string{
-		"a": `C:\fleet\base`,
+	err := checkSameDrive(map[string]string{
 		"b": `D:\fleet\worktrees`,
-	}); err == nil {
-		t.Error("checkSameDrive cross-drive: want error, got nil")
+		"a": `C:\fleet\base`,
+	})
+	if err == nil || !strings.HasPrefix(err.Error(), "a (C:) and b (D:)") {
+		t.Errorf("checkSameDrive cross-drive: want deterministic error, got %v", err)
 	}
 
 	if err := checkSameDrive(map[string]string{
@@ -242,5 +244,55 @@ func TestCheckSameDrive(t *testing.T) {
 		"b": "",
 	}); err != nil {
 		t.Errorf("checkSameDrive with blank entry: %v", err)
+	}
+
+	// A UNC path has no drive letter: always a clear error, whatever the
+	// map order.
+	for i := 0; i < 20; i++ {
+		err := checkSameDrive(map[string]string{
+			"windows_base":          `C:\fleet\base`,
+			"windows_worktree_root": `\\wsl.localhost\Ubuntu\wt`,
+		})
+		if err == nil || !strings.Contains(err.Error(), "windows_worktree_root") || !strings.Contains(err.Error(), "drive letter") {
+			t.Fatalf("UNC path: %v", err)
+		}
+	}
+}
+
+func TestReposConfigValidate(t *testing.T) {
+	cases := []struct {
+		name  string
+		repos []RepoConfig
+		ok    bool
+	}{
+		{"fine", []RepoConfig{{Name: "a"}, {Name: "b", Runtime: "linux"}, {Name: "c", Runtime: "windows"}}, true},
+		{"empty name", []RepoConfig{{Name: ""}}, false},
+		{"dup", []RepoConfig{{Name: "a"}, {Name: "a"}}, false},
+		{"slash", []RepoConfig{{Name: "a/b"}}, false},
+		{"backslash", []RepoConfig{{Name: `a\b`}}, false},
+		{"dot", []RepoConfig{{Name: "."}}, false},
+		{"dotdot", []RepoConfig{{Name: ".."}}, false},
+		{"bad runtime", []RepoConfig{{Name: "a", Runtime: "Windows"}}, false},
+	}
+	for _, c := range cases {
+		err := (&ReposConfig{Repos: c.repos}).validate()
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err = %v, want ok=%v", c.name, err, c.ok)
+		}
+	}
+}
+
+func TestLoadReposConfigRejectsInvalid(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "repos.yaml")
+	if err := os.WriteFile(p, []byte("repos:\n  - name: a\n    runtime: macos\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadReposConfig(p); err == nil || !strings.Contains(err.Error(), "macos") {
+		t.Errorf("want runtime error, got %v", err)
+	}
+	// rm/mv's optional loader degrades to nil instead of failing.
+	t.Setenv("FLEET_REPOS_FILE", p)
+	if cfg := loadReposConfigOptional(); cfg != nil {
+		t.Error("loadReposConfigOptional should return nil for an invalid config")
 	}
 }

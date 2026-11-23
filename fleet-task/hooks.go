@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,11 +44,33 @@ func discoverHooks(dir string) ([]string, error) {
 	return hooks, nil
 }
 
+// hookContext is what a create/remove hook is told about the repo it runs
+// for, exported to it as FLEET_* environment variables (see hookEnv).
+type hookContext struct {
+	Ticket      string
+	Description string
+	Repo        string
+	Branch      string
+	WorktreeDir string
+}
+
+// hookEnv returns base plus the FLEET_* variables for h.
+func hookEnv(base []string, h hookContext) []string {
+	env := append([]string{}, base...)
+	return append(env,
+		"FLEET_TICKET="+h.Ticket,
+		"FLEET_DESCRIPTION="+h.Description,
+		"FLEET_REPO="+h.Repo,
+		"FLEET_BRANCH="+h.Branch,
+		"FLEET_WORKTREE_DIR="+h.WorktreeDir,
+	)
+}
+
 // runHooks runs each hook found in <config dir>/hooks/<phase>/* in
-// filename-sorted order, with FLEET_TICKET/FLEET_REPO/FLEET_WORKTREE_DIR
-// set in addition to the inherited environment. A non-zero exit from a
-// hook prints a warning to stderr but does not abort the caller.
-func runHooks(phase, ticket, repo, worktreeDir string) error {
+// filename-sorted order, with the hookEnv variables set in addition to the
+// inherited environment. A non-zero exit from a hook prints a warning to
+// stderr but does not abort the caller.
+func runHooks(phase string, h hookContext) error {
 	dir, err := hooksDir(phase)
 	if err != nil {
 		return err
@@ -58,18 +79,14 @@ func runHooks(phase, ticket, repo, worktreeDir string) error {
 	if err != nil {
 		return err
 	}
-	env := append(os.Environ(),
-		"FLEET_TICKET="+ticket,
-		"FLEET_REPO="+repo,
-		"FLEET_WORKTREE_DIR="+worktreeDir,
-	)
-	for _, h := range hooks {
-		cmd := exec.Command(h)
+	env := hookEnv(os.Environ(), h)
+	for _, path := range hooks {
+		cmd := exec.Command(path)
 		cmd.Env = env
 		cmd.Stdout = out
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: hook %s failed: %v\n", h, err)
+			warnf("hook %s failed: %v", path, err)
 		}
 	}
 	return nil

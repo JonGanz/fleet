@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -18,6 +19,10 @@ import (
 // file is rewritten with that repo's new worktree path, so state always
 // reflects reality. If a later repo fails, rerunning `mv old new` skips the
 // repos already at their destination and carries on with the rest.
+//
+// It is also resumable across the one step that isn't covered by that: a
+// crash after writing the new state file but before removing the old one.
+// That exact state (see interruptedRename) is finished rather than refused.
 func cmdMv(oldTicket, newTicket string, jsonOut bool) error {
 	useJSONOutput(jsonOut)
 	if oldTicket == "" || newTicket == "" {
@@ -32,21 +37,12 @@ func cmdMv(oldTicket, newTicket string, jsonOut bool) error {
 		}
 		oldTicket = t
 	}
-	if err := validateTicketName(oldTicket); err != nil {
-		return err
-	}
-
-	if err := requireNotActive(oldTicket, "renaming it"); err != nil {
-		return err
-	}
-
 	oldFile, err := taskFile(oldTicket)
 	if err != nil {
 		return err
 	}
-	st, err := readTaskState(oldFile)
-	if err != nil {
-		return fmt.Errorf("read task %s: %w", oldTicket, err)
+	if err := requireTaskExists(oldTicket, oldFile); err != nil {
+		return err
 	}
 
 	if newTicket == "" {
@@ -56,19 +52,31 @@ func cmdMv(oldTicket, newTicket string, jsonOut bool) error {
 		}
 		newTicket = values[0]
 	}
-	if err := validateTicketName(newTicket); err != nil {
-		return err
-	}
-	if newTicket == oldTicket {
-		return fmt.Errorf("new ticket %q is the same as the old ticket", newTicket)
-	}
-
 	newFile, err := taskFile(newTicket)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(newFile); err == nil {
-		return fmt.Errorf("a task already exists at %s", newFile)
+	if newTicket == oldTicket {
+		return usageErrorf("new ticket %q is the same as the old ticket", newTicket)
+	}
+
+	unlock, err := lockTickets(oldFile, newFile)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	if err := requireTaskExists(oldTicket, oldFile); err != nil {
+		return err
+	}
+	st, err := readTaskState(oldFile)
+	if err != nil {
+		return fmt.Errorf("read task %s: %w", oldTicket, err)
+	}
+	st.Ticket = oldTicket
+
+	if err := requireNotActive(oldTicket, "renaming it"); err != nil {
+		return err
 	}
 
 	cfg := loadReposConfigOptional()
@@ -79,6 +87,14 @@ func cmdMv(oldTicket, newTicket string, jsonOut bool) error {
 	}
 	oldTicketDir := filepath.Join(wtRoot, oldTicket)
 	newTicketDir := filepath.Join(wtRoot, newTicket)
+
+	if _, err := os.Stat(newFile); err == nil {
+		if !interruptedRename(newFile, newTicket, newTicketDir, st.Repos) {
+			return usageErrorf("a task already exists at %s", newFile)
+		}
+		return finishInterruptedRename(st, oldFile, newFile, oldTicketDir, newTicketDir, newTicket, jsonOut)
+	}
+
 	if err := checkNewTicketDir(newTicketDir, st.Repos); err != nil {
 		return err
 	}
@@ -136,17 +152,85 @@ func cmdMv(oldTicket, newTicket string, jsonOut bool) error {
 	if err := writeTaskState(newFile, st); err != nil {
 		return fmt.Errorf("write task state %s: %w", newFile, err)
 	}
+	if err := completeRename(oldFile, newFile, oldTicketDir, newTicketDir); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "renamed task %s -> %s; state written to %s\n", oldTicket, newTicket, newFile)
+	return report(true)
+}
+
+// completeRename is mv's last step once the new state file is written:
+// drop the old state file and carry over whatever else is in the old ticket
+// workspace dir.
+func completeRename(oldFile, newFile, oldTicketDir, newTicketDir string) error {
 	if err := os.Remove(oldFile); err != nil {
 		return fmt.Errorf("remove old task state %s (new state already written to %s): %w", oldFile, newFile, err)
 	}
-	os.Remove(oldFile + ".lock") // best-effort: stale lockfile from a crashed prior run, if any
-
 	if err := moveTicketDirLeftovers(oldTicketDir, newTicketDir); err != nil {
 		warnf("%v", err)
 	}
+	return nil
+}
 
-	fmt.Fprintf(out, "renamed task %s -> %s; state written to %s\n", oldTicket, newTicket, newFile)
-	return report(true)
+// finishInterruptedRename completes an `mv` that died after writing the new
+// state file but before removing the old one (see interruptedRename).
+func finishInterruptedRename(st *TaskState, oldFile, newFile, oldTicketDir, newTicketDir, newTicket string, jsonOut bool) error {
+	fmt.Fprintf(out, "%s already holds this task's renamed state (an earlier `mv` was interrupted); finishing the rename\n", newFile)
+	if err := completeRename(oldFile, newFile, oldTicketDir, newTicketDir); err != nil {
+		return err
+	}
+	results := []repoResult{}
+	for _, r := range st.Repos {
+		results = append(results, repoResult{Repo: r.Repo, Action: "moved", OK: true, Branch: r.Branch, WorktreePath: filepath.Join(newTicketDir, r.Repo), Patches: r.Patches})
+	}
+	fmt.Fprintf(out, "renamed task %s -> %s; state written to %s\n", st.Ticket, newTicket, newFile)
+	if jsonOut {
+		return printJSON(opResult{Ticket: newTicket, RenamedFrom: st.Ticket, OK: true, Repos: results})
+	}
+	return nil
+}
+
+// interruptedRename reports whether newFile is exactly what an interrupted
+// `mv` to newTicket leaves behind: a readable state file for newTicket, and
+// every repo of the old task already at its destination under newTicketDir.
+// Anything else at newFile is a different task and must not be touched.
+func interruptedRename(newFile, newTicket, newTicketDir string, oldRepos []TaskRepo) bool {
+	if len(oldRepos) == 0 {
+		return false
+	}
+	newSt, err := readTaskState(newFile)
+	if err != nil || newSt.Ticket != newTicket {
+		return false
+	}
+	for _, r := range oldRepos {
+		if !alreadyMoved(r.WorktreePath, filepath.Join(newTicketDir, r.Repo)) {
+			return false
+		}
+	}
+	return true
+}
+
+// lockTickets takes several tickets' locks (lockTicket) in sorted path
+// order, so two commands locking the same pair can't each hold one and fail
+// on the other in opposite order. On failure nothing stays held.
+func lockTickets(paths ...string) (unlock func(), err error) {
+	sorted := append([]string{}, paths...)
+	sort.Strings(sorted)
+	var unlocks []func()
+	unlockAll := func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}
+	for _, p := range sorted {
+		u, err := lockTicket(p)
+		if err != nil {
+			unlockAll()
+			return nil, err
+		}
+		unlocks = append(unlocks, u)
+	}
+	return unlockAll, nil
 }
 
 // alreadyMoved reports whether a repo's worktree is already at its

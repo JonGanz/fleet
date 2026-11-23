@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -31,9 +32,8 @@ func slugifyForBranch(s string) string {
 // template falls back to "{ticket}" alone — today's plain-ticket behavior.
 // Note: if the description differs between two `fleet-task new` runs for
 // the same ticket, a template using {description} computes a different
-// branch name each time, so the "reattach to the existing branch on rerun"
-// fallback in setupWorktree won't find a match and a new branch is created
-// instead.
+// branch name each time, so planWorktreeAdd won't find the earlier branch
+// to reattach and a new branch is created instead.
 func branchName(template, ticket, description string) string {
 	if template == "" {
 		template = "{ticket}"
@@ -43,4 +43,18 @@ func branchName(template, ticket, description string) string {
 	name = branchSlugDashes.ReplaceAllString(name, "-")
 	name = strings.Trim(name, "-")
 	return name
+}
+
+// isValidBranchName asks git whether name is a valid branch name. The
+// printed name must also match: `--branch` expands shorthands like @{-1}
+// when run inside a repository, which would otherwise pass.
+func isValidBranchName(name string) (bool, error) {
+	got, err := gitOutput(nil, "check-ref-format", "--branch", name)
+	if err != nil {
+		if gitExitCode(err) > 0 {
+			return false, nil
+		}
+		return false, fmt.Errorf("running git check-ref-format: %w", err)
+	}
+	return got == name, nil
 }

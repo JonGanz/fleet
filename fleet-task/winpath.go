@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -66,7 +68,7 @@ func runWindowsCommand(winDir string, args ...string) error {
 
 // runWindowsCommandCapture is runWindowsCommand with stderr captured into
 // the returned error instead of shown live, for commands whose failure the
-// caller retries or reports itself (see addWorktreeWithFallback).
+// caller reports itself (see addWorktree).
 func runWindowsCommandCapture(winDir string, args ...string) error {
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", windowsCommandScript(winDir, args...))
 	var stderr bytes.Buffer
@@ -76,6 +78,61 @@ func runWindowsCommandCapture(winDir string, args ...string) error {
 		return fmt.Errorf("powershell (%v) in %s: %w%s", args, winDir, err, stderrSuffix(stderr.String()))
 	}
 	return nil
+}
+
+// windowsCommandOutput is windowsCommandOutputRaw with surrounding
+// whitespace trimmed, for single-value output.
+func windowsCommandOutput(winDir string, args ...string) (string, error) {
+	s, err := windowsCommandOutputRaw(winDir, args...)
+	return strings.TrimSpace(s), err
+}
+
+// windowsCommandOutputRaw is runWindowsCommand returning the command's
+// stdout as is, with stderr folded into the error (which wraps the
+// *exec.ExitError; see windowsExitCode).
+func windowsCommandOutputRaw(winDir string, args ...string) (string, error) {
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", windowsCommandScript(winDir, args...))
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("powershell (%v) in %s: %w%s", args, winDir, err, stderrSuffix(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
+// windowsDirIsEmptyScript builds the PowerShell script for windowsDirIsEmpty:
+// exit 0 if winDir has no entries (hidden ones included), 3 if it has some,
+// 1 on error (cmdlets don't set $LASTEXITCODE, so errors are caught).
+func windowsDirIsEmptyScript(winDir string) string {
+	return fmt.Sprintf(
+		"$ErrorActionPreference='Stop'; try { if (@(Get-ChildItem -Force -LiteralPath %s).Count -eq 0) { exit 0 } else { exit 3 } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
+		psQuote(winDir))
+}
+
+// windowsDirIsEmpty reports whether winDir has no entries, checked
+// Windows-natively.
+func windowsDirIsEmpty(winDir string) (bool, error) {
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", windowsDirIsEmptyScript(winDir))
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if windowsExitCode(err) == 3 {
+		return false, nil
+	}
+	return false, fmt.Errorf("listing %s: %w", winDir, err)
+}
+
+// windowsExitCode returns the exit code carried by err (from the helpers
+// here), or -1 if powershell.exe didn't run to an exit status.
+func windowsExitCode(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
 }
 
 // windowsPathExists reports whether winDir exists, checked via PowerShell's
@@ -125,18 +182,30 @@ func driveLetter(winPath string) string {
 	return ""
 }
 
-// checkSameDrive verifies every non-empty win32 path in paths resolves to
+// checkSameDrive verifies every non-empty win32 path in labeled resolves to
 // the same drive letter, returning a clear error naming the mismatched pair
 // if not. NTFS hardlinks (used to populate node_modules from the cache)
 // fail across volumes, so windows_base/windows_worktree_root/
-// windows_cache_root must all live on the same drive.
+// windows_cache_root must all live on the same drive. Labels are checked in
+// sorted order so the result (and message) is deterministic, and a path
+// with no drive letter (UNC, or relative) is an error of its own rather
+// than silently compared as "".
 func checkSameDrive(labeled map[string]string) error {
-	var firstLabel, firstDrive string
+	labels := make([]string, 0, len(labeled))
 	for label, winPath := range labeled {
-		if winPath == "" {
-			continue
+		if winPath != "" {
+			labels = append(labels, label)
 		}
+	}
+	sort.Strings(labels)
+
+	var firstLabel, firstDrive string
+	for _, label := range labels {
+		winPath := labeled[label]
 		d := driveLetter(winPath)
+		if d == "" {
+			return fmt.Errorf("%s (%s) is not on a drive letter (UNC or relative path?); it must be on a local NTFS drive, the same one as the other Windows-side fleet paths, for hardlinking to work", label, winPath)
+		}
 		if firstDrive == "" {
 			firstLabel, firstDrive = label, d
 			continue

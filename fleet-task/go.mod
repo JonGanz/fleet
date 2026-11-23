@@ -1,4 +1,4 @@
-module fleet-task
+module github.com/JonGanz/fleet/fleet-task
 
 go 1.25.4
 

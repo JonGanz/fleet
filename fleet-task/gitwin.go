@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 // windowsGit is the gitRunner for runtime: windows repos. The bare clone and
@@ -50,23 +51,48 @@ func (g windowsGit) Preflight(base, worktreePath string) error {
 	})
 }
 
-func (windowsGit) BaseExists(base string) (bool, error) {
+// InspectBase mirrors linuxGit.InspectBase with Windows-native checks
+// (Test-Path, git.exe, Get-ChildItem) instead of WSL os.Stat across /mnt.
+func (windowsGit) InspectBase(base string) (baseInfo, error) {
 	winBase, err := wslToWindowsPath(base)
 	if err != nil {
-		return false, fmt.Errorf("resolving windows base %s: %w", base, err)
+		return baseInfo{}, fmt.Errorf("resolving windows_base %s: %w", base, err)
 	}
 	exists, err := windowsPathExists(winBase)
 	if err != nil {
-		return false, fmt.Errorf("checking windows base %s: %w", winBase, err)
+		return baseInfo{}, fmt.Errorf("checking windows base %s: %w", winBase, err)
 	}
-	return exists, nil
+	if !exists {
+		return baseInfo{}, nil
+	}
+	info := baseInfo{Exists: true}
+	gitDir, err := windowsCommandOutput(winBase, "git", "rev-parse", "--git-dir")
+	if err == nil && (gitDir == "." || gitDir == ".git") {
+		info.IsRepo = true
+	} else {
+		if err != nil {
+			info.Detail = err.Error()
+		} else {
+			info.Detail = "it is inside the repository at " + gitDir
+		}
+		empty, eerr := windowsDirIsEmpty(winBase)
+		if eerr != nil {
+			return baseInfo{}, eerr
+		}
+		info.Empty = empty
+		return info, nil
+	}
+	url, err := windowsCommandOutput(winBase, "git", "config", "--get", "remote.origin.url")
+	if err != nil && windowsExitCode(err) != 1 { // 1: key not set
+		return baseInfo{}, err
+	}
+	info.OriginURL = url
+	return info, nil
 }
 
-// CloneBare: unlike the Linux path, deliberately skips checkSSHAgent() --
-// that checks WSL's own ssh-add, which has no bearing on Windows git.exe's
-// own credential setup (Git for Windows / Windows OpenSSH manage that
-// independently).
-func (g windowsGit) CloneBare(origin, base string) error {
+// InitBare: see linuxGit.InitBare for why init + remote add + fetch instead
+// of `clone --bare`.
+func (windowsGit) InitBare(base string) error {
 	winBase, err := wslToWindowsPath(base)
 	if err != nil {
 		return fmt.Errorf("resolving windows_base %s: %w", base, err)
@@ -78,23 +104,27 @@ func (g windowsGit) CloneBare(origin, base string) error {
 	if err := windowsMkdirAll(winParent); err != nil {
 		return fmt.Errorf("mkdir %s: %w", winParent, err)
 	}
-	// init + remote add + fetch instead of `clone --bare`: see linuxGit.CloneBare
-	// (no local branches copied from the remote).
-	if err := runWindowsCommand(winParent, "git", "init", "--bare", winBase); err != nil {
-		return err
-	}
-	if err := runWindowsCommand(winBase, "git", "remote", "add", "origin", origin); err != nil {
-		return err
-	}
-	return g.Fetch(base)
+	return runWindowsCommand(winParent, "git", "init", "--bare", winBase)
 }
 
-func (windowsGit) Fetch(base string) error {
+func (windowsGit) AddOrigin(base, origin string) error {
 	winBase, err := wslToWindowsPath(base)
 	if err != nil {
 		return fmt.Errorf("resolving windows_base %s: %w", base, err)
 	}
-	return runWindowsCommand(winBase, "git", "fetch", "origin")
+	return runWindowsCommand(winBase, "git", "remote", "add", "origin", origin)
+}
+
+// Fetch: unlike the Linux path, deliberately skips checkSSHAgent() -- that
+// checks WSL's own ssh-add, which has no bearing on Windows git.exe's own
+// credential setup (Git for Windows / Windows OpenSSH manage that
+// independently).
+func (windowsGit) Fetch(base, origin string) error {
+	winBase, err := wslToWindowsPath(base)
+	if err != nil {
+		return fmt.Errorf("resolving windows_base %s: %w", base, err)
+	}
+	return runWindowsCommand(winBase, "git", "fetch", "--prune", "origin")
 }
 
 func (windowsGit) Prune(base string) error {
@@ -105,10 +135,28 @@ func (windowsGit) Prune(base string) error {
 	return runWindowsCommand(winBase, "git", "worktree", "prune")
 }
 
+// RefExists runs `git show-ref --verify --quiet <ref>` via git.exe: exit 1
+// means absent. (The script wrapper also exits 1 if it can't cd into base,
+// but then the worktree add that follows fails with a clear error anyway.)
+func (windowsGit) RefExists(base, ref string) (bool, error) {
+	winBase, err := wslToWindowsPath(base)
+	if err != nil {
+		return false, fmt.Errorf("resolving windows_base %s: %w", base, err)
+	}
+	_, err = windowsCommandOutput(winBase, "git", "show-ref", "--verify", "--quiet", ref)
+	if err == nil {
+		return true, nil
+	}
+	if windowsExitCode(err) == 1 {
+		return false, nil
+	}
+	return false, err
+}
+
 // WorktreeAdd creates the real worktree under windows_worktree_root via
 // git.exe, then leaves worktreePath as a symlink to it -- only once the real
 // worktree exists.
-func (g windowsGit) WorktreeAdd(base, worktreePath, branch, defaultBranch string) error {
+func (g windowsGit) WorktreeAdd(base, worktreePath string, plan worktreeAddPlan) error {
 	real, err := g.realPath(worktreePath)
 	if err != nil {
 		return err
@@ -129,13 +177,7 @@ func (g windowsGit) WorktreeAdd(base, worktreePath, branch, defaultBranch string
 		return fmt.Errorf("mkdir %s: %w", winRealParent, err)
 	}
 
-	if err := addWorktreeWithFallback(branch,
-		func() error {
-			return runWindowsCommandCapture(winBase, "git", "worktree", "add", winReal, "-b", branch, "origin/"+defaultBranch)
-		},
-		func() error {
-			return runWindowsCommandCapture(winBase, "git", "worktree", "add", winReal, branch)
-		}); err != nil {
+	if err := runWindowsCommandCapture(winBase, append([]string{"git"}, plan.args(winReal)...)...); err != nil {
 		return err
 	}
 
@@ -239,17 +281,77 @@ func (g windowsGit) ApplyPatch(worktreePath, patchFile string) error {
 	return runWindowsCommand(winReal, "git", "apply", winPatch)
 }
 
-// replaceSymlink (re)creates link as a symlink to target, replacing whatever
-// stale entry is there.
+// replaceSymlink (re)creates link as a symlink to target. Only a symlink (or
+// nothing) at link is replaced: a real file or directory there may be
+// someone's work, so it is an error rather than something to delete.
 func replaceSymlink(link, target string) error {
 	if err := os.MkdirAll(parentDir(link), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", parentDir(link), err)
 	}
-	if err := os.RemoveAll(link); err != nil {
-		return fmt.Errorf("removing stale %s: %w", link, err)
+	fi, err := os.Lstat(link)
+	switch {
+	case err == nil && fi.Mode()&os.ModeSymlink != 0:
+		if err := os.Remove(link); err != nil {
+			return fmt.Errorf("removing stale symlink %s: %w", link, err)
+		}
+	case err == nil:
+		return fmt.Errorf("%s already exists and is not a symlink; move it away and retry", link)
+	case !os.IsNotExist(err):
+		return fmt.Errorf("checking %s: %w", link, err)
 	}
 	if err := os.Symlink(target, link); err != nil {
 		return fmt.Errorf("symlink %s -> %s: %w", link, target, err)
 	}
 	return nil
+}
+
+// Changes is the approximate windows-runtime check: `git status
+// --porcelain` via git.exe, minus every file a recorded patch touches. The
+// exact temp-index method (see linuxGit.Changes) would need GIT_INDEX_FILE
+// juggling and temp files on the Windows side through powershell.exe, so
+// this trades exactness for simplicity: an edit inside a patched file is
+// not seen (hence Approximate).
+func (g windowsGit) Changes(worktreePath string, patchFiles []string, exclude bool) changeReport {
+	real, err := g.realPath(worktreePath)
+	if err != nil {
+		return unknownChanges(err.Error())
+	}
+	winReal, err := wslToWindowsPath(real)
+	if err != nil {
+		return unknownChanges(fmt.Sprintf("resolving worktree %s: %v", real, err))
+	}
+	status, err := windowsCommandOutputRaw(winReal, "git", "status", "--porcelain=v1", "--untracked-files=all")
+	if err != nil {
+		return unknownChanges(err.Error())
+	}
+	files := parsePorcelainLines(status)
+	if !exclude {
+		return reportFromFiles(files, false, false, "")
+	}
+	if len(patchFiles) == 0 {
+		return reportFromFiles(files, true, false, "")
+	}
+	kept, ok := subtractPatchedFiles(files, patchFiles)
+	if !ok {
+		return reportFromFiles(files, false, false, "a recorded patch file could not be read, so patch changes are included")
+	}
+	return reportFromFiles(kept, true, true, "")
+}
+
+// UnpushedCommits runs `git rev-list --count refs/heads/<branch> --not
+// --remotes` via git.exe in the real worktree.
+func (g windowsGit) UnpushedCommits(worktreePath, branch string) (int, error) {
+	real, err := g.realPath(worktreePath)
+	if err != nil {
+		return 0, err
+	}
+	winReal, err := wslToWindowsPath(real)
+	if err != nil {
+		return 0, err
+	}
+	s, err := windowsCommandOutput(winReal, "git", "rev-list", "--count", "refs/heads/"+branch, "--not", "--remotes")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(s)
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -22,7 +23,7 @@ const activeFleetTicketOption = "@fleet_task_ticket"
 // tmux binary itself isn't available -- all of which mean the same thing
 // here: there's nothing live to worry about.
 func activeFleetTicket() (ticket string, found bool) {
-	cmd := exec.Command("tmux", "show-options", "-g", "-v", activeFleetTicketOption)
+	cmd := exec.Command("tmux", tmuxArgs("show-options", "-g", "-v", activeFleetTicketOption)...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
@@ -33,4 +34,14 @@ func activeFleetTicket() (ticket string, found bool) {
 		return "", false
 	}
 	return value, true
+}
+
+// tmuxArgs prefixes args with `-L <socket>` when FLEET_TMUX_SOCKET is set,
+// so fleet-task reads the same isolated tmux server fleet-run uses (tests
+// set it to avoid touching the user's real server).
+func tmuxArgs(args ...string) []string {
+	if sock := os.Getenv("FLEET_TMUX_SOCKET"); sock != "" {
+		return append([]string{"-L", sock}, args...)
+	}
+	return args
 }

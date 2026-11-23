@@ -22,23 +22,54 @@ func TestTaskFileValidatesTicket(t *testing.T) {
 	}
 }
 
-func TestAddWorktreeWithFallback(t *testing.T) {
-	ok := func() error { return nil }
-	failNew := func() error { return errString("bad ref origin/mian") }
-	failExisting := func() error { return errString("invalid reference: T-1") }
-
-	if err := addWorktreeWithFallback("T-1", ok, failExisting); err != nil {
-		t.Errorf("first attempt ok: %v", err)
+func TestValidateTicketNameExtended(t *testing.T) {
+	good := []string{"PROJ-1234", "gh-123", "fix_thing.v2", "a", strings.Repeat("x", 100), "ünï-1", "a.b-c_d+e@f"}
+	bad := []string{
+		"", ".", "..", "a/b", `a\b`, "-rf", "a b", "a\tb", "a\nb", "a\x00b", "a\x7fb",
+		"a<b", "a>b", "a:b", `a"b`, "a|b", "a?b", "a*b", "trailing.", "trailing ",
+		strings.Repeat("x", 101), "bad\xffutf8",
 	}
-	if err := addWorktreeWithFallback("T-1", failNew, ok); err != nil {
-		t.Errorf("fallback ok: %v", err)
+	for _, s := range good {
+		if err := validateTicketName(s); err != nil {
+			t.Errorf("validateTicketName(%q) = %v, want ok", s, err)
+		}
 	}
-	err := addWorktreeWithFallback("T-1", failNew, failExisting)
-	if err == nil || !strings.Contains(err.Error(), "origin/mian") || !strings.Contains(err.Error(), "invalid reference") {
-		t.Errorf("both failing must report both errors: %v", err)
+	for _, s := range bad {
+		err := validateTicketName(s)
+		if err == nil {
+			t.Errorf("validateTicketName(%q): want error", s)
+		} else if !isUsageError(err) {
+			t.Errorf("validateTicketName(%q): want a usage error, got %v", s, err)
+		}
 	}
 }
 
-type errString string
+func TestLockAndReadTaskUnknownIsUsageError(t *testing.T) {
+	t.Setenv("FLEET_STATE_DIR", t.TempDir())
+	_, _, _, err := lockAndReadTask("NOPE-1")
+	if err == nil || !isUsageError(err) || !strings.Contains(err.Error(), "no task found for ticket NOPE-1") {
+		t.Errorf("want usage error naming the ticket, got %v", err)
+	}
+}
 
-func (e errString) Error() string { return string(e) }
+func TestLockAndReadTaskUsesFilenameTicket(t *testing.T) {
+	t.Setenv("FLEET_STATE_DIR", t.TempDir())
+	tf, err := taskFile("REAL-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTaskState(tf, &TaskState{Ticket: "OTHER-9"}); err != nil {
+		t.Fatal(err)
+	}
+	_, st, unlock, err := lockAndReadTask("REAL-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if st.Ticket != "REAL-1" {
+		t.Errorf("st.Ticket = %q, want filename stem", st.Ticket)
+	}
+	if _, _, _, err := lockAndReadTask("REAL-1"); err == nil {
+		t.Error("second lockAndReadTask must fail while the first holds the lock")
+	}
+}

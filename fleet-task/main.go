@@ -8,15 +8,23 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"runtime/debug"
 )
 
-func usage() {
-	fmt.Fprintln(os.Stderr, `usage: fleet-task <command> [flags] [args]
+// version is set at build time with -ldflags "-X main.version=<v>"
+// (install.sh does); see versionString for the fallback.
+var version = "dev"
+
+// usage prints the top-level help to w: stdout when asked for (`--help`),
+// stderr alongside a usage error.
+func usage(w io.Writer) {
+	fmt.Fprintln(w, `usage: fleet-task <command> [flags] [args]
 
 commands:
   new [ticket]          create a task's worktrees (interactive unless --repo is given)
-  list [--json]         list existing tasks
+  list [--status]       list existing tasks (--status: count repos with uncommitted changes)
   show <ticket>         show one task's repos, branches, worktrees and patches
   repos [--json]        list configured repos, their run targets and patches
   patches [repo]        list available patches with summaries and touched files
@@ -24,6 +32,7 @@ commands:
   edit [ticket]         add/remove repos (interactive unless --add/--remove is given)
   mv [old] [new]        rename a task's ticket id (prompts for whatever is omitted)
   rm [ticket]           remove a task's worktrees and state file
+  version               print the fleet-task version (also --version)
 
 Without a terminal on stdin (or with FLEET_NO_INPUT=1) no picker or prompt is
 ever shown: a missing value is an error naming the flag that supplies it.
@@ -33,18 +42,19 @@ Run `+"`fleet-task <command> --help`"+` for a command's flags.`)
 }
 
 var (
-	specEdit    = cmdSpec{name: "edit", synopsis: "edit [ticket] [--add <repo>]... [--remove <repo>]... [--skip-patch <repo>:<name>]... [--no-patches] [--json]", summary: "Add and/or remove repos of an existing task. --add/--remove skip the pickers; added repos then get every available patch unless --skip-patch/--no-patches say otherwise.", maxPos: 1}
+	specEdit    = cmdSpec{name: "edit", synopsis: "edit [ticket] [--add <repo>]... [--remove <repo>]... [--skip-patch <repo>:<name>]... [--no-patches] [--force] [--json]", summary: "Add and/or remove repos of an existing task. --add/--remove skip the pickers; added repos then get every available patch unless --skip-patch/--no-patches say otherwise. Removing a repo whose worktree has uncommitted changes (beyond fleet-task's own patches) is refused, or asked about on a terminal, unless --force.", maxPos: 1}
 	specJump    = cmdSpec{name: "jump", synopsis: "jump [ticket] [--repo <name>]", summary: "Print a worktree path on stdout. Picks without a picker when --repo is given or only one worktree matches.", maxPos: 1}
-	specList    = cmdSpec{name: "list", synopsis: "list [--json]", summary: "List existing tasks.", maxPos: 0}
+	specList    = cmdSpec{name: "list", synopsis: "list [--status] [--json]", summary: "List existing tasks. --status also counts each task's repos with uncommitted changes (slower: runs git in every worktree).", maxPos: 0}
 	specMv      = cmdSpec{name: "mv", synopsis: "mv [old] [new] [--json]", summary: "Rename a task's ticket id, moving its worktrees. Rerunnable after a partial failure. Prompts for whatever is omitted.", maxPos: 2}
 	specNew     = cmdSpec{name: "new", synopsis: "new [ticket] [-d <description>] [--repo <name>]... [--skip-patch <repo>:<name>]... [--no-patches] [--json]", summary: "Create a task: a worktree per repo. With a ticket and --repo nothing is prompted; every available patch is applied unless --skip-patch/--no-patches say otherwise. Without them, prompts for the ticket/description and picks repos and patches.", maxPos: 1}
 	specPatches = cmdSpec{name: "patches", synopsis: "patches [repo] [--json]", summary: "List patches under <config dir>/patches/<repo>/ with a one-line summary and the files each touches.", maxPos: 1}
 	specRepos   = cmdSpec{name: "repos", synopsis: "repos [--json]", summary: "List repos configured in repos.yaml with their runtime, default branch, fleet-run targets and available patches.", maxPos: 0}
-	specRm      = cmdSpec{name: "rm", synopsis: "rm [ticket] [--json]", summary: "Remove a task's worktrees and state file. Shows a ticket picker if no ticket is given.", maxPos: 1}
+	specRm      = cmdSpec{name: "rm", synopsis: "rm [ticket] [--force] [--json]", summary: "Remove a task's worktrees and state file. Shows a ticket picker if no ticket is given. Refuses (or asks, on a terminal) if a worktree has uncommitted changes beyond fleet-task's own patches, unless --force.", maxPos: 1}
 	specShow    = cmdSpec{name: "show", synopsis: "show <ticket> [--json]", summary: "Show one task: description, repos, branches, worktree paths, applied patches, and whether fleet-run has it active.", maxPos: 1}
 )
 
 const (
+	forceHelp     = "remove worktrees even if they have uncommitted changes (skips the check)"
 	jsonHelp      = "print a machine-readable JSON result on stdout (progress goes to stderr)"
 	noPatchesHelp = "apply no patches to the repos being added"
 	skipPatchHelp = "`repo:name` of a patch not to apply (repeatable or comma-separated)"
@@ -72,7 +82,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) < 1 {
-		usage()
+		usage(os.Stderr)
 		return usageErrorf("a command is required")
 	}
 	cmd, rest := args[0], args[1:]
@@ -83,13 +93,14 @@ func run(args []string) error {
 	case "jump":
 		return runJump(rest)
 	case "list":
-		jsonOut := false
+		jsonOut, withStatus := false, false
 		if _, err := parseCmdArgs(specList, rest, func(fs *flag.FlagSet) {
 			fs.BoolVar(&jsonOut, "json", false, "print the raw JSON array instead of a table")
+			fs.BoolVar(&withStatus, "status", false, "also count each task's repos with uncommitted changes (runs git in every worktree)")
 		}); err != nil {
 			return err
 		}
-		return cmdList(jsonOut)
+		return cmdList(jsonOut, withStatus)
 	case "mv":
 		jsonOut := false
 		pos, err := parseCmdArgs(specMv, rest, func(fs *flag.FlagSet) {
@@ -119,14 +130,15 @@ func run(args []string) error {
 		}
 		return cmdRepos(jsonOut)
 	case "rm":
-		jsonOut := false
+		jsonOut, force := false, false
 		pos, err := parseCmdArgs(specRm, rest, func(fs *flag.FlagSet) {
+			fs.BoolVar(&force, "force", false, forceHelp)
 			fs.BoolVar(&jsonOut, "json", false, jsonHelp)
 		})
 		if err != nil {
 			return err
 		}
-		return cmdRm(at(pos, 0), jsonOut)
+		return cmdRm(at(pos, 0), force, jsonOut)
 	case "show":
 		jsonOut := false
 		pos, err := parseCmdArgs(specShow, rest, func(fs *flag.FlagSet) {
@@ -140,10 +152,13 @@ func run(args []string) error {
 		}
 		return cmdShow(pos[0], jsonOut)
 	case "-h", "--help", "help":
-		usage()
+		usage(os.Stdout)
 		return flag.ErrHelp
+	case "version", "--version":
+		fmt.Printf("fleet-task %s\n", versionString())
+		return nil
 	default:
-		usage()
+		usage(os.Stderr)
 		return usageErrorf("unknown command %q", cmd)
 	}
 }
@@ -156,6 +171,7 @@ func runEdit(args []string) error {
 		fs.Var(&remove, "remove", "`repo` to remove (repeatable or comma-separated)")
 		fs.Var(&skip, "skip-patch", skipPatchHelp)
 		fs.BoolVar(&o.NoPatches, "no-patches", false, noPatchesHelp)
+		fs.BoolVar(&o.Force, "force", false, forceHelp)
 		fs.BoolVar(&o.JSON, "json", false, jsonHelp)
 	})
 	if err != nil {
@@ -194,4 +210,39 @@ func runNew(args []string) error {
 	o.Ticket, o.Repos, o.SkipPatches = at(pos, 0), repos, skip
 	o.Description, o.DescriptionSet = description.value, description.set
 	return cmdNew(o)
+}
+
+// versionString returns version, or when it was not set at build time
+// ("dev") the VCS revision Go embedded in the binary, if any.
+func versionString() string {
+	info, ok := debug.ReadBuildInfo()
+	return resolveVersion(version, info, ok)
+}
+
+// resolveVersion is versionString's pure core: v unless it is "dev", else
+// the 12-char VCS revision (plus "-dirty") from the build info, else "dev".
+func resolveVersion(v string, info *debug.BuildInfo, ok bool) string {
+	if v != "dev" || !ok || info == nil {
+		return v
+	}
+	var rev string
+	dirty := false
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return v
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if dirty {
+		rev += "-dirty"
+	}
+	return rev
 }

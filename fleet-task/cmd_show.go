@@ -8,10 +8,22 @@ import (
 )
 
 // showResult is `fleet-task show --json`'s document: the task state plus
-// whether fleet-run currently has it running.
+// whether fleet-run currently has it running. Its Repos shadows the
+// embedded TaskState's (encoding/json prefers the shallower field), adding
+// per-repo change information to the unchanged TaskRepo fields.
 type showResult struct {
 	*TaskState
-	Active bool `json:"active"`
+	Repos  []showRepo `json:"repos"`
+	Active bool       `json:"active"`
+}
+
+// showRepo is one repo in showResult: the state entry plus its uncommitted
+// changes (beyond fleet-task's own patches) and unpushed commit count
+// (null if unknown).
+type showRepo struct {
+	TaskRepo
+	Changes         changeReport `json:"changes"`
+	UnpushedCommits *int         `json:"unpushed_commits"`
 }
 
 // cmdShow prints one task's description, repos, branches, worktree paths and
@@ -19,17 +31,23 @@ type showResult struct {
 func cmdShow(ticket string, jsonOut bool) error {
 	tf, err := taskFile(ticket)
 	if err != nil {
-		return usageErrorf("%v", err)
+		return err
 	}
-	if _, err := os.Stat(tf); os.IsNotExist(err) {
-		return fmt.Errorf("no task found for ticket %s (see `fleet-task list`)", ticket)
+	if err := requireTaskExists(ticket, tf); err != nil {
+		return err
 	}
 	st, err := readTaskState(tf)
 	if err != nil {
 		return fmt.Errorf("read task %s: %w", ticket, err)
 	}
+	st.Ticket = ticket // the filename is authoritative (see listTasks)
 	active, found := activeFleetTicket()
-	res := showResult{TaskState: st, Active: found && active == st.Ticket}
+	res := showResult{TaskState: st, Repos: []showRepo{}, Active: found && active == st.Ticket}
+	cfg := loadReposConfigOptional() // only needed to know each repo's runtime
+	for _, r := range st.Repos {
+		status := inspectRepoStatus(cfg, r)
+		res.Repos = append(res.Repos, showRepo{TaskRepo: r, Changes: status.Changes, UnpushedCommits: status.Unpushed})
+	}
 
 	if jsonOut {
 		return printJSON(res)
@@ -40,9 +58,9 @@ func cmdShow(ticket string, jsonOut bool) error {
 	fmt.Printf("created_at:  %s\n", st.CreatedAt.Format("2006-01-02 15:04:05"))
 	fmt.Printf("active:      %t\n\n", res.Active)
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "REPO\tBRANCH\tPATCHES\tWORKTREE")
-	for _, r := range st.Repos {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Repo, r.Branch, formatPatchList(r.Patches), r.WorktreePath)
+	fmt.Fprintln(w, "REPO\tBRANCH\tPATCHES\tCHANGES\tUNPUSHED\tWORKTREE")
+	for _, r := range res.Repos {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Repo, r.Branch, formatPatchList(r.Patches), formatChanges(r.Changes), formatUnpushed(r.UnpushedCommits), r.WorktreePath)
 	}
 	return w.Flush()
 }
