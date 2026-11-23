@@ -89,6 +89,14 @@ Pickers (repo/patch/ticket selection) are built in; no `fzf` or other external p
 missing). Make sure that directory is on your `$PATH`: `fleet-task new` runs `fleet-cache` by name,
 so all three must be reachable.
 
+It also installs the Claude Code skill: a copy of `skills/fleet/` goes to
+`$XDG_DATA_HOME/fleet/skills/fleet` (default `~/.local/share/fleet/...`), and
+`$CLAUDE_CONFIG_DIR/skills/fleet` (default `~/.claude/skills/fleet`) is symlinked to that copy. The
+skill therefore matches the installed binaries rather than whatever the checkout holds; rerun
+`./install.sh` after pulling. An existing non-symlink at the link path is left alone.
+`./install.sh --uninstall` removes the binaries, the skill copy and the link (only if it points at
+fleet's skill).
+
 A subprocess can't change its parent shell's directory, so `fleet-task jump` only prints a path.
 Source `fleet-task/contrib/fleet.sh` from your shell profile to get `fj`, which wraps it and does the
 `cd`.
@@ -121,7 +129,7 @@ Each tool's README has the full reference (flags, exit codes, behaviour).
 For scripts and AI agents, every fleet-task/fleet-run command except `jump` takes `--json`, never prompts
 without a terminal (or with `FLEET_NO_INPUT=1`; a missing value exits 2), and
 [`skills/fleet/SKILL.md`](skills/fleet/SKILL.md) is a ready-made Claude Code skill (installed by
-`install.sh`).
+`install.sh`; see [Install](#install)).
 
 Config, state and cache live under XDG directories (`~/.config/fleet`, `~/.local/state/fleet`,
 `~/.cache/fleet`), overridable with `FLEET_CONFIG_DIR`, `FLEET_REPOS_FILE`, `FLEET_STATE_DIR` and

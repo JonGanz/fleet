@@ -75,7 +75,10 @@ cd fleet-task && go test ./... -run TestName -v
 directory (e.g. `fleet-task/fleet-task`) — this is a build artifact, not a committed file; remove
 it (`rm fleet-task/fleet-task`) rather than leaving it around or committing it.
 
-`./install.sh` builds all three into `~/.local/bin` (or `$BIN_DIR`).
+`./install.sh` builds all three into `~/.local/bin` (or `$BIN_DIR`), copies `skills/fleet/` to
+`$XDG_DATA_HOME/fleet/skills/fleet` and symlinks `$CLAUDE_CONFIG_DIR/skills/fleet` (default
+`~/.claude/skills/fleet`) to that copy — never to the checkout, so the skill matches the installed
+binaries. `./install.sh --uninstall` reverses it.
 
 Shell integration test (requires [bats-core](https://github.com/bats-core/bats-core)):
 
