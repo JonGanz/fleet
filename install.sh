@@ -67,7 +67,7 @@ install_binaries() {
   for name in $BINARIES; do
     echo "building $name ($version) -> $bin_dir/$name"
     tmp="$bin_dir/.$name.tmp.$$"
-    (cd "$ROOT/$name" && go build -trimpath -ldflags "-X main.version=$version" -o "$tmp" .)
+    (cd "$ROOT" && go build -trimpath -ldflags "-X main.version=$version" -o "$tmp" "./cmd/$name")
     mv -f "$tmp" "$bin_dir/$name"
   done
   tmp=""

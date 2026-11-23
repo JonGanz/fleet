@@ -29,9 +29,10 @@ stashing, switching and port clashes.
   across worktrees whose `package-lock.json` is identical (via hardlinks: several directory
   entries pointing at the same file on disk, so extra copies cost no space or install time).
 
-They are three independent Go programs that coordinate only through files on disk (a config you
-write, state files they own) and by running each other by name — no shared code, no daemon. The
-authoritative description of those files and conventions is [`docs/CONTRACT.md`](docs/CONTRACT.md).
+They are three Go programs that coordinate only through files on disk (a config you write, state
+files they own) and by running each other by name — no daemon. They're built from one Go module
+that shares the code implementing those files and conventions. The authoritative description of
+them is [`docs/CONTRACT.md`](docs/CONTRACT.md).
 
 ## Quick start
 
@@ -107,7 +108,7 @@ use it as `cd "$(fleet-task jump)"`.
 
 Each tool's README has the full reference (flags, exit codes, behaviour).
 
-- **`fleet-task`** — [`fleet-task/README.md`](fleet-task/README.md)
+- **`fleet-task`** — [`cmd/fleet-task/README.md`](cmd/fleet-task/README.md)
   - `new [ticket]` — create a ticket's worktrees (prompts, or `--repo`/`-d`/`--skip-patch` flags;
     runs hooks; installs `node_modules` via `fleet-cache`)
   - `list [--status]` / `show <ticket>` — list tickets (`--status`: count repos with uncommitted
@@ -120,7 +121,7 @@ Each tool's README has the full reference (flags, exit codes, behaviour).
   - `mv [old] [new]` — rename a ticket, moving its worktrees
   - `rm [ticket]` — remove a ticket's worktrees and state (picker if no ticket given); refuses
     worktrees with uncommitted changes (asks on a terminal) unless `--force`; branches are kept
-- **`fleet-run`** — [`fleet-run/README.md`](fleet-run/README.md)
+- **`fleet-run`** — [`cmd/fleet-run/README.md`](cmd/fleet-run/README.md)
   - `start [--ticket <id>] [--all] [repo:run-name ...]` — start a ticket's apps, one tmux window
     each, named `<repo>-<run-name>` (e.g. `backend-api`); switches tickets if another is active
   - `restart [--ticket <id>] [--all] [repo:run-name ...]` — like `start`, but also restarts apps
@@ -131,7 +132,7 @@ Each tool's README has the full reference (flags, exit codes, behaviour).
   - `targets [--ticket <id>]` — list a ticket's runnable `repo:run-name` targets
   - `logs <repo:run-name> [-n N]` — print an app's recent output, even after it crashed
   - `attach [repo:run-name]` — attach your terminal to the fleet tmux session (humans only)
-- **`fleet-cache`** — [`fleet-cache/README.md`](fleet-cache/README.md)
+- **`fleet-cache`** — [`cmd/fleet-cache/README.md`](cmd/fleet-cache/README.md)
   - `ensure <dir>` — link `<dir>/node_modules` from the shared cache (run for you by `fleet-task new`)
   - `gc` — report, or with `--roots` and `--force` delete, cache entries no longer referenced
   - `list` — show cache entries and staging dirs with their size
@@ -141,30 +142,32 @@ Each tool also has `version` (or `--version`) and `--help`.
 
 For scripts and AI agents, every fleet-task/fleet-run command except `fleet-task jump`,
 `fleet-run attach` and `version` takes `--json` (as do `fleet-cache gc`/`gc-windows`/`list`), all
-three tools exit 0 ok / 1 failed / 2 usage error or missing input, nothing prompts without a
+three tools exit 0 ok / 1 failed / 2 usage error or missing input and print errors and warnings on
+stderr as `<tool>: error: ...` / `<tool>: warning: ...`, nothing prompts without a
 terminal (or with `FLEET_NO_INPUT=1`; a missing value exits 2), and
 [`skills/fleet/SKILL.md`](skills/fleet/SKILL.md) is a ready-made Claude Code skill (installed by
 `install.sh`; see [Install](#install)).
 
 Config, state and cache live under XDG directories (`~/.config/fleet`, `~/.local/state/fleet`,
-`~/.cache/fleet`), overridable with `FLEET_CONFIG_DIR`, `FLEET_REPOS_FILE`, `FLEET_STATE_DIR` and
-`FLEET_CACHE_DIR`. Optional hook scripts and patch files live in the config directory; see
+`~/.cache/fleet`, or under `$XDG_CONFIG_HOME` etc. when those are absolute paths; a relative one is
+ignored with a warning), overridable with `FLEET_CONFIG_DIR`, `FLEET_REPOS_FILE`, `FLEET_STATE_DIR`
+and `FLEET_CACHE_DIR` (relative values are taken relative to the current directory). Optional hook scripts and patch files live in the config directory; see
 `docs/CONTRACT.md`. `FLEET_TMUX_SOCKET=<name>` makes fleet use a private tmux server
 (`tmux -L <name>`).
 
 ## Development
 
-Each CLI is an independent Go module (`github.com/JonGanz/fleet/<tool>`):
+One Go module (`github.com/JonGanz/fleet`): the three binaries are under `cmd/<tool>/`, the code
+they share under `internal/` (paths, `repos.yaml`, state files, hooks, the picker, CLI plumbing,
+WSL helpers). From the repo root:
 
 ```sh
-cd fleet-task && go build ./... && go vet ./... && go test ./...
-cd fleet-run   && go build ./... && go vet ./... && go test ./...
-cd fleet-cache && go build ./... && go vet ./... && go test ./...
+go build ./... && go vet ./... && go test ./...
 ```
 
-The root `Makefile` runs these across all three: `make check` (gofmt check, vet, `go test -race`),
+The root `Makefile` wraps these: `make check` (gofmt check, vet, `go test -race`),
 `make build` (version-stamped binaries in `dist/`), `make lint` (staticcheck, if installed),
-`make install`, `make clean`. CI (`.github/workflows/ci.yml`) runs the same per module plus
+`make install`, `make clean`. CI (`.github/workflows/ci.yml`) runs the same plus
 staticcheck, govulncheck and shellcheck on `install.sh`. fleet-run's integration tests drive a
 private tmux server and fleet-task's git tests use real temp repos; they're skipped when
 `tmux`/`git` is missing.

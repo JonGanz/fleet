@@ -11,28 +11,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Each module is its own Go module (no go.work, by design): every Go job runs
-# once per module directory, with the Go version from that module's go.mod.
-# cache-dependency-path uses go.* so fleet-cache (go.mod only, no go.sum since
-# it has no dependencies) still resolves a cache key.
+# One Go module at the repo root (cmd/ + internal/): every Go job runs once
+# from the root, with the Go version from go.mod.
 
 jobs:
   test:
-    name: test (${{ matrix.module }})
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        module: [fleet-task, fleet-run, fleet-cache]
-    defaults:
-      run:
-        working-directory: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version-file: ${{ matrix.module }}/go.mod
-          cache-dependency-path: ${{ matrix.module }}/go.*
+          go-version-file: go.mod
       - name: Install tmux
         # fleet-run's tmux integration tests skip without it.
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux git
@@ -52,40 +41,22 @@ jobs:
         run: go test -race ./...
 
   staticcheck:
-    name: staticcheck (${{ matrix.module }})
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        module: [fleet-task, fleet-run, fleet-cache]
-    defaults:
-      run:
-        working-directory: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version-file: ${{ matrix.module }}/go.mod
-          cache-dependency-path: ${{ matrix.module }}/go.*
+          go-version-file: go.mod
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
 
   govulncheck:
-    name: govulncheck (${{ matrix.module }})
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        module: [fleet-task, fleet-run, fleet-cache]
-    defaults:
-      run:
-        working-directory: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version-file: ${{ matrix.module }}/go.mod
-          cache-dependency-path: ${{ matrix.module }}/go.*
+          go-version-file: go.mod
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 

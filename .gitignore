@@ -1,7 +1,11 @@
-# Binaries `go build ./...` drops inside each module dir.
-/fleet-task/fleet-task
-/fleet-run/fleet-run
-/fleet-cache/fleet-cache
+# Binaries `go build ./cmd/<tool>` drops in the repo root, or inside the
+# command's dir when run from there.
+/fleet-task
+/fleet-run
+/fleet-cache
+/cmd/fleet-task/fleet-task
+/cmd/fleet-run/fleet-run
+/cmd/fleet-cache/fleet-cache
 
 # `make build` output.
 /dist/

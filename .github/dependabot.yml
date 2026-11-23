@@ -1,15 +1,7 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /fleet-task
-    schedule:
-      interval: weekly
-  - package-ecosystem: gomod
-    directory: /fleet-run
-    schedule:
-      interval: weekly
-  - package-ecosystem: gomod
-    directory: /fleet-cache
+    directory: /
     schedule:
       interval: weekly
   - package-ecosystem: github-actions

@@ -16,7 +16,8 @@ ticket's apps, one tmux window per `repo:run-name` target. Both are on `PATH`.
   the flag to add.
 - **Always pass `--json`** where supported (everything except
   `fleet-task jump`, `fleet-run attach` and `version`) and parse stdout.
-  Progress, git and hook output go to stderr.
+  Progress, git and hook output go to stderr; the tools' own errors and
+  warnings there start with `<tool>: error:` / `<tool>: warning:`.
 - **Exit codes:** 0 ok · 1 operation failed (maybe partly; read the JSON) ·
   2 usage error / missing input (nothing was changed; fix the arguments).
 - **Never `fleet-run attach`**: it hands a terminal to tmux and is for the
@@ -158,3 +159,6 @@ only if they explicitly agree to lose them — rerun with `--force`.
   Wait and retry; never delete the `.lock` file yourself — ask the user if
   it persists.
 - "currently active in fleet-run": stop the apps (with the user's OK) first.
+- "has schema_version N, but this fleet only understands up to M": the state
+  file was written by a newer fleet. Don't edit or delete it; tell the user to
+  upgrade fleet. (`fleet-task list` skips such a ticket with a warning.)

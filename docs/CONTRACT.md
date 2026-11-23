@@ -1,8 +1,11 @@
 # Fleet shared contract
 
-Three independent Go CLIs — `fleet-task`, `fleet-run`, `fleet-cache` — coordinate purely
+Three Go CLIs — `fleet-task`, `fleet-run`, `fleet-cache` — coordinate at runtime purely
 through files on disk (config the user authors, state the tools own) and by shelling out
-to each other as subprocesses. No shared Go code/module between them.
+to each other as subprocesses. They are built from one Go module (`cmd/<tool>/`) and share the
+code that implements this contract (`internal/`: paths, `repos.yaml`, state files, hooks, CLI
+conventions), so the rules below are implemented once; the subprocess boundary between the
+binaries is unchanged.
 
 ## Paths (XDG-compliant, all overridable via `FLEET_*` env vars for testing)
 
@@ -21,6 +24,12 @@ to each other as subprocesses. No shared Go code/module between them.
 | Windows worktree root | `repos.yaml` top-level `windows_worktree_root` (required for `runtime: windows`) | - |
 | Windows cache root  | `repos.yaml` top-level `windows_cache_root`, else `%LOCALAPPDATA%\fleet` | -   |
 | Windows node cache entries | `<windows cache root>\node-cache\<sha256 of package-lock.json>` | -    |
+
+Resolution (`internal/xdg`): a non-empty `FLEET_*` override wins; it may be relative and is then
+made absolute against the working directory. Otherwise `$XDG_*_HOME/fleet` is used if the
+variable is set to an absolute path; a relative `XDG_*_HOME` is invalid per the XDG Base Directory
+spec, so it is ignored with one warning line and the default under `~` is used. `fleet-cache`'s
+`--cache-root` wins over `FLEET_CACHE_DIR` and is made absolute the same way.
 
 All four Windows-side paths above are still expressed in **WSL-visible form** (e.g.
 `/mnt/c/fleet/base`), the same convention as every other path in `repos.yaml` — they're only
@@ -71,8 +80,8 @@ repos:
 Field notes:
 - `defaults.default_branch` / `defaults.branch_template` / `defaults.base_root` /
   `defaults.windows_base_root`: applied to every repo that omits the corresponding field, via
-  `applyDefaults()` in both `fleet-task/config.go` and `fleet-run/config.go` (called right after
-  YAML unmarshal, before the config is used for anything). A repo's own
+  `applyDefaults()` in `internal/config` (called right after YAML unmarshal, before the config is
+  used for anything, by both `fleet-task` and `fleet-run`). A repo's own
   `base`/`default_branch`/`branch_template`/`windows_base`, when set, always wins over the default.
   `windows_base_root` only ever fills in `windows_base` for `runtime: windows` repos — a
   windows-runtime repo never gets a `base` derived from `defaults.base_root`, since it doesn't use
@@ -82,7 +91,7 @@ Field notes:
   (`fleet-run` has no `branch_template` field at all and ignores it — branch naming is entirely a
   `fleet-task new`-time concern.)
 - `branch_template`: the git branch name `fleet-task new` creates is computed by `branchName()`
-  (`fleet-task/branch.go`) from this template, substituting `{ticket}` (verbatim) and
+  (`cmd/fleet-task/branch.go`) from this template, substituting `{ticket}` (verbatim) and
   `{description}` (lowercased, non-alphanumeric runs collapsed to `-`, capped at 40 chars). An
   empty/unset template (the default) is equivalent to `"{ticket}"` — today's plain-ticket branch
   name. Note: if `{description}` is used and a later `fleet-task new` run for the *same* ticket is
@@ -108,10 +117,10 @@ Field notes:
   3. else → `git worktree add --no-track -b <branch> <worktree_path> origin/<default_branch>` (no
      upstream, so a plain `git push` can't target the default branch). A missing
      `origin/<default_branch>` is reported by name.
-- Validation on load: `fleet-task` requires repo names to be non-empty, unique and plain (no `/` or
-  `\`, not `.`/`..`) and `runtime` to be empty, `linux` or `windows` (`rm`/`mv` still work without a
-  usable `repos.yaml`, warning if it exists but is invalid). `fleet-run`'s own checks are under "tmux session
-  & window naming" below.
+- Validation on load (`internal/config`, both tools): repo names must be non-empty, unique and
+  plain (no `/` or `\`, not `.`/`..`) and `runtime` must be empty, `linux` or `windows`
+  (`fleet-task rm`/`mv` still work without a usable `repos.yaml`, warning if it exists but is
+  invalid). `fleet-run` adds its own checks, under "tmux session & window naming" below.
 - `runtime: windows` means: run commands for this repo are executed via
   `powershell.exe -NoExit -Command "..."` from WSL2, and its node_modules cache lives under a
   separate Windows-side cache path (hardlinks can't cross the WSL 9P boundary, the file-sharing
@@ -119,7 +128,7 @@ Field notes:
   this field: in `fleet-task`, the bare clone and git worktree for a `runtime: windows` repo
   are created entirely by **Windows-native `git.exe`**, invoked from WSL via `powershell.exe -NoProfile -Command "<script>"` (the script
   `cd`s into the Windows directory, runs `git`, and propagates its exit code; see
-  `fleet-task/winpath.go`'s `windowsCommandScript`), against paths under
+  `internal/wsl`'s `CommandScript`), against paths under
   `windows_base`/`windows_worktree_root` rather than `base`/`worktree_root`. This keeps the actual
   checkout on an NTFS volume instead of WSL git writing through the 9P bridge into what's nominally
   a Windows-mounted path — the original bug this whole mechanism exists to fix.
@@ -135,16 +144,16 @@ Field notes:
     The WSL-side symlink is only ever replaced if what's at that path is a symlink; a real file or
     directory there is an error, never deleted.
   - **`fleet-run` must resolve that symlink before calling `wslpath -w`** (`windowsWorktreeWinPath`
-    in `tmux_exec.go`). Depending on the WSL version, `wslpath` may not follow symlinks; then a
+    in `cmd/fleet-run/tmux_exec.go`). Depending on the WSL version, `wslpath` may not follow symlinks; then a
     symlinked worktree's own WSL-ext4-side path would map to a `\\wsl.localhost\...` UNC path
     instead of the correct `C:\...` location. This is implemented via `filepath.EvalSymlinks` before
-    `wslToWindowsPath` (a no-op for any windows-runtime worktree that isn't a symlink) — do not
+    `wsl.WindowsPath` (a no-op for any windows-runtime worktree that isn't a symlink) — do not
     remove this thinking it's redundant. The translated directory is handed to PowerShell as
     `Set-Location -LiteralPath '<win-dir>'` (single-quoted literal, embedded `'` doubled).
   - **NTFS hardlinks require the same drive.** `windows_base`, `windows_worktree_root`, and the
     resolved windows cache root must all resolve to the same drive letter, or `fleet-cache
     ensure-windows`'s hardlink step fails. Each tool checks what it can see, up front
-    (`checkSameDrive` in each module's `winpath.go`), and errors clearly rather than letting it fail
+    (`internal/wsl`'s `CheckSameDrive`), and errors clearly rather than letting it fail
     per-file inside a PowerShell script: `fleet-task` (`windowsGit.Preflight`) checks
     `windows_base` against the real worktree location under `windows_worktree_root` (it never
     looks at the cache root); `fleet-cache ensure-windows` checks the resolved cache root against
@@ -231,13 +240,20 @@ older than a minute. Takeover renames the stale file aside and re-checks it, so 
 both take over. Writes themselves go via a temp file + rename. Everything else (`fleet-run`) only
 reads these files.
 
-The filename is authoritative for the ticket id: it's what every command looks up. `fleet-task`
-warns about a file whose `ticket` field disagrees and uses the filename. (`fleet-run` still uses
-the `ticket` field, e.g. for `@fleet_task_ticket`; files written by `fleet-task` always agree.)
-Ticket ids accepted by `fleet-task` are at most 100 bytes; no path separators, not `.`/`..`; no
-leading `-`; no whitespace, control characters or invalid UTF-8; none of `<>:"|?*` and no trailing
-`.` or space (illegal in Windows filenames). `fleet-run` only rejects empty ids, `.`/`..` and path
-separators, since it only reads existing files.
+The filename is authoritative for the ticket id, in both tools: it's what every command looks up,
+and what `fleet-run` records in `@fleet_task_ticket` and passes as `FLEET_TICKET`. A file whose
+`ticket` field disagrees is warned about and its field ignored (files written by `fleet-task`
+always agree). Ticket ids (`--ticket`, positional tickets) are validated the same way by both
+tools: at most 100 bytes; no path separators, not `.`/`..`; no leading `-`; no whitespace, control
+characters or invalid UTF-8; none of `<>:"|?*` and no trailing `.` or space (illegal in Windows
+filenames). An invalid id is a usage error (exit 2).
+
+**Schema version.** Every write sets `"schema_version": 1` (first key). A file without the field
+is read as version 1. A file with a higher version than the binary supports was written by a newer
+fleet and is never misread: reading that ticket fails with an error telling the user to upgrade
+fleet, and list-style commands (`fleet-task list` and the ticket pickers) warn and skip the
+file. Bump the version only for an incompatible change to the shape below. `--json` outputs carry
+no `schema_version`, and the binaries don't check each other's versions.
 
 `fleet-task new` writes the state file right after each repo succeeds, so an interrupted `new`
 still leaves a task listing every worktree created so far (finish it with `edit --add`). If no repo
@@ -245,6 +261,7 @@ succeeded, no state file is written.
 
 ```json
 {
+  "schema_version": 1,
   "ticket": "PROJ-1234",
   "description": "Add retry logic to payment webhook",
   "created_at": "2026-08-02T22:58:00Z",
@@ -327,7 +344,7 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
   since there's nothing else running to filter out. These options are also there for your own tmux
   config to read directly in a status-line format string, e.g.
   `#{@fleet_task_ticket}: #{@fleet_task_description}`. `fleet-task` reads `@fleet_task_ticket` too
-  (`tmux_check.go`, a plain `tmux show-options -g -v` shell-out, not shared code): `rm` and `edit`'s
+  (`cmd/fleet-task/tmux_check.go`, a plain `tmux show-options -g -v` shell-out): `rm` and `edit`'s
   repo-removal path refuse to tear down a worktree for the ticket fleet-run currently has live,
   since a running dev server can race the delete and write into its own untracked cache dir (e.g.
   Vite's `.vite/deps_temp_*`) at the exact moment git tries to remove it, leaving `git worktree
@@ -349,7 +366,7 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
   kills it like a live one. A ticket whose panes are
   all dead still counts as active (the `@fleet_task_ticket` option stays set) until stopped.
 
-## CLI conventions shared by fleet-task and fleet-run
+## CLI conventions shared by fleet-task and fleet-run (and mostly fleet-cache)
 
 - **Exit codes** (also used by `fleet-cache`): 0 ok; 1 the operation failed (fully or partly); 2
   usage error or input required (bad flags/arguments, unknown names — including an unknown ticket,
@@ -363,8 +380,13 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
 - **No terminal, no prompts:** pickers and prompts open only if stdin is a terminal (checked with
   isatty — `/dev/null` is a character device too) and `FLEET_NO_INPUT` is not `1`. Only stdin is
   checked: stdout is legitimately captured by `cd "$(fleet-task jump)"`. Otherwise a step that
-  would prompt exits 2 naming the flag or argument that supplies the value. Both tools implement
-  `interactiveAllowed()` independently and also guard inside their (hand-synced) `runSelect`.
+  would prompt exits 2 naming the flag or argument that supplies the value. Both tools use
+  `internal/cli`'s `InteractiveAllowed()`, and the shared picker (`internal/picker`) checks it
+  again before opening.
+- **Diagnostics:** every error or warning line on stderr has the form `<tool>: error: <msg>` or
+  `<tool>: warning: <msg>` (e.g. `fleet-task: error: no task found for ticket X-1`), for all three
+  tools (fleet-cache's name the subcommand first: `fleet-cache: error: ensure: ...`). Progress
+  lines are not prefixed.
 - **`--json`** results go to stdout as a single document, also when the command exits 1; progress,
   git, hook and tmux output go to stderr. Usage errors print no JSON.
 
@@ -421,6 +443,6 @@ necessarily derived from the ticket at all, so they're left as-is even after a r
   except `fleet-task jump` (which prints a single bare path on stdout for `cd`), `fleet-run attach`
   (it hands the terminal to tmux) and the `version` commands, and by `fleet-cache gc`/`gc-windows`
   (dry-run and `--force` alike) and `fleet-cache list`; `fleet-cache ensure*` is not meant to be
-  parsed. Exit codes for all three tools are in "CLI conventions shared by fleet-task and fleet-run"
-  above (0 / 1 / 2; an interrupted `fleet-cache ensure` exits 1). Every repo/window is attempted
+  parsed. Exit codes for all three tools are in "CLI conventions shared by fleet-task and
+  fleet-run (and mostly fleet-cache)" above (0 / 1 / 2; an interrupted `fleet-cache ensure` exits 1). Every repo/window is attempted
   before a *partial* failure exits 1.

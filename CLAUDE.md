@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`fleet` is three independent Go CLIs — `fleet-task`, `fleet-run`, `fleet-cache` — that let one
+`fleet` is three Go CLIs — `fleet-task`, `fleet-run`, `fleet-cache` — that let one
 person run several tickets (from any issue tracker — Jira, GitHub issues, … — or none) in parallel, each in its own set of git worktrees, each with its
 own subset of running applications, without their working trees or running processes conflicting.
 There is no issue-tracker integration: a ticket id is an opaque string (validated only to be safe as
@@ -18,7 +18,7 @@ checkout/process set per repo can't be in two branches or two states at once.
 
 See `docs/CONTRACT.md` for the authoritative shared contract (paths, `repos.yaml` schema, state
 file format, hook/tmux naming conventions) — read that file before changing anything that crosses
-module boundaries.
+tool boundaries.
 
 ### Design constraints that shaped this
 
@@ -41,46 +41,64 @@ module boundaries.
   exits 2 (no terminal on stdin, or `FLEET_NO_INPUT=1`), and `--json` is on every fleet-task and
   fleet-run command (except `fleet-task jump`, `fleet-run attach` and the `version` commands) plus
   `fleet-cache gc`/`gc-windows`/`list`; `fleet-task jump` prints a bare path. All three tools exit
-  0 ok / 1 failed / 2 usage error or input required.
+  0 ok / 1 failed / 2 usage error or input required, and print every diagnostic on stderr as
+  `<tool>: error: <msg>` or `<tool>: warning: <msg>` (`internal/cli`).
   `skills/fleet/SKILL.md` is the agent-facing guide built on that surface.
 
-Each subdirectory (`fleet-task/`, `fleet-run/`, `fleet-cache/`) is its own Go module with its own
-`go.mod` (module path `github.com/JonGanz/fleet/<module>`). **There is no shared Go code between them** — this is intentional (each may become its
-own git repo later). They coordinate only through:
+The repo is one Go module (`github.com/JonGanz/fleet`, `go.mod` at the root). Each binary is a
+`package main` under `cmd/` (`cmd/fleet-task/`, `cmd/fleet-run/`, `cmd/fleet-cache/`); code more
+than one of them needs lives in `internal/`, one package per concern:
+
+- `internal/cli` — diagnostics (`Errorf`/`Warnf` with the `<tool>:` prefix), `UsageError` and the
+  0/1/2 exit-code mapping (`ExitCode`, `Report`), `InteractiveAllowed`, version resolution,
+  `PrintJSON`.
+- `internal/xdg` — config/state/cache directory resolution (`FLEET_*` overrides, XDG variables,
+  defaults), `ExpandHome`.
+- `internal/config` — `repos.yaml` types, `Load`/`Parse`, `defaults`, the validation every tool
+  needs.
+- `internal/taskstate` — `tasks/<ticket>.json`: types, `Read`/`List`/`Write`, `schema_version`,
+  ticket-id validation.
+- `internal/wsl` — `wslpath` wrappers, PowerShell quoting and command scripts, the same-drive
+  check.
+- `internal/picker` — the bubbletea list picker.
+- `internal/hooks` — hook discovery, env and running.
+- `internal/tmuxsock` — the `FLEET_TMUX_SOCKET` `-L` argument.
+
+Sharing code does not change how the binaries coordinate at runtime; they still talk only through:
 1. Files on disk: a user-authored `repos.yaml` config, and per-ticket state files at
    `tasks/<ticket>.json` (one file per ticket, never a single shared file — parallel tickets must
    never contend on the same file).
 2. Shelling out to each other by binary name on `PATH` (e.g. `fleet-task new` calls
-   `fleet-cache ensure <dir>`).
+   `fleet-cache ensure <dir>`). Keep it that way: don't turn these calls into function calls or
+   merge the binaries.
 
-Changing the on-disk contract (config schema, state file shape, hook env vars, tmux window naming)
-means updating `docs/CONTRACT.md` and checking all three modules, not just one.
+Behaviour that only one tool needs stays in that tool (e.g. fleet-run's tmux window-name
+validation in `cmd/fleet-run/config.go`), so a shared package change doesn't silently tighten the
+other tools. Changing the on-disk contract (config schema, state file shape, hook env vars, tmux
+window naming) means updating `docs/CONTRACT.md` and checking every binary, not just one.
 
 ## Commands
 
-Build/test/vet each module independently from within its directory (there is no root-level
-`go.work` — treat `fleet-task/`, `fleet-run/`, `fleet-cache/` as separate projects):
+Build/test/vet everything from the repo root:
 
 ```sh
-cd fleet-task && go build ./... && go vet ./... && go test ./...
-cd fleet-run   && go build ./... && go vet ./... && go test ./...
-cd fleet-cache && go build ./... && go vet ./... && go test ./...
+go build ./... && go vet ./... && go test ./...
 ```
 
 Run a single test:
 
 ```sh
-cd fleet-task && go test ./... -run TestName -v
+go test ./cmd/fleet-task -run TestName -v
 ```
 
-The root `Makefile` loops over the three modules: `make check` (gofmt check + `go vet` +
-`go test -race`), `make build` (version-stamped binaries into `dist/`), `make lint` (staticcheck,
-skipped if not installed), `make install`/`uninstall` (via `install.sh`), `make clean`.
+The root `Makefile` wraps this: `make check` (gofmt check + `go vet` + `go test -race`),
+`make build` (version-stamped binaries into `dist/`), `make lint` (staticcheck, skipped if not
+installed), `make install`/`uninstall` (via `install.sh`), `make clean`.
 
-`go build ./...` from inside a module directory drops a binary named after the module in that same
-directory (e.g. `fleet-task/fleet-task`) — this is a build artifact, not a committed file
-(`.gitignore` ignores it); remove it (`rm fleet-task/fleet-task` or `make clean`) rather than
-leaving it around.
+`go build ./...` writes no binaries for multiple packages, but `go build ./cmd/fleet-task` (from
+the root) or `go build` inside `cmd/fleet-task/` drops a `fleet-task` binary in the current
+directory — a build artifact, not a committed file (`.gitignore` ignores it); remove it (or
+`make clean`) rather than leaving it around.
 
 `./install.sh` (needs `go` on `PATH`) builds all three with `-trimpath`, stamping `main.version`
 (`$FLEET_VERSION`, else `git describe --tags --always --dirty`, else `dev`), and installs each
@@ -92,9 +110,9 @@ binaries. `./install.sh --uninstall` reverses it.
 The bubbletea pickers have no headless integration test; their state machines are unit tested by
 feeding synthetic key messages.
 
-CI (`.github/workflows/ci.yml`) runs per module: gofmt check, build, vet, `go test -race` (with
+CI (`.github/workflows/ci.yml`) runs from the root: gofmt check, build, vet, `go test -race` (with
 tmux installed, so fleet-run's integration tests run), staticcheck and govulncheck, plus
-shellcheck on `install.sh`; dependabot updates Go modules and actions weekly. Locally,
+shellcheck on `install.sh`; dependabot updates the Go module and actions weekly. Locally,
 `make check` (plus `make lint` if staticcheck is installed) is the verification loop.
 
 ## Architecture
@@ -114,7 +132,7 @@ three tools execute, not just what they run:
   Windows-native cache (hardlinks can't cross the WSL 9P boundary) and do the bulk work
   (`npm ci`, hardlink population via `hardlink_windows.ps1`) in native PowerShell/npm processes.
   NTFS hardlinks need one drive: `fleet-task` checks base vs worktree root, `fleet-cache` checks
-  cache root vs target (`checkSameDrive`).
+  cache root vs target (`wsl.CheckSameDrive`).
 
 ### `fleet-task`: bare-clone-once, worktree-per-ticket
 
@@ -134,7 +152,7 @@ create from `origin/<default_branch>` with `--no-track` (so a plain `git push` c
 default branch).
 
 How git is driven is behind the `gitRunner` interface (`gitrunner.go`; `linuxGit` in `git.go`,
-`windowsGit` in `gitwin.go`, PowerShell wrappers in `winpath.go`). `new`/`edit`/`rm`/`mv` go through
+`windowsGit` in `gitwin.go`, PowerShell runners in `winpath.go`, built on `internal/wsl`). `new`/`edit`/`rm`/`mv` go through
 it instead of switching on `repo.Runtime`; keep new git operations on the interface.
 
 Command flow for `fleet-task new` (`cmd_new.go`): prompt for ticket/description (bubbletea form) →
@@ -156,9 +174,10 @@ checked (`changes.go`: `checkRemovable`), unless `--force` — a `[y/N]` prompt 
 exit 2 without one; `show` and `list --status` report the same check.
 
 Subcommand flag parsing is per-subcommand `flag.FlagSet`s in `args.go` (flags and positionals may
-interleave; `--help` per command). Shared helpers (`requireNotActive`, config loading, ticket-id
-validation in `validateTicketName`, `lockAndReadTask`) are in `common.go`; the in-process pickers are `select.go` (`runSelect`)
-and `picker.go` (`pickTicket`); `textinput.go` is the ticket/description form.
+interleave; `--help` per command). fleet-task-wide helpers (`requireNotActive`, config loading,
+`lockAndReadTask`) are in `common.go`, `taskFile`/`worktreeRoot` in `paths.go`; ticket-id
+validation is `taskstate.ValidateTicket`. The pickers are `internal/picker` (`picker.Run`) and
+`picker.go` (`pickTicket`, built on it); `textinput.go` is the ticket/description form.
 
 Every mutating command (`new`/`edit`/`rm`/`mv`) holds the ticket's advisory lock (`lock.go`,
 `lockTicket`) for its whole run, taken before the state is read; `mv` locks both tickets in sorted
@@ -169,8 +188,9 @@ another fleet-task") instead of waiting. A live pid's lock is never taken over; 
 with no readable pid is once older than a minute. Takeover renames the stale file aside first, so
 two processes can't both take over.
 
-Unit-tested: config parsing, state round-trip, locking, hook discovery/ordering/env, SSH URL
-detection, arg parsing, branch templates, picker state machines, PowerShell script builders.
+Unit-tested (in `cmd/fleet-task` or the `internal/` package that owns the code): config parsing,
+state round-trip, locking, hook discovery/ordering/env, SSH URL detection, arg parsing, branch
+templates, picker state machines, PowerShell script builders.
 Tested against real temp git repos (skipped without `git`): base setup and worktree-add modes
 (`git_test.go`), the changes check and removal guard (`changes_test.go`), `new`/`mv` flows
 (`e2e_test.go`). Deliberately left to manual testing: the Windows runner (`gitwin.go`),
@@ -183,8 +203,9 @@ There is exactly one tmux session for the whole fleet (`repos.yaml`'s `tmux.sess
 it at once — the point of `fleet-run` is switching the whole runtime environment to a different
 work context, not stacking several tickets' windows side by side. Each running app is a window
 named `<repo>-<run-name>` (no ticket prefix — since only one ticket runs at a time, it doesn't need
-to be disambiguated in the name). The picker/CLI form is `repo:run-name`; `config.go`'s `validate`
-therefore rejects `:` in repo/run names and any two `<repo>-<run>` window names that collide.
+to be disambiguated in the name). The picker/CLI form is `repo:run-name`; `config.go`'s
+`validateRunConfig` (run after the shared `internal/config` load) therefore rejects `:` in repo/run
+names and any two `<repo>-<run>` window names that collide.
 
 Commands: `start`, `restart`, `stop`, `status`, `targets`, `logs`, `attach` (`cmd_*.go`; `restart`
 shares `start`'s code), plus `version`; all but `attach` and `version` take `--json`. `attach` is
@@ -194,9 +215,9 @@ Windows get `remain-on-exit on` (chained against the creation target, never the 
 crashed app is a dead pane that `status` reports, `logs` reads (`capture-pane`) and `start`
 respawns; `restart` respawns live panes too. Existing windows are always targeted by tmux window
 id (`@N`), never by name, so dots in repo/run names work; `config.go` rejects `.`/`:` in
-`tmux.session_name`. `pre-run`/`post-run` hooks (`hooks.go`) run around each window created or
-respawned. `FLEET_TMUX_SOCKET` makes every tmux call use `-L <value>`. `fleet-run start [--ticket <id>]` resolves the ticket: `--ticket`, else the only file under
-`tasks/*.json`, else a bubbletea picker when there are several (zero is an error; there's no "plain
+`tmux.session_name`. `pre-run`/`post-run` hooks (`hooks.go`, on `internal/hooks`) run around each
+window created or respawned. `FLEET_TMUX_SOCKET` makes every tmux call use `-L <value>`. `fleet-run start [--ticket <id>]` resolves the ticket: `--ticket`, else the only file under
+`tasks/*.json`, else a picker when there are several (zero is an error; there's no "plain
 checkout, no ticket" mode). "Which ticket is active" is tracked via two tmux user options set with
 `-g` (global, `activeticket.go`; not per-session, because `set-option -t =<session>` can't resolve
 a bare session target without an attached client), `@fleet_task_ticket`/`@fleet_task_description`
@@ -214,8 +235,8 @@ The decisions are pure, tested helpers: `active_logic.go` (`needsSwitch`, `shoul
 for every `tmux` invocation shape lives in `tmux_cmd.go` (argv construction only, tested; targets
 use exact-match `=<session>:<index>` forms, or window ids); `tmux_exec.go` is the thin subprocess
 wrapper. `integration_test.go` drives the real commands against a private tmux server
-(`FLEET_TMUX_SOCKET`, temp config/state; skipped without tmux). `select.go` is a deliberate
-hand-synced copy of `fleet-task`'s picker.
+(`FLEET_TMUX_SOCKET`, temp config/state; skipped without tmux). Its pickers are `internal/picker`
+(`pickers.go` wraps it as `selectOne`/`selectMulti`).
 
 ### `fleet-cache`: content-addressed hardlink cache
 
@@ -246,17 +267,20 @@ other two tools.
 Defined authoritatively in `docs/CONTRACT.md`; summarized here as a reminder of what's shared:
 
 - XDG paths, all overridable via `FLEET_CONFIG_DIR` / `FLEET_REPOS_FILE` / `FLEET_STATE_DIR` /
-  `FLEET_CACHE_DIR` env vars — `fleet-task` and `fleet-run` each re-implement the same resolution
-  order (`paths.go` in both) rather than sharing code; keep them in sync by hand if it changes.
-  This is also how tests and the E2E flow sandbox a fake environment without touching `~/.config`
-  or `~/.local/state`. `FLEET_TMUX_SOCKET` (tmux `-L`) is read by both `fleet-run` and
+  `FLEET_CACHE_DIR` env vars, resolved by `internal/xdg` for all three tools. A relative `FLEET_*`
+  value is made absolute; a relative `XDG_*_HOME` is ignored with a warning (the XDG spec requires
+  absolute paths). This is also how tests and the E2E flow sandbox a fake environment without
+  touching `~/.config` or `~/.local/state`. `FLEET_TMUX_SOCKET` (tmux `-L`) is read by both `fleet-run` and
   `fleet-task`'s active-ticket check, and sandboxes tmux the same way.
 - `repos.yaml` shape (`tmux`, `worktree_root`, `windows_*`, `defaults`, and per-repo `origin`/
-  `base`/`default_branch`/`branch_template`/`runtime`/`run`) — `fleet-task/config.go` and
-  `fleet-run/config.go` both parse this file independently and must stay structurally compatible
-  (`fleet-run` ignores `branch_template`).
-- `tasks/<ticket>.json` shape — written by `fleet-task` (`state.go`), read by both `fleet-task`
-  and `fleet-run` (`task.go`); `created_at` is a `time.Time` in both.
+  `base`/`default_branch`/`branch_template`/`runtime`/`run`) — parsed and validated once, by
+  `internal/config`, for both `fleet-task` and `fleet-run` (`fleet-run` ignores `branch_template`
+  and adds its own window-name checks).
+- `tasks/<ticket>.json` shape — `internal/taskstate`; written by `fleet-task`, read by both
+  `fleet-task` and `fleet-run`. The filename is authoritative for the ticket id in both (a
+  disagreeing `ticket` field warns and is ignored). Every write stamps `"schema_version": 1`; a file
+  without it is version 1, and a newer version is refused (list-style commands warn and skip it).
+  Bump `taskstate.SchemaVersion` only for an incompatible change.
 - Hook env vars (`FLEET_TICKET`, `FLEET_DESCRIPTION`, `FLEET_REPO`, `FLEET_BRANCH`,
   `FLEET_WORKTREE_DIR`, plus `FLEET_RUN_NAME` for run hooks) passed to executables under
   `<config dir>/hooks/{pre-create,post-create,pre-remove,post-remove,pre-run,post-run}/*`;
