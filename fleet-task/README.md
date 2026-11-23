@@ -346,8 +346,8 @@ abort `new`/`edit`/`rm`. See `../docs/CONTRACT.md` for the full contract.
 | `pre-remove`   | Before a repo's worktree is torn down (`rm`, `edit`'s remove-repo path) |
 | `post-remove`  | After a repo's worktree is torn down (`rm`, `edit`'s remove-repo path) — `FLEET_WORKTREE_DIR` points to a path that's typically already gone from disk |
 
-`pre-run`/`post-run` also exist in the contract, reserved for `fleet-run`
-around per-window launches — `fleet-task` doesn't run them.
+`pre-run`/`post-run` are run by `fleet-run` around per-window launches (see its README) —
+`fleet-task` doesn't run them.
 
 ## Config & state file locations
 

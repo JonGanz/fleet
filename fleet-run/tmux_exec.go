@@ -154,10 +154,10 @@ func wslToWindowsPath(dir string) (string, error) {
 // windowsWorktreeWinPath resolves a runtime: windows repo's worktree dir to
 // its win32 form. dir may be a symlink into /mnt/c/... (fleet-task creates
 // one at the normal WSL worktree location for runtime: windows repos, whose
-// real git worktree lives on an NTFS volume). wslpath does pure syntactic
-// path translation and does NOT resolve symlinks, so translating the
-// symlink's own (WSL ext4-side) path would map to a \\wsl.localhost\... UNC
-// path instead of the correct C:\... location. Resolving it first is a
+// real git worktree lives on an NTFS volume). wslpath may do pure
+// syntactic translation without resolving symlinks (it depends on the WSL
+// version), in which case the symlink's own (WSL ext4-side) path would map to
+// a \\wsl.localhost\... UNC path instead of the correct C:\... location. Resolving it first is a
 // no-op for any windows-runtime worktree that isn't a symlink.
 func windowsWorktreeWinPath(dir string) (string, error) {
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
